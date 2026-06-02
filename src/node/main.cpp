@@ -161,7 +161,7 @@ public:
                 sendTip(fd);
                 continue;
             }
-            if (line->starts_with("SUBMIT_BLOCK ")) {
+            if (line->rfind("SUBMIT_BLOCK ", 0) == 0) {
                 handleBlockSubmission(fd, *line);
                 continue;
             }

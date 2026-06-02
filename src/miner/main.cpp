@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::cout << *response << "\n";
-        if (!response->starts_with("ACCEPTED")) {
+        if (response->rfind("ACCEPTED", 0) != 0) {
             return 1;
         }
     }

@@ -36,14 +36,17 @@ Not implemented yet:
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build
+mkdir -p build
+cd build
+cmake ..
+cmake --build .
 ```
 
 ## Run Tests
 
 ```bash
-ctest --test-dir build --output-on-failure
+cd build
+ctest --output-on-failure
 ```
 
 ## Run Demo Node
