@@ -133,21 +133,61 @@ std::optional<Tip> getTip(int fd) {
     return tip;
 }
 
-std::string buildSubmission(const Tip& tip, const std::string& miner_address) {
-    const primechain::PrimeValue next_prime = primechain::math::nextPrimeAfter(tip.frontier);
-    std::vector<primechain::CompositeProof> proofs;
-
-    for (primechain::PrimeValue m = tip.frontier + 1; m < next_prime; ++m) {
-        auto proof = primechain::math::makeCompositeProof(m, miner_address);
-        if (proof.has_value()) {
-            proofs.push_back(*proof);
-        }
+std::vector<primechain::CompositeProof> getProofs(int fd, primechain::PrimeValue start, primechain::PrimeValue end) {
+    if (start > end) {
+        return {};
     }
 
+    std::ostringstream request;
+    request << "GET_PROOFS " << start << " " << end << "\n";
+    if (!writeAll(fd, request.str())) {
+        return {};
+    }
+
+    const auto response = readLine(fd);
+    if (!response.has_value()) {
+        return {};
+    }
+
+    std::istringstream in(*response);
+    std::string tag;
+    std::size_t count = 0;
+    in >> tag >> count;
+    if (tag != "PROOFS" || !in) {
+        std::cerr << "unexpected proof response: " << *response << "\n";
+        return {};
+    }
+
+    std::vector<primechain::CompositeProof> proofs;
+    for (std::size_t i = 0; i < count; ++i) {
+        primechain::CompositeProof proof;
+        in >> proof.m >> proof.d >> proof.e >> proof.provider_address;
+        if (!in) {
+            return {};
+        }
+        proofs.push_back(proof);
+    }
+    return proofs;
+}
+
+std::string buildSubmission(const Tip& tip, const std::string& miner_address) {
+    const primechain::PrimeValue next_prime = primechain::math::nextPrimeAfter(tip.frontier);
+
+    std::ostringstream out;
+    out << "SUBMIT_BLOCK " << next_prime << " " << miner_address << " 0";
+    out << "\n";
+    return out.str();
+}
+
+std::string buildSubmission(
+    const Tip& tip,
+    const std::string& miner_address,
+    const std::vector<primechain::CompositeProof>& proofs) {
+    const primechain::PrimeValue next_prime = primechain::math::nextPrimeAfter(tip.frontier);
     std::ostringstream out;
     out << "SUBMIT_BLOCK " << next_prime << " " << miner_address << " " << proofs.size();
     for (const auto& proof : proofs) {
-        out << " " << proof.m << " " << proof.d << " " << proof.e;
+        out << " " << proof.m << " " << proof.d << " " << proof.e << " " << proof.provider_address;
     }
     out << "\n";
     return out.str();
@@ -178,7 +218,16 @@ int main(int argc, char** argv) {
                   << " from frontier " << tip->frontier
                   << " to prime " << next_prime << "\n";
 
-        const std::string submission = buildSubmission(*tip, miner_address);
+        const auto proofs = getProofs(socket->fd(), tip->frontier + 1, next_prime - 1);
+        if (proofs.size() != static_cast<std::size_t>(next_prime - tip->frontier - 1)) {
+            std::cerr << "missing pooled proofs for interval "
+                      << (tip->frontier + 1) << ".." << (next_prime - 1)
+                      << " got " << proofs.size()
+                      << " expected " << (next_prime - tip->frontier - 1) << "\n";
+            return 1;
+        }
+
+        const std::string submission = buildSubmission(*tip, miner_address, proofs);
         if (!writeAll(socket->fd(), submission)) {
             std::cerr << "could not submit block\n";
             return 1;

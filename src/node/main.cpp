@@ -3,10 +3,12 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -17,12 +19,14 @@
 
 #include "primechain/core/consensus.hpp"
 #include "primechain/crypto/hash.hpp"
+#include "primechain/math/number_theory.hpp"
 #include "primechain/types.hpp"
 
 namespace {
 
 constexpr int kDefaultPort = 18888;
 constexpr const char* kDefaultDataDir = "data";
+constexpr primechain::PrimeValue kWorkWindow = 256;
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -158,11 +162,23 @@ primechain::Block parseSubmittedBlock(const std::string& line, const primechain:
     for (std::size_t i = 0; i < proof_count; ++i) {
         primechain::CompositeProof proof;
         in >> proof.m >> proof.d >> proof.e;
-        proof.provider_address = miner_address;
+        if (!(in >> proof.provider_address)) {
+            proof.provider_address = miner_address;
+        }
         block.composite_proofs.push_back(proof);
     }
 
     return block;
+}
+
+std::string serializeBlockSubmission(const primechain::Block& block) {
+    std::ostringstream out;
+    out << "SUBMIT_BLOCK " << block.header.prime_value << " "
+        << block.header.miner_address << " " << block.composite_proofs.size();
+    for (const auto& proof : block.composite_proofs) {
+        out << " " << proof.m << " " << proof.d << " " << proof.e << " " << proof.provider_address;
+    }
+    return out.str();
 }
 
 class PrimeNode {
@@ -214,6 +230,18 @@ public:
                 sendTip(fd);
                 continue;
             }
+            if (*line == "GET_WORK") {
+                sendWork(fd);
+                continue;
+            }
+            if (line->rfind("GET_PROOFS ", 0) == 0) {
+                sendProofs(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_PROOF ", 0) == 0) {
+                handleProofSubmission(fd, *line);
+                continue;
+            }
             if (line->rfind("SUBMIT_BLOCK ", 0) == 0) {
                 handleBlockSubmission(fd, *line);
                 continue;
@@ -234,6 +262,85 @@ private:
         writeAll(fd, out.str());
     }
 
+    primechain::PrimeValue cursor() const {
+        primechain::PrimeValue m = state_.frontier_prime + 1;
+        while (proof_pool_.find(m) != proof_pool_.end()) {
+            ++m;
+        }
+        return m;
+    }
+
+    void sendWork(int fd) const {
+        const primechain::PrimeValue current_cursor = cursor();
+        std::ostringstream out;
+        out << "WORK " << state_.height << " " << state_.frontier_prime << " "
+            << current_cursor << " " << (current_cursor + kWorkWindow) << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void sendProofs(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue start = 0;
+        primechain::PrimeValue end = 0;
+        in >> command >> start >> end;
+        if (!in || start > end) {
+            writeAll(fd, "ERROR invalid GET_PROOFS\n");
+            return;
+        }
+
+        std::vector<primechain::CompositeProof> proofs;
+        for (primechain::PrimeValue m = start; m <= end; ++m) {
+            const auto found = proof_pool_.find(m);
+            if (found != proof_pool_.end()) {
+                proofs.push_back(found->second);
+            }
+        }
+
+        std::ostringstream out;
+        out << "PROOFS " << proofs.size();
+        for (const auto& proof : proofs) {
+            out << " " << proof.m << " " << proof.d << " " << proof.e << " " << proof.provider_address;
+        }
+        out << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void handleProofSubmission(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::CompositeProof proof;
+        in >> command >> proof.m >> proof.d >> proof.e >> proof.provider_address;
+        if (!in) {
+            writeAll(fd, "REJECTED_PROOF malformed proof command\n");
+            return;
+        }
+        if (proof.m <= state_.frontier_prime) {
+            writeAll(fd, "REJECTED_PROOF proof is at or below frontier\n");
+            return;
+        }
+        if (!primechain::math::verifyCompositeProof(proof)) {
+            writeAll(fd, "REJECTED_PROOF invalid composite proof\n");
+            return;
+        }
+
+        const auto existing = proof_pool_.find(proof.m);
+        if (existing != proof_pool_.end()) {
+            writeAll(fd, "KNOWN_PROOF m=" + std::to_string(proof.m)
+                         + " provider=" + existing->second.provider_address + "\n");
+            return;
+        }
+
+        proof_pool_.emplace(proof.m, proof);
+        std::ostringstream out;
+        out << "ACCEPTED_PROOF m=" << proof.m
+            << " provider=" << proof.provider_address
+            << " cursor=" << cursor() << "\n";
+        writeAll(fd, out.str());
+        std::cout << "accepted composite proof m " << proof.m
+                  << " provider " << proof.provider_address << "\n";
+    }
+
     void handleBlockSubmission(int fd, const std::string& line) {
         primechain::Block block = parseSubmittedBlock(line, state_);
         std::string error;
@@ -241,13 +348,20 @@ private:
             writeAll(fd, "REJECTED " + error + "\n");
             return;
         }
+        if (!blockUsesPooledProofs(block, error)) {
+            writeAll(fd, "REJECTED " + error + "\n");
+            return;
+        }
 
-        if (!appendAcceptedBlock(line)) {
+        const std::string persisted_line = serializeBlockSubmission(block);
+        if (!appendAcceptedBlock(persisted_line)) {
             writeAll(fd, "REJECTED could not persist block\n");
             return;
         }
 
+        const auto contributor_counts = countContributors(block);
         state_ = consensus_.applyBlock(block, state_);
+        pruneProofPool();
         std::ostringstream out;
         out << "ACCEPTED height=" << state_.height
             << " prime=" << state_.frontier_prime
@@ -257,7 +371,45 @@ private:
 
         std::cout << "accepted block height " << state_.height
                   << " prime " << state_.frontier_prime
-                  << " miner " << block.header.miner_address << "\n";
+                  << " finder " << block.header.miner_address << "\n";
+        for (const auto& [provider, count] : contributor_counts) {
+            std::cout << "  contributor " << provider << " proofs " << count << "\n";
+        }
+    }
+
+    bool blockUsesPooledProofs(const primechain::Block& block, std::string& error) const {
+        for (const auto& proof : block.composite_proofs) {
+            const auto found = proof_pool_.find(proof.m);
+            if (found == proof_pool_.end()) {
+                error = "block includes proof not previously submitted to pool for " + std::to_string(proof.m);
+                return false;
+            }
+            const auto& pooled = found->second;
+            if (pooled.d != proof.d || pooled.e != proof.e || pooled.provider_address != proof.provider_address) {
+                error = "block proof does not match pooled proof for " + std::to_string(proof.m);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::map<std::string, std::size_t> countContributors(const primechain::Block& block) const {
+        std::map<std::string, std::size_t> counts;
+        for (const auto& proof : block.composite_proofs) {
+            ++counts[proof.provider_address];
+        }
+        return counts;
+    }
+
+    void pruneProofPool() {
+        auto it = proof_pool_.begin();
+        while (it != proof_pool_.end()) {
+            if (it->first <= state_.frontier_prime) {
+                it = proof_pool_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     bool appendAcceptedBlock(const std::string& line) const {
@@ -271,6 +423,7 @@ private:
 
     primechain::core::ConsensusEngine consensus_;
     primechain::ChainState state_;
+    std::map<primechain::PrimeValue, primechain::CompositeProof> proof_pool_;
     std::string data_dir_;
     std::string chain_log_path_;
 };

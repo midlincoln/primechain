@@ -88,6 +88,47 @@ Example accepted sequence from genesis:
 2 -> 3 -> 5 -> 7 -> 11 -> 13 -> 17 -> 19 -> 23 -> 29 -> 31
 ```
 
+## Run Cooperative Mining
+
+The cooperative test flow is:
+
+```text
+composite miners submit composite proofs first
+block miner closes blocks using pooled proofs
+node logs proof contributors per accepted block
+```
+
+Terminal 1:
+
+```bash
+./build/primechain-node 18888 ./coop-data
+```
+
+Terminal 2:
+
+```bash
+./build/primechain-composite-miner 127.0.0.1 18888 composite-a 1 2 0
+```
+
+Terminal 3:
+
+```bash
+./build/primechain-composite-miner 127.0.0.1 18888 composite-b 1 2 1
+```
+
+Terminal 4:
+
+```bash
+./build/primechain-miner 127.0.0.1 18888 10 block-miner
+```
+
+The final two numeric arguments to `primechain-composite-miner` are optional sharding controls:
+
+- `2`: number of shards
+- `0` or `1`: shard handled by that miner
+
+This lets multiple composite miners split a work window for testing.
+
 ## Estimate Long-Run Chain Scale
 
 The estimator approximates how large the frontier prime becomes after a given number of years and block rate:

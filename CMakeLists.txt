@@ -45,6 +45,15 @@ target_link_libraries(primechain-miner
         primechain_core
 )
 
+add_executable(primechain-composite-miner
+    src/miner/composite_main.cpp
+)
+
+target_link_libraries(primechain-composite-miner
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-estimator
     src/tools/estimator.cpp
 )
