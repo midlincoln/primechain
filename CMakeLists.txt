@@ -45,6 +45,10 @@ target_link_libraries(primechain-miner
         primechain_core
 )
 
+add_executable(primechain-estimator
+    src/tools/estimator.cpp
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )

@@ -80,6 +80,23 @@ Example accepted sequence from genesis:
 2 -> 3 -> 5 -> 7 -> 11 -> 13 -> 17 -> 19 -> 23 -> 29 -> 31
 ```
 
+## Estimate Long-Run Chain Scale
+
+The estimator approximates how large the frontier prime becomes after a given number of years and block rate:
+
+```bash
+./build/primechain-estimator 10 1
+```
+
+This means 10 years at 1 block per second.
+
+More examples:
+
+```bash
+./build/primechain-estimator 10 0.0166666667
+./build/primechain-estimator 10 1000000
+```
+
 ## Development Roadmap
 
 1. Replace development hash with SHA3-256.
