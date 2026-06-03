@@ -222,6 +222,10 @@ public:
         }
     }
 
+    const primechain::ChainState& state() const {
+        return state_;
+    }
+
 private:
     void sendTip(int fd) const {
         std::ostringstream out;
@@ -291,7 +295,8 @@ int main(int argc, char** argv) {
 
     std::cout << "Prime Mining TCP node listening on 127.0.0.1:" << port << "\n";
     std::cout << "data directory: " << data_dir << "\n";
-    std::cout << "genesis frontier prime: 2\n";
+    std::cout << "current height: " << node.state().height << "\n";
+    std::cout << "current frontier prime: " << node.state().frontier_prime << "\n";
 
     while (g_running) {
         fd_set read_fds;
