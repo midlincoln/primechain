@@ -1,14 +1,17 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "primechain/core/consensus.hpp"
@@ -18,6 +21,7 @@
 namespace {
 
 constexpr int kDefaultPort = 18888;
+constexpr const char* kDefaultDataDir = "data";
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -88,6 +92,13 @@ std::optional<Socket> listenOnPort(int port) {
     return Socket(fd);
 }
 
+bool ensureDirectory(const std::string& path) {
+    if (mkdir(path.c_str(), 0755) == 0) {
+        return true;
+    }
+    return errno == EEXIST;
+}
+
 bool writeAll(int fd, const std::string& message) {
     const char* cursor = message.data();
     std::size_t remaining = message.size();
@@ -155,6 +166,47 @@ primechain::Block parseSubmittedBlock(const std::string& line, const primechain:
 
 class PrimeNode {
 public:
+    explicit PrimeNode(std::string data_dir)
+        : data_dir_(std::move(data_dir)),
+          chain_log_path_(data_dir_ + "/chain.log") {}
+
+    bool loadChainLog() {
+        if (!ensureDirectory(data_dir_)) {
+            std::cerr << "could not create data directory: " << data_dir_ << "\n";
+            return false;
+        }
+
+        std::ifstream in(chain_log_path_);
+        if (!in) {
+            return true;
+        }
+
+        std::string line;
+        std::uint64_t replayed = 0;
+        while (std::getline(in, line)) {
+            if (line.empty()) {
+                continue;
+            }
+
+            primechain::Block block = parseSubmittedBlock(line, state_);
+            std::string error;
+            if (!consensus_.validateBlock(block, state_, error)) {
+                std::cerr << "invalid persisted block at replay height "
+                          << (state_.height + 1) << ": " << error << "\n";
+                return false;
+            }
+
+            state_ = consensus_.applyBlock(block, state_);
+            ++replayed;
+        }
+
+        if (replayed > 0) {
+            std::cout << "restored " << replayed << " blocks from " << chain_log_path_
+                      << "; frontier prime " << state_.frontier_prime << "\n";
+        }
+        return true;
+    }
+
     void handleClient(int fd) {
         while (auto line = readLine(fd)) {
             if (*line == "GET_TIP") {
@@ -185,6 +237,11 @@ private:
             return;
         }
 
+        if (!appendAcceptedBlock(line)) {
+            writeAll(fd, "REJECTED could not persist block\n");
+            return;
+        }
+
         state_ = consensus_.applyBlock(block, state_);
         std::ostringstream out;
         out << "ACCEPTED height=" << state_.height
@@ -198,8 +255,19 @@ private:
                   << " miner " << block.header.miner_address << "\n";
     }
 
+    bool appendAcceptedBlock(const std::string& line) const {
+        std::ofstream out(chain_log_path_, std::ios::app);
+        if (!out) {
+            return false;
+        }
+        out << line << "\n";
+        return static_cast<bool>(out);
+    }
+
     primechain::core::ConsensusEngine consensus_;
     primechain::ChainState state_;
+    std::string data_dir_;
+    std::string chain_log_path_;
 };
 
 } // namespace
@@ -209,13 +277,19 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, handleSignal);
 
     const int port = argc > 1 ? std::stoi(argv[1]) : kDefaultPort;
+    const std::string data_dir = argc > 2 ? argv[2] : kDefaultDataDir;
     auto server = listenOnPort(port);
     if (!server.has_value()) {
         return 1;
     }
 
-    PrimeNode node;
+    PrimeNode node(data_dir);
+    if (!node.loadChainLog()) {
+        return 1;
+    }
+
     std::cout << "Prime Mining TCP node listening on 127.0.0.1:" << port << "\n";
+    std::cout << "data directory: " << data_dir << "\n";
     std::cout << "genesis frontier prime: 2\n";
 
     while (g_running) {

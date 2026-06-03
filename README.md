@@ -8,13 +8,14 @@ The current code is a small C++ consensus prototype. It validates local blocks t
 
 Implemented:
 
-- CMake C++20 project structure
+- CMake C++17 project structure
 - core protocol data types
 - development-only deterministic block hash
 - small-integer primality checks
 - composite proof generation and verification
 - TCP node listening on localhost
 - terminal miner that submits blocks to the TCP node
+- append-only disk chain log for accepted test blocks
 - consensus validation for:
   - previous hash linkage
   - next-prime rule
@@ -31,7 +32,6 @@ Not implemented yet:
 - wallet state and sparse fractional balances
 - Merkle state commitments
 - P2P networking
-- miner process
 
 ## Build
 
@@ -55,7 +55,15 @@ ctest --output-on-failure
 ./build/primechain-node
 ```
 
-Expected behavior: the node starts from frontier prime `2` and listens on `127.0.0.1:18888`.
+Expected behavior: the node starts from frontier prime `2`, listens on `127.0.0.1:18888`, and stores accepted blocks in `data/chain.log`.
+
+To choose a data directory:
+
+```bash
+./build/primechain-node 18888 ./test-data
+```
+
+On restart, the node replays `chain.log` from the data directory and restores the latest frontier prime.
 
 ## Run A Miner
 
@@ -104,7 +112,7 @@ More examples:
 3. Add Merkle roots for composite proofs and transactions.
 4. Implement commit-reveal objects and validation.
 5. Add sparse wallet state and fractional transfer validation.
-6. Add persistent chain storage so the TCP node survives restarts.
+6. Add cooperative proof pool and separate composite miner.
 7. Add real primality certificates.
 8. Add multi-peer networking beyond localhost miner submissions.
 
