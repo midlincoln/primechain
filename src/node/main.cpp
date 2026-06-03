@@ -10,6 +10,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -293,6 +294,26 @@ int main(int argc, char** argv) {
     std::cout << "genesis frontier prime: 2\n";
 
     while (g_running) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(server->fd(), &read_fds);
+
+        timeval timeout{};
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        const int ready = select(server->fd() + 1, &read_fds, nullptr, nullptr, &timeout);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "select failed: " << std::strerror(errno) << "\n";
+            break;
+        }
+        if (ready == 0) {
+            continue;
+        }
+
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
         const int client_fd = accept(server->fd(), reinterpret_cast<sockaddr*>(&client_addr), &client_len);
