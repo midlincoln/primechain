@@ -129,6 +129,31 @@ The final two numeric arguments to `primechain-composite-miner` are optional sha
 
 This lets multiple composite miners split a work window for testing.
 
+## Emerging Sequential Arithmetic Chain
+
+The current implementation still groups composite proofs into prime-to-prime blocks. The proposed next architecture treats every classified integer as a permanent sequential blockchain record:
+
+```text
+7  PRIME
+8  COMPOSITE: 2 * 4
+9  COMPOSITE: 3 * 3
+10 COMPOSITE: 2 * 5
+11 PRIME: Pratt certificate
+```
+
+Under this model:
+
+- a composite proof acts like a mini-block that advances the integer frontier,
+- a Pratt certificate records a prime checkpoint,
+- stored composite records form reusable factor-decomposition trees,
+- the stored factorization of `g - 1` helps miners construct a Pratt certificate for frontier integer `g`,
+- miners may use any search algorithm, while nodes independently verify submitted proofs,
+- a controlled multi-node testnet can initially use 2/3 validator voting to finalize competing valid submissions.
+
+This architecture is still under design. Important unresolved questions include validator membership, deterministic candidate selection, Sybil resistance, spam limits, reward attribution, and multi-node synchronization.
+
+See [docs/development-log.md](docs/development-log.md) for the current design discussion and decisions.
+
 ## Estimate Long-Run Chain Scale
 
 The estimator approximates how large the frontier prime becomes after a given number of years and block rate:
@@ -148,13 +173,24 @@ More examples:
 
 ## Development Roadmap
 
-1. Replace development hash with SHA3-256.
-2. Add canonical serialization for every consensus object.
-3. Add Merkle roots for composite proofs and transactions.
-4. Implement commit-reveal objects and validation.
-5. Add sparse wallet state and fractional transfer validation.
-6. Add cooperative proof pool and separate composite miner.
-7. Add real primality certificates.
-8. Add multi-peer networking beyond localhost miner submissions.
+Completed prototype milestones:
+
+- TCP node and block miner
+- persistent prime-block chain log
+- cooperative proof pool
+- separate sharded composite miner
+- contributor logging
+- long-run chain scale estimator
+
+Next milestones:
+
+1. Specify canonical `CompositeRecord`, `PrattPrimeRecord`, `ValidatorVote`, and `FinalizedRecord` formats.
+2. Persist one finalized classification record per integer.
+3. Add an indexed factor database and recursive factorization reconstruction.
+4. Implement small-number Pratt certificate generation and verification.
+5. Add strict message, connection, proof-window, and pool-size limits.
+6. Implement three-node synchronization and simulated 2/3 voting.
+7. Add commit-reveal and contributor authentication.
+8. Later add wallets, rewards, production hashing, and post-quantum signatures.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
