@@ -159,12 +159,25 @@ primechain::Block parseSubmittedBlock(const std::string& line, const primechain:
     block.header.miner_address = miner_address;
     block.prime_certificate.data = {'T', 'C', 'P', '-', 'M', 'V', 'P'};
 
+    std::vector<std::string> proof_fields;
+    std::string field;
+    while (in >> field) {
+        proof_fields.push_back(field);
+    }
+
+    const bool has_providers = proof_fields.size() == proof_count * 4;
+    if (!has_providers && proof_fields.size() != proof_count * 3) {
+        return block;
+    }
+
+    const std::size_t fields_per_proof = has_providers ? 4 : 3;
     for (std::size_t i = 0; i < proof_count; ++i) {
         primechain::CompositeProof proof;
-        in >> proof.m >> proof.d >> proof.e;
-        if (!(in >> proof.provider_address)) {
-            proof.provider_address = miner_address;
-        }
+        const std::size_t offset = i * fields_per_proof;
+        proof.m = std::stoull(proof_fields[offset]);
+        proof.d = std::stoull(proof_fields[offset + 1]);
+        proof.e = std::stoull(proof_fields[offset + 2]);
+        proof.provider_address = has_providers ? proof_fields[offset + 3] : miner_address;
         block.composite_proofs.push_back(proof);
     }
 
