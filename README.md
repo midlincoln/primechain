@@ -372,6 +372,16 @@ Bootstrap-download records into a fresh local store:
 ./build/primechain-store-inspect ./data/downloaded-500.dat
 ```
 
+Download records after a TCP node advanced its own store:
+
+```bash
+rm -f ./data/tcp-node-copy.dat
+./build/primechain-sync-download 127.0.0.1 18889 2 20 ./data/tcp-node-copy.dat
+./build/primechain-wallet balance ./data/tcp-node-copy.dat ./wallets/alice.wallet
+```
+
+This is the current node-to-node replay test: the second store is reconstructed only from downloaded records, then wallet balances are derived by replaying those records locally.
+
 Resume download in batches:
 
 ```bash
