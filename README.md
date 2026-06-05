@@ -221,17 +221,21 @@ It reports records per second, synthetic transactions per second, prime/composit
 This local tool writes one arithmetic record for every integer from `2` through the requested limit. Composites get factor proofs and full recursive factorizations. Primes get small-number Pratt proofs using the stored factorization of `p - 1`.
 
 ```bash
-./build/primechain-sequential 500 ./data/sequential-500.log
+./build/primechain-sequential 500 ./data/sequential-500.log ./data/sequential-500.dat
 ```
 
 Expected summary:
 
 ```text
 sequential chain complete
+output_path: ./data/sequential-500.log
+record_store_path: ./data/sequential-500.dat
 limit: 500
 prime_records: 95
 composite_records: 404
 ```
+
+The `.log` file is human-readable. The `.dat` file is the binary finalized-record store used by `SequentialNode` replay.
 
 ## Development Roadmap
 
