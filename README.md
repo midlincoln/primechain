@@ -268,6 +268,15 @@ Inspect the TCP mempool:
 ./build/primechain-sync-query 127.0.0.1 18889 GET_MEMPOOL
 ```
 
+Generate a fresh chain that pulls TCP mempool transactions into record `4`:
+
+```bash
+./build/primechain-sequential 20 ./data/mempool-chain.log ./data/mempool-chain.dat \
+  --prime-miner pcdev1_373830813f57da0581a814963cf165b3 \
+  --composite-miner pcdev1_composite_miner \
+  --mempool 127.0.0.1 18889 4
+```
+
 Expected summary:
 
 ```text

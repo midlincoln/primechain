@@ -1,3 +1,5 @@
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -6,7 +8,10 @@
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
@@ -32,6 +37,10 @@ struct Options {
     primechain::PrimeValue transfer_prime{0};
     std::uint64_t transfer_amount{0};
     primechain::PrimeValue transfer_target_integer{0};
+    bool has_mempool{false};
+    std::string mempool_host;
+    int mempool_port{0};
+    primechain::PrimeValue mempool_target_integer{0};
 };
 
 struct DevWallet {
@@ -55,6 +64,39 @@ public:
 
 private:
     std::map<primechain::PrimeValue, primechain::CompositeProof> proofs_;
+};
+
+class Socket {
+public:
+    explicit Socket(int fd = -1) : fd_(fd) {}
+    ~Socket() {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    Socket(Socket&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+
+    Socket& operator=(Socket&& other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0) {
+                close(fd_);
+            }
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    int fd() const { return fd_; }
+
+private:
+    int fd_{-1};
 };
 
 bool ensureParentDataDir(const std::string& path) {
@@ -137,9 +179,137 @@ bool loadDevWallet(const std::string& path, DevWallet& wallet) {
            wallet.address == primechain::protocol::developmentAddressFromPublicKey(wallet.public_key);
 }
 
+std::optional<Socket> connectToServer(const std::string& host, int port) {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "socket failed: " << std::strerror(errno) << "\n";
+        return std::nullopt;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "invalid IPv4 address: " << host << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::cerr << "connect failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    return Socket(fd);
+}
+
+bool writeAll(int fd, const std::string& message) {
+    const char* cursor = message.data();
+    std::size_t remaining = message.size();
+    while (remaining > 0) {
+        const ssize_t sent = send(fd, cursor, remaining, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        cursor += sent;
+        remaining -= static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+std::optional<std::string> readLine(int fd) {
+    std::string line;
+    char ch = '\0';
+    while (true) {
+        const ssize_t received = recv(fd, &ch, 1, 0);
+        if (received == 0) {
+            return std::nullopt;
+        }
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return std::nullopt;
+        }
+        if (ch == '\n') {
+            return line;
+        }
+        if (line.size() > 1'000'000) {
+            return std::nullopt;
+        }
+        line.push_back(ch);
+    }
+}
+
+std::optional<std::vector<primechain::protocol::TransactionV0>> fetchMempool(
+    const std::string& host,
+    int port) {
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        return std::nullopt;
+    }
+    if (!writeAll(socket->fd(), "GET_MEMPOOL\n")) {
+        std::cerr << "could not request mempool\n";
+        return std::nullopt;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        std::cerr << "missing mempool header\n";
+        return std::nullopt;
+    }
+    std::istringstream header_in(*header);
+    std::string tag;
+    std::uint64_t expected_count = 0;
+    header_in >> tag >> expected_count;
+    if (!header_in || tag != "MEMPOOL") {
+        std::cerr << "invalid mempool header: " << *header << "\n";
+        return std::nullopt;
+    }
+
+    std::vector<primechain::protocol::TransactionV0> transactions;
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_MEMPOOL") {
+            break;
+        }
+        std::istringstream in(*line);
+        std::string tx_tag;
+        std::string tx_hash_hex;
+        std::uint64_t payload_size = 0;
+        std::string payload_hex;
+        in >> tx_tag >> tx_hash_hex >> payload_size >> payload_hex;
+        if (!in || tx_tag != "TX") {
+            std::cerr << "invalid mempool tx line\n";
+            return std::nullopt;
+        }
+        const auto payload = hexToBytes(payload_hex);
+        if (payload.size() != payload_size) {
+            std::cerr << "mempool tx payload size mismatch\n";
+            return std::nullopt;
+        }
+        std::string error;
+        const auto tx = primechain::protocol::deserializeTransaction(payload, error);
+        if (!tx.has_value()) {
+            std::cerr << "could not deserialize mempool tx: " << error << "\n";
+            return std::nullopt;
+        }
+        if (!primechain::protocol::verifyDevelopmentTransactionSignature(*tx)) {
+            std::cerr << "invalid mempool tx signature\n";
+            return std::nullopt;
+        }
+        transactions.push_back(*tx);
+    }
+    if (transactions.size() != expected_count) {
+        std::cerr << "mempool count mismatch\n";
+        return std::nullopt;
+    }
+    return transactions;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [limit] [text_log_path] [record_store_path] [--prime-miner address] [--composite-miner address]\n"
               << "       [--transfer sender.wallet receiver_address prime amount target_integer]\n"
+              << "       [--mempool host port target_integer]\n"
               << "example:\n"
               << "  " << argv0 << " 500 ./data/sequential-500.log ./data/sequential-500.dat --prime-miner pcdev1_...\n";
 }
@@ -176,6 +346,14 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.transfer_prime = std::stoull(argv[index++]);
             options.transfer_amount = std::stoull(argv[index++]);
             options.transfer_target_integer = std::stoull(argv[index++]);
+        } else if (flag == "--mempool") {
+            if (index + 1 >= argc) {
+                return std::nullopt;
+            }
+            options.has_mempool = true;
+            options.mempool_host = value;
+            options.mempool_port = std::stoi(argv[index++]);
+            options.mempool_target_integer = std::stoull(argv[index++]);
         } else {
             return std::nullopt;
         }
@@ -259,7 +437,11 @@ int main(int argc, char** argv) {
              options.transfer_amount == 0 ||
              options.transfer_prime < 2 ||
              options.transfer_target_integer < 3 ||
-             options.transfer_target_integer > options.limit))) {
+             options.transfer_target_integer > options.limit)) ||
+        (options.has_mempool &&
+            (options.mempool_port <= 0 ||
+             options.mempool_target_integer < 3 ||
+             options.mempool_target_integer > options.limit))) {
         printUsage(argv[0]);
         return 1;
     }
@@ -267,6 +449,14 @@ int main(int argc, char** argv) {
     if (options.has_transfer && !loadDevWallet(options.transfer_sender_wallet, transfer_sender)) {
         std::cerr << "could not load transfer sender wallet\n";
         return 1;
+    }
+    std::vector<primechain::protocol::TransactionV0> mempool_transactions;
+    if (options.has_mempool) {
+        const auto fetched = fetchMempool(options.mempool_host, options.mempool_port);
+        if (!fetched.has_value()) {
+            return 1;
+        }
+        mempool_transactions = *fetched;
     }
     if (!ensureParentDataDir(options.output_path) || !ensureParentDataDir(options.record_store_path)) {
         std::cerr << "could not create parent data directory\n";
@@ -316,6 +506,13 @@ int main(int argc, char** argv) {
                         options.transfer_amount));
                     primechain::protocol::applyDevelopmentFinalization(record);
                 }
+                if (options.has_mempool && n == options.mempool_target_integer) {
+                    record.transactions.insert(
+                        record.transactions.end(),
+                        mempool_transactions.begin(),
+                        mempool_transactions.end());
+                    primechain::protocol::applyDevelopmentFinalization(record);
+                }
                 error.clear();
                 if (!node.appendPrime(record, error)) {
                     std::cerr << "could not append prime record for " << n << ": " << error << "\n";
@@ -342,6 +539,13 @@ int main(int argc, char** argv) {
                 options.transfer_receiver_address,
                 options.transfer_prime,
                 options.transfer_amount));
+            primechain::protocol::applyDevelopmentFinalization(record);
+        }
+        if (options.has_mempool && n == options.mempool_target_integer) {
+            record.transactions.insert(
+                record.transactions.end(),
+                mempool_transactions.begin(),
+                mempool_transactions.end());
             primechain::protocol::applyDevelopmentFinalization(record);
         }
         error.clear();
@@ -393,6 +597,11 @@ int main(int argc, char** argv) {
         std::cout << "transfer_prime: " << options.transfer_prime << "\n";
         std::cout << "transfer_amount: " << options.transfer_amount << "\n";
         std::cout << "transfer_target_integer: " << options.transfer_target_integer << "\n";
+    }
+    if (options.has_mempool) {
+        std::cout << "mempool_source: " << options.mempool_host << ":" << options.mempool_port << "\n";
+        std::cout << "mempool_transactions: " << mempool_transactions.size() << "\n";
+        std::cout << "mempool_target_integer: " << options.mempool_target_integer << "\n";
     }
     std::cout << "prime_records: " << prime_count << "\n";
     std::cout << "composite_records: " << composite_count << "\n";
