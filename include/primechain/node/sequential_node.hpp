@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
@@ -17,6 +20,8 @@ struct SequentialNodeStatus {
     Hash256 latest_record_hash{};
 };
 
+constexpr std::uint64_t kAssetMicroUnits = 1000000;
+
 class SequentialNode {
 public:
     explicit SequentialNode(std::string record_store_path);
@@ -28,6 +33,8 @@ public:
     bool appendPrime(const protocol::PrimeRecordV0& record, std::string& error);
 
     const SequentialNodeStatus& status() const { return status_; }
+    std::uint64_t balanceMicroUnits(const Address& address, PrimeValue prime) const;
+    std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
 
 private:
     bool validateCommon(
@@ -35,9 +42,15 @@ private:
         PrimeValue integer,
         const Hash256& previous_record_hash,
         std::string& error) const;
+    bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
+    bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);
+    void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
 
     storage::RecordStore store_;
     SequentialNodeStatus status_;
+    std::map<std::pair<Address, PrimeValue>, std::uint64_t> balances_;
+    std::map<PrimeValue, std::uint64_t> total_supply_;
+    std::vector<Address> pending_composite_providers_;
 };
 
 protocol::PrimeRecordV0 makeGenesisPrimeRecordV0();

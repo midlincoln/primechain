@@ -332,8 +332,11 @@ During replay, `SequentialNode` currently verifies:
 - record payloads link to the previous record hash
 - development validator votes point to the candidate record hash
 - development validator signatures match the deterministic dev signature rule
+- mining rewards reconstruct into the in-memory ledger state
 
 The current finalization rule is development-only: `fixed-2-of-3-dev`. If this format changes, regenerate old local `.dat` stores with `primechain-sequential`.
+
+Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half. Non-empty transaction batches are rejected until full transaction bodies and wallet transfer rules are implemented.
 
 This is the first local peer-sync API. It is still plain TCP and development-only.
 

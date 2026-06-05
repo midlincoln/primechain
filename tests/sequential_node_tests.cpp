@@ -157,6 +157,29 @@ int main(int argc, char** argv) {
     if (!expect(reloaded.status().frontier_integer == 5, "reloaded frontier 5")) {
         return 1;
     }
+    if (!expect(reloaded.totalSupplyMicroUnits(3) == primechain::node::kAssetMicroUnits, "prime 3 supply conserved")) {
+        return 1;
+    }
+    if (!expect(reloaded.balanceMicroUnits("pcdev1_prime_miner", 3) == primechain::node::kAssetMicroUnits, "prime 3 reward to prime miner")) {
+        return 1;
+    }
+    if (!expect(reloaded.totalSupplyMicroUnits(5) == primechain::node::kAssetMicroUnits, "prime 5 supply conserved")) {
+        return 1;
+    }
+    if (!expect(reloaded.balanceMicroUnits("pcdev1_prime_miner", 5) == 500000, "prime 5 reward to prime miner")) {
+        return 1;
+    }
+    if (!expect(reloaded.balanceMicroUnits("pcdev1_composite_miner", 5) == 500000, "prime 5 reward to composite miner")) {
+        return 1;
+    }
+
+    auto tx_record = makeCompositeRecord(node.status(), *proof6);
+    tx_record.tx_batch.transaction_count = 1;
+    primechain::protocol::applyDevelopmentFinalization(tx_record);
+    error.clear();
+    if (!expect(!node.appendComposite(tx_record, error), "reject non-empty tx batch until transaction application exists")) {
+        return 1;
+    }
 
     const std::string bad_path = std::string(argv[1]) + ".bad-composite";
     std::remove(bad_path.c_str());
