@@ -34,6 +34,64 @@ CompositeProof toLegacyCompositeProof(const protocol::CompositeProofV0& proof) {
     return out;
 }
 
+bool validateStoredCompositePayload(
+    const storage::StoredRecord& stored,
+    const Hash256& expected_previous_hash,
+    std::string& error) {
+    const auto decoded = protocol::deserializeCompositeRecord(stored.payload, error);
+    if (!decoded.has_value()) {
+        return false;
+    }
+    if (decoded->height != stored.height || decoded->integer != stored.integer) {
+        error = "composite payload metadata does not match store envelope";
+        return false;
+    }
+    if (decoded->previous_record_hash != expected_previous_hash) {
+        error = "composite payload previous hash mismatch";
+        return false;
+    }
+    if (decoded->proof.g != decoded->integer) {
+        error = "composite payload proof integer mismatch";
+        return false;
+    }
+    if (!protocol::isDevelopmentAddress(decoded->proof.provider_address)) {
+        error = "invalid composite payload provider address";
+        return false;
+    }
+    if (!math::verifyCompositeProof(toLegacyCompositeProof(decoded->proof))) {
+        error = "invalid composite payload proof";
+        return false;
+    }
+    return true;
+}
+
+bool validateStoredPrimePayload(
+    const storage::StoredRecord& stored,
+    const Hash256& expected_previous_hash,
+    std::string& error) {
+    const auto decoded = protocol::deserializePrimeRecord(stored.payload, error);
+    if (!decoded.has_value()) {
+        return false;
+    }
+    if (decoded->height != stored.height || decoded->integer != stored.integer) {
+        error = "prime payload metadata does not match store envelope";
+        return false;
+    }
+    if (decoded->previous_record_hash != expected_previous_hash) {
+        error = "prime payload previous hash mismatch";
+        return false;
+    }
+    if (decoded->proof.p != decoded->integer) {
+        error = "prime payload proof integer mismatch";
+        return false;
+    }
+    if (!protocol::isDevelopmentAddress(decoded->proof.provider_address)) {
+        error = "invalid prime payload provider address";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 SequentialNode::SequentialNode(std::string record_store_path)
@@ -52,6 +110,7 @@ bool SequentialNode::load(std::string& error) {
 
     std::uint64_t expected_height = 0;
     PrimeValue expected_integer = 2;
+    Hash256 expected_previous_hash{};
 
     for (const auto& record : records) {
         if (record.height != expected_height) {
@@ -66,7 +125,17 @@ bool SequentialNode::load(std::string& error) {
             error = "genesis record must be prime";
             return false;
         }
+        if (record.kind == storage::StoredRecordKind::Composite) {
+            if (!validateStoredCompositePayload(record, expected_previous_hash, error)) {
+                return false;
+            }
+        } else {
+            if (!validateStoredPrimePayload(record, expected_previous_hash, error)) {
+                return false;
+            }
+        }
 
+        expected_previous_hash = record.record_hash;
         ++expected_height;
         ++expected_integer;
     }

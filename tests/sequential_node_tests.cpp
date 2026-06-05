@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
@@ -152,6 +153,49 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!expect(reloaded.status().frontier_integer == 5, "reloaded frontier 5")) {
+        return 1;
+    }
+
+    const std::string bad_path = std::string(argv[1]) + ".bad-composite";
+    std::remove(bad_path.c_str());
+    primechain::node::SequentialNode bad_node(bad_path);
+    error.clear();
+    if (!expect(bad_node.load(error), "load empty bad-node store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    error.clear();
+    if (!expect(bad_node.initializeGenesis(error), "initialize bad-node genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    const auto bad_proof3 = primechain::math::makePrattProof(3, proofs);
+    if (!expect(bad_proof3.has_value(), "make bad-node Pratt proof for 3")) {
+        return 1;
+    }
+    error.clear();
+    if (!expect(bad_node.appendPrime(makePrimeRecord(bad_node.status(), 3, *bad_proof3), error), "append bad-node prime 3")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    primechain::protocol::CompositeRecordV0 bad_composite;
+    bad_composite.version = 0;
+    bad_composite.height = bad_node.status().height + 1;
+    bad_composite.previous_record_hash = bad_node.status().latest_record_hash;
+    bad_composite.integer = 4;
+    bad_composite.proof.g = 4;
+    bad_composite.proof.d = 2;
+    bad_composite.proof.e = 3;
+    bad_composite.proof.provider_address = "pcdev1_composite_miner";
+    primechain::storage::RecordStore bad_store(bad_path);
+    error.clear();
+    if (!expect(bad_store.append(primechain::storage::makeStoredRecord(bad_composite), error), "append hashed bad composite directly to store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    primechain::node::SequentialNode bad_reload(bad_path);
+    error.clear();
+    if (!expect(!bad_reload.load(error), "reject bad composite on replay")) {
         return 1;
     }
 

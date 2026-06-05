@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -106,6 +107,8 @@ bool isDevelopmentAddress(const Address& address);
 std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool include_signature);
 std::vector<std::uint8_t> serializeCompositeRecord(const CompositeRecordV0& record);
 std::vector<std::uint8_t> serializePrimeRecord(const PrimeRecordV0& record);
+std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<std::uint8_t>& bytes, std::string& error);
+std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8_t>& bytes, std::string& error);
 
 Hash256 transactionHash(const TransactionV0& tx);
 Hash256 candidateRecordHash(const CompositeRecordV0& record);

@@ -84,6 +84,18 @@ int main() {
     if (!expect(composite_hash_a == composite_hash_b, "composite candidate hash is deterministic")) {
         return 1;
     }
+    std::string decode_error;
+    const auto decoded_composite = deserializeCompositeRecord(serializeCompositeRecord(composite), decode_error);
+    if (!expect(decoded_composite.has_value(), "deserialize composite record")) {
+        std::cerr << decode_error << "\n";
+        return 1;
+    }
+    if (!expect(decoded_composite->integer == composite.integer &&
+                    decoded_composite->proof.d == composite.proof.d &&
+                    decoded_composite->proof.e == composite.proof.e,
+                "composite record round trip")) {
+        return 1;
+    }
 
     auto composite_changed = composite;
     composite_changed.tx_batch.transaction_count = 11;
@@ -106,6 +118,18 @@ int main() {
 
     const auto prime = makePrimeRecord();
     if (!expect(candidateRecordHash(prime) == candidateRecordHash(prime), "prime candidate hash is deterministic")) {
+        return 1;
+    }
+    decode_error.clear();
+    const auto decoded_prime = deserializePrimeRecord(serializePrimeRecord(prime), decode_error);
+    if (!expect(decoded_prime.has_value(), "deserialize prime record")) {
+        std::cerr << decode_error << "\n";
+        return 1;
+    }
+    if (!expect(decoded_prime->integer == prime.integer &&
+                    decoded_prime->proof.witness == prime.proof.witness &&
+                    decoded_prime->proof.factors_of_p_minus_1.size() == prime.proof.factors_of_p_minus_1.size(),
+                "prime record round trip")) {
         return 1;
     }
 
