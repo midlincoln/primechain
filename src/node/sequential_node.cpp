@@ -62,6 +62,9 @@ bool validateStoredCompositePayload(
         error = "invalid composite payload proof";
         return false;
     }
+    if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
+        return false;
+    }
     return true;
 }
 
@@ -91,6 +94,9 @@ bool validateStoredPrimePayload(
     }
     if (!math::verifyPrattProof(toMathPrattProof(decoded->proof))) {
         error = "invalid prime payload Pratt proof";
+        return false;
+    }
+    if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
         return false;
     }
     return true;
@@ -187,6 +193,9 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         error = "invalid composite proof";
         return false;
     }
+    if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
+        return false;
+    }
 
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
@@ -213,6 +222,9 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     }
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) {
         error = "invalid Pratt proof";
+        return false;
+    }
+    if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
         return false;
     }
 
@@ -260,7 +272,7 @@ protocol::PrimeRecordV0 makeGenesisPrimeRecordV0() {
     record.proof.p = 2;
     record.proof.witness = 0;
     record.proof.provider_address = "pcdev1_genesis";
-    record.finalized_by.rule = "fixed-2-of-3-dev";
+    protocol::applyDevelopmentFinalization(record);
     return record;
 }
 

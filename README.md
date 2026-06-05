@@ -325,6 +325,16 @@ During sync download, the client currently verifies:
 - the local output store accepts the record hash
 - the completed store replays through `SequentialNode`
 
+During replay, `SequentialNode` currently verifies:
+
+- composite records deserialize and satisfy `d * e = g`
+- prime records deserialize and satisfy the stored Pratt proof
+- record payloads link to the previous record hash
+- development validator votes point to the candidate record hash
+- development validator signatures match the deterministic dev signature rule
+
+The current finalization rule is development-only: `fixed-2-of-3-dev`. If this format changes, regenerate old local `.dat` stores with `primechain-sequential`.
+
 This is the first local peer-sync API. It is still plain TCP and development-only.
 
 ## Development Roadmap

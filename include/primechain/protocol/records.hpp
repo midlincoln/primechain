@@ -116,4 +116,10 @@ Hash256 candidateRecordHash(const PrimeRecordV0& record);
 Hash256 finalizedRecordHash(const CompositeRecordV0& record);
 Hash256 finalizedRecordHash(const PrimeRecordV0& record);
 
+Bytes developmentVoteSignature(const Address& validator_address, const Hash256& record_hash, std::uint64_t round);
+ValidatorVoteV0 makeDevelopmentVote(const Address& validator_address, const Hash256& record_hash, std::uint64_t round);
+void applyDevelopmentFinalization(CompositeRecordV0& record);
+void applyDevelopmentFinalization(PrimeRecordV0& record);
+bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error);
+
 } // namespace primechain::protocol

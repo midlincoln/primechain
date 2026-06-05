@@ -24,7 +24,7 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord() {
     record.proof.e = 2;
     record.proof.provider_address = "pcdev1_composite_miner";
     record.tx_batch.transaction_count = 10;
-    record.finalized_by.rule = "fixed-2-of-3-dev";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -38,7 +38,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord() {
     record.proof.factors_of_p_minus_1.push_back({2, 2});
     record.proof.provider_address = "pcdev1_prime_miner";
     record.tx_batch.transaction_count = 3;
-    record.finalized_by.rule = "fixed-2-of-3-dev";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -104,15 +104,27 @@ int main() {
     }
 
     auto composite_voted = composite;
-    primechain::protocol::ValidatorVoteV0 vote;
-    vote.validator_address = "pcdev1_validator_a";
-    vote.record_hash = composite_hash_a;
-    vote.round = 1;
+    const auto vote = makeDevelopmentVote("pcdev1_validator_c", composite_hash_a, 1);
     composite_voted.finalized_by.votes.push_back(vote);
     if (!expect(candidateRecordHash(composite) == candidateRecordHash(composite_voted), "candidate hash ignores votes")) {
         return 1;
     }
     if (!expect(finalizedRecordHash(composite) != finalizedRecordHash(composite_voted), "finalized hash includes votes")) {
+        return 1;
+    }
+    std::string vote_error;
+    if (!expect(verifyDevelopmentFinalization(composite.finalized_by, composite_hash_a, vote_error), "valid development finalization")) {
+        std::cerr << vote_error << "\n";
+        return 1;
+    }
+    auto duplicate_vote = composite;
+    duplicate_vote.finalized_by.votes[1].validator_address = duplicate_vote.finalized_by.votes[0].validator_address;
+    duplicate_vote.finalized_by.votes[1].signature = developmentVoteSignature(
+        duplicate_vote.finalized_by.votes[1].validator_address,
+        duplicate_vote.finalized_by.votes[1].record_hash,
+        duplicate_vote.finalized_by.votes[1].round);
+    vote_error.clear();
+    if (!expect(!verifyDevelopmentFinalization(duplicate_vote.finalized_by, composite_hash_a, vote_error), "reject duplicate development validator")) {
         return 1;
     }
 

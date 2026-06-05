@@ -81,6 +81,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
         record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
     }
     record.proof.provider_address = p == 2 ? "pcdev1_genesis" : "pcdev1_prime_miner";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -96,6 +97,7 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord(
     record.proof.d = proof.d;
     record.proof.e = proof.e;
     record.proof.provider_address = "pcdev1_composite_miner";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 

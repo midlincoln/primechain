@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 #include <string_view>
 
 #include "primechain/crypto/hash.hpp"
@@ -12,6 +13,8 @@ namespace {
 
 constexpr std::uint64_t kCompositeRecordTag = 1;
 constexpr std::uint64_t kPrimeRecordTag = 2;
+constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
+constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
 
 class ByteReader {
 public:
@@ -377,6 +380,75 @@ Hash256 finalizedRecordHash(const CompositeRecordV0& record) {
 
 Hash256 finalizedRecordHash(const PrimeRecordV0& record) {
     return crypto::devHash256(serializePrimeRecord(record));
+}
+
+Bytes developmentVoteSignature(const Address& validator_address, const Hash256& record_hash, std::uint64_t round) {
+    std::vector<std::uint8_t> payload;
+    appendString(payload, kDevelopmentVoteDomain);
+    appendAddress(payload, validator_address);
+    appendHash(payload, record_hash);
+    appendUint64(payload, round);
+
+    const Hash256 hash = crypto::devHash256(payload);
+    return Bytes(hash.begin(), hash.end());
+}
+
+ValidatorVoteV0 makeDevelopmentVote(const Address& validator_address, const Hash256& record_hash, std::uint64_t round) {
+    ValidatorVoteV0 vote;
+    vote.validator_address = validator_address;
+    vote.record_hash = record_hash;
+    vote.round = round;
+    vote.signature = developmentVoteSignature(validator_address, record_hash, round);
+    return vote;
+}
+
+void applyDevelopmentFinalization(CompositeRecordV0& record) {
+    record.finalized_by.rule = std::string(kDevelopmentFinalizationRule);
+    record.finalized_by.votes.clear();
+    const Hash256 candidate_hash = candidateRecordHash(record);
+    record.finalized_by.votes.push_back(makeDevelopmentVote("pcdev1_validator_a", candidate_hash, 1));
+    record.finalized_by.votes.push_back(makeDevelopmentVote("pcdev1_validator_b", candidate_hash, 1));
+}
+
+void applyDevelopmentFinalization(PrimeRecordV0& record) {
+    record.finalized_by.rule = std::string(kDevelopmentFinalizationRule);
+    record.finalized_by.votes.clear();
+    const Hash256 candidate_hash = candidateRecordHash(record);
+    record.finalized_by.votes.push_back(makeDevelopmentVote("pcdev1_validator_a", candidate_hash, 1));
+    record.finalized_by.votes.push_back(makeDevelopmentVote("pcdev1_validator_b", candidate_hash, 1));
+}
+
+bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error) {
+    if (proof.rule != kDevelopmentFinalizationRule) {
+        error = "unsupported finalization rule";
+        return false;
+    }
+    if (proof.votes.size() < 2 || proof.votes.size() > 3) {
+        error = "development finalization requires 2 or 3 votes";
+        return false;
+    }
+
+    std::set<Address> seen_validators;
+    for (const auto& vote : proof.votes) {
+        if (!isDevelopmentAddress(vote.validator_address)) {
+            error = "invalid development validator address";
+            return false;
+        }
+        if (!seen_validators.insert(vote.validator_address).second) {
+            error = "duplicate development validator vote";
+            return false;
+        }
+        if (vote.record_hash != candidate_hash) {
+            error = "validator vote record hash mismatch";
+            return false;
+        }
+        if (vote.signature != developmentVoteSignature(vote.validator_address, vote.record_hash, vote.round)) {
+            error = "invalid development validator signature";
+            return false;
+        }
+    }
+
+    return true;
 }
 
 } // namespace primechain::protocol

@@ -51,6 +51,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
         record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
     }
     record.proof.provider_address = "pcdev1_prime_miner";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -66,6 +67,7 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord(
     record.proof.d = proof.d;
     record.proof.e = proof.e;
     record.proof.provider_address = "pcdev1_composite_miner";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -187,6 +189,7 @@ int main(int argc, char** argv) {
     bad_composite.proof.d = 2;
     bad_composite.proof.e = 3;
     bad_composite.proof.provider_address = "pcdev1_composite_miner";
+    primechain::protocol::applyDevelopmentFinalization(bad_composite);
     primechain::storage::RecordStore bad_store(bad_path);
     error.clear();
     if (!expect(bad_store.append(primechain::storage::makeStoredRecord(bad_composite), error), "append hashed bad composite directly to store")) {
@@ -221,6 +224,7 @@ int main(int argc, char** argv) {
     bad_prime.proof.witness = 2;
     bad_prime.proof.factors_of_p_minus_1.push_back({2, 2});
     bad_prime.proof.provider_address = "pcdev1_prime_miner";
+    primechain::protocol::applyDevelopmentFinalization(bad_prime);
     primechain::storage::RecordStore bad_prime_store(bad_prime_path);
     error.clear();
     if (!expect(bad_prime_store.append(primechain::storage::makeStoredRecord(bad_prime), error), "append hashed bad prime directly to store")) {

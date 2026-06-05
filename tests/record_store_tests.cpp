@@ -21,6 +21,7 @@ primechain::protocol::PrimeRecordV0 makePrime2() {
     record.proof.p = 2;
     record.proof.witness = 0;
     record.proof.provider_address = "pcdev1_genesis";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
@@ -34,6 +35,7 @@ primechain::protocol::CompositeRecordV0 makeComposite4(const primechain::Hash256
     record.proof.d = 2;
     record.proof.e = 2;
     record.proof.provider_address = "pcdev1_composite";
+    primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
 
