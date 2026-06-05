@@ -262,6 +262,12 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool.
 
+Inspect the TCP mempool:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_MEMPOOL
+```
+
 Expected summary:
 
 ```text

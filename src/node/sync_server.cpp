@@ -214,6 +214,10 @@ public:
                 submitTx(fd, *line);
                 continue;
             }
+            if (*line == "GET_MEMPOOL") {
+                sendMempool(fd);
+                continue;
+            }
             writeAll(fd, "ERROR unknown command\n");
         }
     }
@@ -343,6 +347,23 @@ private:
 
         mempool_.push_back(*tx);
         writeAll(fd, "TX_ACCEPTED " + primechain::crypto::toHex(hash) + "\n");
+    }
+
+    void sendMempool(int fd) const {
+        std::ostringstream header;
+        header << "MEMPOOL " << mempool_.size() << "\n";
+        writeAll(fd, header.str());
+        for (const auto& tx : mempool_) {
+            const auto bytes = primechain::protocol::serializeTransaction(tx, true);
+            writeAll(fd, "TX "
+                + primechain::crypto::toHex(primechain::protocol::transactionHash(tx))
+                + " "
+                + std::to_string(bytes.size())
+                + " "
+                + bytesToHex(bytes)
+                + "\n");
+        }
+        writeAll(fd, "END_MEMPOOL\n");
     }
 
     std::string store_path_;

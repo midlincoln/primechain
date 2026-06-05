@@ -289,6 +289,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/submit-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/submit-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/submit-src.dat ${CMAKE_CURRENT_BINARY_DIR}/submit-src.log ${CMAKE_CURRENT_BINARY_DIR}/submit-server.log; $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/submit-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/submit-alice.wallet >/dev/null && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/submit-src.log ${CMAKE_CURRENT_BINARY_DIR}/submit-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18993 ${CMAKE_CURRENT_BINARY_DIR}/submit-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/submit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/submit-server.pid) && sleep 0.2 && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/submit-alice.wallet) && $<TARGET_FILE:primechain-send> submit 127.0.0.1 18993 ${CMAKE_CURRENT_BINARY_DIR}/submit-miner.wallet $alice 3 250000 1 | grep -q '^TX_ACCEPTED ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/submit-server.pid)"
 )
 add_test(
+    NAME tcp_get_mempool
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log; $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet >/dev/null && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid) && sleep 0.2 && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet) && $<TARGET_FILE:primechain-send> submit 127.0.0.1 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet $alice 3 250000 1 >/dev/null && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18994 GET_MEMPOOL | grep -q '^MEMPOOL 1' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid)"
+)
+add_test(
     NAME record_store
     COMMAND
         /bin/sh -c
