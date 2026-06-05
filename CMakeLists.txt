@@ -58,6 +58,15 @@ add_executable(primechain-estimator
     src/tools/estimator.cpp
 )
 
+add_executable(primechain-arithmetic-bench
+    src/tools/arithmetic_bench.cpp
+)
+
+target_link_libraries(primechain-arithmetic-bench
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )
@@ -67,5 +76,15 @@ target_link_libraries(primechain-tests
         primechain_core
 )
 
+add_executable(primechain-arithmetic-bench-tests
+    tests/arithmetic_bench_tests.cpp
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
+add_test(
+    NAME arithmetic_bench_output
+    COMMAND
+        /bin/sh -c
+        "$<TARGET_FILE:primechain-arithmetic-bench> 20 7 3 ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log >/dev/null && $<TARGET_FILE:primechain-arithmetic-bench-tests> ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log"
+)

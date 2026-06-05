@@ -197,6 +197,23 @@ More examples:
 ./build/primechain-estimator 10 1000000
 ```
 
+## Run Arithmetic Record Benchmark
+
+This benchmark writes one sequential classification record per integer and gives each record a synthetic transaction batch. It does not use TCP yet.
+
+```bash
+./build/primechain-arithmetic-bench 100000 100 3 ./bench-data/arithmetic.log
+```
+
+Arguments:
+
+- `100000`: number of arithmetic records to write
+- `100`: synthetic transactions per record
+- `3`: first integer to classify
+- `./bench-data/arithmetic.log`: output log path
+
+It reports records per second, synthetic transactions per second, prime/composite counts, log size, and bytes per record.
+
 ## Development Roadmap
 
 Completed prototype milestones:
