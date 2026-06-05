@@ -101,6 +101,15 @@ add_executable(primechain-sync-query
     src/tools/sync_query.cpp
 )
 
+add_executable(primechain-sync-download
+    src/tools/sync_download.cpp
+)
+
+target_link_libraries(primechain-sync-download
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )
@@ -203,6 +212,12 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18989 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18989 GET_STATUS | grep -q 'STATUS 499 95 404 1 498 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid)"
+)
+add_test(
+    NAME sync_download_500
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sync-src-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-downloaded-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-download-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-src-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18991 ${CMAKE_CURRENT_BINARY_DIR}/sync-src-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/sync-download-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/sync-download-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18991 2 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-downloaded-500.dat | grep -q 'frontier_integer: 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/sync-download-server.pid)"
 )
 add_test(
     NAME record_store

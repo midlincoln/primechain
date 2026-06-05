@@ -299,6 +299,13 @@ Terminal 2:
 ./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD_RANGE 490 500
 ```
 
+Bootstrap-download records into a fresh local store:
+
+```bash
+./build/primechain-sync-download 127.0.0.1 18889 2 500 ./data/downloaded-500.dat
+./build/primechain-store-inspect ./data/downloaded-500.dat
+```
+
 This is the first local peer-sync API. It is still plain TCP and development-only.
 
 ## Development Roadmap
