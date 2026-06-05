@@ -262,6 +262,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/custom-miner-50.dat ${CMAKE_CURRENT_BINARY_DIR}/custom-miner-50.log && $<TARGET_FILE:primechain-sequential> 50 ${CMAKE_CURRENT_BINARY_DIR}/custom-miner-50.log ${CMAKE_CURRENT_BINARY_DIR}/custom-miner-50.dat --prime-miner pcdev1_custom_prime_miner --composite-miner pcdev1_custom_composite_miner >/dev/null && $<TARGET_FILE:primechain-balance> ${CMAKE_CURRENT_BINARY_DIR}/custom-miner-50.dat pcdev1_custom_prime_miner | grep -q '^3 1000000'"
 )
 add_test(
+    NAME sequential_transfer_to_wallet
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.log && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet >/dev/null && miner=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet) && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet) && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.log ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat --prime-miner $miner --composite-miner pcdev1_custom_composite_miner --transfer ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet $alice 3 250000 4 >/dev/null && $<TARGET_FILE:primechain-wallet> balance ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet | grep -q '^3 250000'"
+)
+add_test(
     NAME record_store
     COMMAND
         /bin/sh -c

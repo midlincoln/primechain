@@ -4,6 +4,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <sys/stat.h>
 
@@ -25,6 +26,17 @@ struct Options {
     std::string record_store_path{kDefaultRecordStorePath};
     std::string prime_miner_address{kDefaultPrimeMinerAddress};
     std::string composite_miner_address{kDefaultCompositeMinerAddress};
+    bool has_transfer{false};
+    std::string transfer_sender_wallet;
+    std::string transfer_receiver_address;
+    primechain::PrimeValue transfer_prime{0};
+    std::uint64_t transfer_amount{0};
+    primechain::PrimeValue transfer_target_integer{0};
+};
+
+struct DevWallet {
+    std::string address;
+    std::vector<std::uint8_t> public_key;
 };
 
 class MapProofIndex final : public primechain::math::CompositeProofIndex {
@@ -71,8 +83,63 @@ std::string factorizationString(const primechain::math::Factorization& factoriza
     return out.str();
 }
 
+std::vector<std::uint8_t> hexToBytes(const std::string& hex) {
+    auto value = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') {
+            return ch - '0';
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            return 10 + ch - 'a';
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            return 10 + ch - 'A';
+        }
+        return -1;
+    };
+
+    std::vector<std::uint8_t> out;
+    if (hex.size() % 2 != 0) {
+        return out;
+    }
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int high = value(hex[i]);
+        const int low = value(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        out.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    return out;
+}
+
+bool loadDevWallet(const std::string& path, DevWallet& wallet) {
+    std::ifstream in(path);
+    if (!in) {
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto pos = line.find('=');
+        if (pos == std::string::npos) {
+            continue;
+        }
+        const std::string key = line.substr(0, pos);
+        const std::string value = line.substr(pos + 1);
+        if (key == "address") {
+            wallet.address = value;
+        } else if (key == "public_key") {
+            wallet.public_key = hexToBytes(value);
+        }
+    }
+    return !wallet.address.empty() &&
+           !wallet.public_key.empty() &&
+           wallet.address == primechain::protocol::developmentAddressFromPublicKey(wallet.public_key);
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [limit] [text_log_path] [record_store_path] [--prime-miner address] [--composite-miner address]\n"
+              << "       [--transfer sender.wallet receiver_address prime amount target_integer]\n"
               << "example:\n"
               << "  " << argv0 << " 500 ./data/sequential-500.log ./data/sequential-500.dat --prime-miner pcdev1_...\n";
 }
@@ -99,11 +166,38 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.prime_miner_address = value;
         } else if (flag == "--composite-miner") {
             options.composite_miner_address = value;
+        } else if (flag == "--transfer") {
+            if (index + 3 >= argc) {
+                return std::nullopt;
+            }
+            options.has_transfer = true;
+            options.transfer_sender_wallet = value;
+            options.transfer_receiver_address = argv[index++];
+            options.transfer_prime = std::stoull(argv[index++]);
+            options.transfer_amount = std::stoull(argv[index++]);
+            options.transfer_target_integer = std::stoull(argv[index++]);
         } else {
             return std::nullopt;
         }
     }
     return options;
+}
+
+primechain::protocol::TransactionV0 makeTransferTransaction(
+    const DevWallet& sender,
+    const std::string& receiver_address,
+    primechain::PrimeValue prime,
+    std::uint64_t amount) {
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 0;
+    tx.inputs.push_back({prime, {amount, 1}});
+    tx.outputs.push_back({prime, {amount, 1}, receiver_address});
+    tx.fee = {prime, {0, 1}};
+    tx.nonce = 1;
+    tx.sender_address = sender.address;
+    tx.sender_public_key = sender.public_key;
+    tx.signature = primechain::protocol::developmentTransactionSignature(tx);
+    return tx;
 }
 
 primechain::protocol::PrimeRecordV0 makePrimeRecord(
@@ -159,8 +253,19 @@ int main(int argc, char** argv) {
     const Options options = *parsed;
     if (options.limit < 2 ||
         !primechain::protocol::isDevelopmentAddress(options.prime_miner_address) ||
-        !primechain::protocol::isDevelopmentAddress(options.composite_miner_address)) {
+        !primechain::protocol::isDevelopmentAddress(options.composite_miner_address) ||
+        (options.has_transfer &&
+            (!primechain::protocol::isDevelopmentAddress(options.transfer_receiver_address) ||
+             options.transfer_amount == 0 ||
+             options.transfer_prime < 2 ||
+             options.transfer_target_integer < 3 ||
+             options.transfer_target_integer > options.limit))) {
         printUsage(argv[0]);
+        return 1;
+    }
+    DevWallet transfer_sender;
+    if (options.has_transfer && !loadDevWallet(options.transfer_sender_wallet, transfer_sender)) {
+        std::cerr << "could not load transfer sender wallet\n";
         return 1;
     }
     if (!ensureParentDataDir(options.output_path) || !ensureParentDataDir(options.record_store_path)) {
@@ -203,6 +308,14 @@ int main(int argc, char** argv) {
 
             if (n != 2) {
                 auto record = makePrimeRecord(node.status(), n, *proof, options.prime_miner_address);
+                if (options.has_transfer && n == options.transfer_target_integer) {
+                    record.transactions.push_back(makeTransferTransaction(
+                        transfer_sender,
+                        options.transfer_receiver_address,
+                        options.transfer_prime,
+                        options.transfer_amount));
+                    primechain::protocol::applyDevelopmentFinalization(record);
+                }
                 error.clear();
                 if (!node.appendPrime(record, error)) {
                     std::cerr << "could not append prime record for " << n << ": " << error << "\n";
@@ -223,6 +336,14 @@ int main(int argc, char** argv) {
         }
 
         auto record = makeCompositeRecord(node.status(), *proof, options.composite_miner_address);
+        if (options.has_transfer && n == options.transfer_target_integer) {
+            record.transactions.push_back(makeTransferTransaction(
+                transfer_sender,
+                options.transfer_receiver_address,
+                options.transfer_prime,
+                options.transfer_amount));
+            primechain::protocol::applyDevelopmentFinalization(record);
+        }
         error.clear();
         if (!node.appendComposite(record, error)) {
             std::cerr << "could not append composite record for " << n << ": " << error << "\n";
@@ -266,6 +387,13 @@ int main(int argc, char** argv) {
     std::cout << "limit: " << options.limit << "\n";
     std::cout << "prime_miner_address: " << options.prime_miner_address << "\n";
     std::cout << "composite_miner_address: " << options.composite_miner_address << "\n";
+    if (options.has_transfer) {
+        std::cout << "transfer_sender: " << transfer_sender.address << "\n";
+        std::cout << "transfer_receiver: " << options.transfer_receiver_address << "\n";
+        std::cout << "transfer_prime: " << options.transfer_prime << "\n";
+        std::cout << "transfer_amount: " << options.transfer_amount << "\n";
+        std::cout << "transfer_target_integer: " << options.transfer_target_integer << "\n";
+    }
     std::cout << "prime_records: " << prime_count << "\n";
     std::cout << "composite_records: " << composite_count << "\n";
     return 0;

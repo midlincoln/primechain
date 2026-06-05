@@ -232,6 +232,17 @@ You can direct generated mining rewards to specific development addresses:
   --composite-miner pcdev1_composite_miner
 ```
 
+You can inject one development transfer into a chosen arithmetic record:
+
+```bash
+./build/primechain-sequential 20 ./data/tx-chain.log ./data/tx-chain.dat \
+  --prime-miner pcdev1_373830813f57da0581a814963cf165b3 \
+  --composite-miner pcdev1_composite_miner \
+  --transfer ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 4
+```
+
+This sends `250000` micro-units of prime `3` from `miner.wallet` to Alice's address and embeds the transfer in record `4`. The sender must already own the units before the target record is applied.
+
 Expected summary:
 
 ```text
