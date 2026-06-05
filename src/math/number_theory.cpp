@@ -216,6 +216,37 @@ bool verifyPrattProof(const PrattProof& proof) {
     return true;
 }
 
+std::optional<PrattProof> makePrattProof(
+    PrimeValue p,
+    const CompositeProofIndex& proofs) {
+    if (p == 2) {
+        PrattProof proof;
+        proof.p = 2;
+        proof.witness = 0;
+        return proof;
+    }
+    if (p < 2 || !isPrime(p)) {
+        return std::nullopt;
+    }
+
+    const auto factorization = factorizeFromProofIndex(p - 1, proofs);
+    if (!factorization.has_value()) {
+        return std::nullopt;
+    }
+
+    for (PrimeValue witness = 2; witness < p; ++witness) {
+        PrattProof proof;
+        proof.p = p;
+        proof.witness = witness;
+        proof.factors_of_p_minus_1 = *factorization;
+        if (verifyPrattProof(proof)) {
+            return proof;
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::optional<Factorization> factorizeFromProofIndex(
     PrimeValue n,
     const CompositeProofIndex& proofs) {

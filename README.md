@@ -216,6 +216,23 @@ Arguments:
 
 It reports records per second, synthetic transactions per second, prime/composite counts, log size, and bytes per record.
 
+## Run Sequential Chain To 500
+
+This local tool writes one arithmetic record for every integer from `2` through the requested limit. Composites get factor proofs and full recursive factorizations. Primes get small-number Pratt proofs using the stored factorization of `p - 1`.
+
+```bash
+./build/primechain-sequential 500 ./data/sequential-500.log
+```
+
+Expected summary:
+
+```text
+sequential chain complete
+limit: 500
+prime_records: 95
+composite_records: 404
+```
+
 ## Development Roadmap
 
 Completed prototype milestones:

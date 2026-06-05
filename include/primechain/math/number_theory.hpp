@@ -38,6 +38,9 @@ bool isCanonicalFactorization(const Factorization& factorization);
 std::optional<PrimeValue> multiplyFactorization(const Factorization& factorization);
 std::vector<std::uint8_t> serializeFactorization(const Factorization& factorization);
 bool verifyPrattProof(const PrattProof& proof);
+std::optional<PrattProof> makePrattProof(
+    PrimeValue p,
+    const CompositeProofIndex& proofs);
 std::optional<Factorization> factorizeFromProofIndex(
     PrimeValue n,
     const CompositeProofIndex& proofs);

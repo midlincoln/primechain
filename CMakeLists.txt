@@ -68,6 +68,15 @@ target_link_libraries(primechain-arithmetic-bench
         primechain_core
 )
 
+add_executable(primechain-sequential
+    src/tools/sequential_chain.cpp
+)
+
+target_link_libraries(primechain-sequential
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )
@@ -108,6 +117,10 @@ target_link_libraries(primechain-pratt-tests
         primechain_core
 )
 
+add_executable(primechain-sequential-tests
+    tests/sequential_chain_tests.cpp
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -119,3 +132,9 @@ add_test(
 add_test(NAME protocol_records COMMAND primechain-protocol-record-tests)
 add_test(NAME recursive_factorization COMMAND primechain-factorization-tests)
 add_test(NAME pratt_proofs COMMAND primechain-pratt-tests)
+add_test(
+    NAME sequential_chain_500
+    COMMAND
+        /bin/sh -c
+        "$<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.log >/dev/null && $<TARGET_FILE:primechain-sequential-tests> ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.log"
+)
