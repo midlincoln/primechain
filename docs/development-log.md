@@ -161,3 +161,95 @@ At large scale, arithmetic records may be comparable in size to existing blockch
 ### Important Distinction
 
 The current code still uses a temporary proof pool and prime-closing blocks. The sequential arithmetic-record chain described here is the proposed next architecture and has not yet been implemented.
+
+## 2026-06-05: Transaction Batching And Bitcoin Mirror Test Direction
+
+### Transaction Model Direction
+
+The project should not require exactly one transaction per composite proof. That rule is mathematically clean, but it does not scale well and is especially awkward for mirroring Bitcoin, where a single Bitcoin block can contain thousands of transactions.
+
+The better working direction is:
+
+```text
+one finalized arithmetic record
+    -> one proof of PRIME or COMPOSITE
+    -> zero or more transactions
+    -> transaction Merkle root
+```
+
+For a composite record:
+
+```text
+CompositeRecord {
+    integer: g,
+    factor: d,
+    cofactor: e,
+    transaction_count,
+    transaction_merkle_root,
+    proof_provider
+}
+```
+
+For a prime record:
+
+```text
+PrimeRecord {
+    integer: g,
+    primality_certificate,
+    transaction_count,
+    transaction_merkle_root,
+    prime_provider
+}
+```
+
+Prime records should also allow transaction batches. Otherwise transaction inclusion would pause whenever the next frontier integer is prime.
+
+### Bitcoin Mirror Test
+
+A useful long-running test is to mirror Bitcoin into Primechain as an external reference stream.
+
+The simplest coherent rule is:
+
+```text
+one Bitcoin block
+    -> one Primechain prime-to-prime interval
+
+all Bitcoin transactions in that block
+    -> deterministically distributed across the interval's arithmetic records
+
+final prime record
+    -> commits to the Bitcoin block hash and Bitcoin transaction Merkle root
+```
+
+This means a Bitcoin block is not mapped to one composite proof. Its transactions are batched across the composite and prime records belonging to that interval.
+
+This test would exercise:
+
+- disk-backed arithmetic record storage,
+- transaction batching,
+- deterministic replay,
+- restart recovery,
+- Bitcoin reorganization handling,
+- multi-node agreement on the same external history.
+
+It would not prove Primechain's independent permissionless security, because Bitcoin supplies the external checkpoints. It is still valuable as a realistic synchronization and storage stress test.
+
+### Energy And Consensus Position
+
+The strongest defensible comparison is with proof-of-work systems, not proof-of-stake systems.
+
+Primechain does not eliminate all wasted computation. Duplicate work, losing proof candidates, and already-known arithmetic still exist. The intended improvement is that accepted work becomes a reusable verified arithmetic history rather than being discarded hash search.
+
+Bitcoin's wasteful hash race also provides permissionless Sybil resistance. Primechain must still define an equally credible permissionless consensus mechanism before it can claim production-grade security. The fixed 2/3 validator model is only a controlled testnet mechanism.
+
+### Next Engineering Step
+
+The next code milestone should be an arithmetic-record benchmark mode:
+
+1. Generate sequential arithmetic records from the current frontier.
+2. Store each finalized integer classification on disk.
+3. Allow each record to contain a synthetic transaction batch.
+4. Measure records per second, transactions per second, disk growth, and restart replay speed.
+5. Keep the current prime-block miner working until the sequential record model replaces it cleanly.
+
+This benchmark is more important than wallets or post-quantum signatures right now, because it tests whether the proposed core database can evolve quickly and persist reliably.

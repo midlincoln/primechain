@@ -154,6 +154,32 @@ This architecture is still under design. Important unresolved questions include 
 
 See [docs/development-log.md](docs/development-log.md) for the current design discussion and decisions.
 
+## Transaction Batches In Arithmetic Records
+
+The current design direction is that every finalized arithmetic record can also carry a transaction batch:
+
+```text
+CompositeRecord(g = d * e) + transaction_merkle_root
+PrimeRecord(g is prime)    + transaction_merkle_root
+```
+
+This separates arithmetic progress from transaction throughput. One proof does not need to mean one transaction. A single composite or prime record may commit to many transactions through a Merkle root.
+
+This matters for the proposed Bitcoin mirror test:
+
+```text
+one Bitcoin block
+    -> one Primechain prime-to-prime interval
+
+Bitcoin block transactions
+    -> deterministically batched across that interval's arithmetic records
+
+final prime record
+    -> commits to the Bitcoin block hash
+```
+
+The mirror test is intended as a storage, replay, and synchronization stress test. It is not a replacement for Primechain's own consensus.
+
 ## Estimate Long-Run Chain Scale
 
 The estimator approximates how large the frontier prime becomes after a given number of years and block rate:
@@ -184,13 +210,14 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Specify canonical `CompositeRecord`, `PrattPrimeRecord`, `ValidatorVote`, and `FinalizedRecord` formats.
-2. Persist one finalized classification record per integer.
-3. Add an indexed factor database and recursive factorization reconstruction.
-4. Implement small-number Pratt certificate generation and verification.
-5. Add strict message, connection, proof-window, and pool-size limits.
-6. Implement three-node synchronization and simulated 2/3 voting.
-7. Add commit-reveal and contributor authentication.
-8. Later add wallets, rewards, production hashing, and post-quantum signatures.
+1. Add an arithmetic-record benchmark that persists one classification record per integer.
+2. Add synthetic transaction batches and Merkle roots to arithmetic records.
+3. Specify canonical `CompositeRecord`, `PrattPrimeRecord`, `ValidatorVote`, and `FinalizedRecord` formats.
+4. Add an indexed factor database and recursive factorization reconstruction.
+5. Implement small-number Pratt certificate generation and verification.
+6. Add strict message, connection, proof-window, and pool-size limits.
+7. Implement three-node synchronization and simulated 2/3 voting.
+8. Add commit-reveal and contributor authentication.
+9. Later add wallets, rewards, production hashing, and post-quantum signatures.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
