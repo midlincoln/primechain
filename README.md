@@ -398,6 +398,63 @@ HOLDING 3 250000
 END_BALANCE
 ```
 
+## Run A Local 3-Node Convergence Test
+
+This is the current bridge toward a real multi-node testnet. It uses three independent localhost TCP servers and three independent record stores.
+
+Terminal 1, node A:
+
+```bash
+cd ~/primechain
+rm -f ./data/node-a.dat ./data/node-b.dat ./data/node-c.dat
+./build/primechain-sync-server 18889 ./data/node-a.dat
+```
+
+Terminal 2, advance node A and copy its records into node B and node C stores:
+
+```bash
+cd ~/primechain
+miner=$(./build/primechain-wallet address ./wallets/miner.wallet)
+alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
+
+./build/primechain-send submit 127.0.0.1 18889 ./wallets/miner.wallet $alice 3 250000 1
+./build/primechain-sync-query 127.0.0.1 18889 ADVANCE_TO 20 $miner pcdev1_composite_miner 4
+
+./build/primechain-sync-download 127.0.0.1 18889 2 20 ./data/node-b.dat
+./build/primechain-sync-download 127.0.0.1 18889 2 20 ./data/node-c.dat
+```
+
+Terminal 3, node B:
+
+```bash
+cd ~/primechain
+./build/primechain-sync-server 18890 ./data/node-b.dat
+```
+
+Terminal 4, node C:
+
+```bash
+cd ~/primechain
+./build/primechain-sync-server 18891 ./data/node-c.dat
+```
+
+Query all three nodes:
+
+```bash
+alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
+./build/primechain-sync-query 127.0.0.1 18889 GET_BALANCE $alice
+./build/primechain-sync-query 127.0.0.1 18890 GET_BALANCE $alice
+./build/primechain-sync-query 127.0.0.1 18891 GET_BALANCE $alice
+```
+
+Each node should report:
+
+```text
+HOLDING 3 250000
+```
+
+This proves three separate node stores converge when records are copied through the sync protocol. It is not automatic peer gossip yet.
+
 Resume download in batches:
 
 ```bash
