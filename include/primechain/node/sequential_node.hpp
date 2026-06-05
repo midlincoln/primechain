@@ -34,6 +34,7 @@ public:
 
     const SequentialNodeStatus& status() const { return status_; }
     std::uint64_t balanceMicroUnits(const Address& address, PrimeValue prime) const;
+    std::vector<std::pair<PrimeValue, std::uint64_t>> holdingsForAddress(const Address& address) const;
     std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
 
 private:
@@ -42,9 +43,11 @@ private:
         PrimeValue integer,
         const Hash256& previous_record_hash,
         std::string& error) const;
+    bool applyTransactions(const std::vector<protocol::TransactionV0>& transactions, std::string& error);
     bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
     bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
+    bool debit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error);
 
     storage::RecordStore store_;
     SequentialNodeStatus status_;

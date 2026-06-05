@@ -110,6 +110,24 @@ target_link_libraries(primechain-sync-download
         primechain_core
 )
 
+add_executable(primechain-balance
+    src/tools/balance_query.cpp
+)
+
+target_link_libraries(primechain-balance
+    PRIVATE
+        primechain_core
+)
+
+add_executable(primechain-wallet
+    src/wallet/wallet_main.cpp
+)
+
+target_link_libraries(primechain-wallet
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )
@@ -224,6 +242,18 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18992 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 2 250 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat >/dev/null && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 251 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat | grep -q 'frontier_integer: 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid)"
+)
+add_test(
+    NAME wallet_new_address
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/alice.wallet && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/alice.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/alice.wallet | grep -q '^pcdev1_'"
+)
+add_test(
+    NAME balance_query_prime_miner
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat ${CMAKE_CURRENT_BINARY_DIR}/balance-50.log && $<TARGET_FILE:primechain-sequential> 50 ${CMAKE_CURRENT_BINARY_DIR}/balance-50.log ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat >/dev/null && $<TARGET_FILE:primechain-balance> ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat pcdev1_prime_miner | grep -q '^3 1000000'"
 )
 add_test(
     NAME record_store

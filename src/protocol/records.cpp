@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <set>
 #include <string_view>
 
@@ -124,6 +125,13 @@ void appendTransactionBatch(std::vector<std::uint8_t>& out, const TransactionBat
     appendHash(out, batch.transaction_merkle_root);
 }
 
+void appendTransactionList(std::vector<std::uint8_t>& out, const std::vector<TransactionV0>& transactions) {
+    appendUint64(out, transactions.size());
+    for (const auto& tx : transactions) {
+        appendBytes(out, serializeTransaction(tx, true));
+    }
+}
+
 void appendCompositeProof(std::vector<std::uint8_t>& out, const CompositeProofV0& proof) {
     appendUint64(out, proof.g);
     appendUint64(out, proof.d);
@@ -174,6 +182,32 @@ void appendFinalizationProof(
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
+}
+
+bool readAmount(ByteReader& reader, Amount& amount) {
+    return reader.readUint64(amount.numerator) &&
+           reader.readUint64(amount.denominator);
+}
+
+bool readTransactionList(ByteReader& reader, std::vector<TransactionV0>& transactions, std::string& error) {
+    std::uint64_t count = 0;
+    if (!reader.readUint64(count)) {
+        return false;
+    }
+    transactions.clear();
+    transactions.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        Bytes bytes;
+        if (!reader.readBytes(bytes)) {
+            return false;
+        }
+        auto tx = deserializeTransaction(bytes, error);
+        if (!tx.has_value()) {
+            return false;
+        }
+        transactions.push_back(*tx);
+    }
+    return true;
 }
 
 bool readCompositeProof(ByteReader& reader, CompositeProofV0& proof) {
@@ -244,6 +278,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendUint64(out, record.integer);
     appendCompositeProof(out, record.proof);
     appendTransactionBatch(out, record.tx_batch);
+    appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
@@ -260,6 +295,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendUint64(out, record.integer);
     appendPrattProof(out, record.proof);
     appendTransactionBatch(out, record.tx_batch);
+    appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
@@ -280,6 +316,11 @@ bool isDevelopmentAddress(const Address& address) {
     });
 }
 
+Address developmentAddressFromPublicKey(const Bytes& public_key) {
+    const Hash256 hash = crypto::devHash256(public_key);
+    return "pcdev1_" + crypto::toHex(hash).substr(0, 32);
+}
+
 std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool include_signature) {
     std::vector<std::uint8_t> out;
     appendUint64(out, tx.version);
@@ -294,12 +335,62 @@ std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool inc
     appendFeeSpec(out, tx.fee);
     appendUint64(out, tx.nonce);
     appendAddress(out, tx.sender_address);
+    appendBytes(out, tx.sender_public_key);
     if (include_signature) {
         appendBytes(out, tx.signature);
     } else {
         appendUint64(out, 0);
     }
     return out;
+}
+
+std::optional<TransactionV0> deserializeTransaction(const std::vector<std::uint8_t>& bytes, std::string& error) {
+    ByteReader reader(bytes);
+    TransactionV0 tx;
+    std::uint64_t input_count = 0;
+    std::uint64_t output_count = 0;
+    if (!reader.readUint64(tx.version) || !reader.readUint64(input_count)) {
+        error = "truncated transaction header";
+        return std::nullopt;
+    }
+    tx.inputs.reserve(static_cast<std::size_t>(input_count));
+    for (std::uint64_t i = 0; i < input_count; ++i) {
+        TxInputV0 input;
+        if (!reader.readUint64(input.prime) || !readAmount(reader, input.amount)) {
+            error = "truncated transaction input";
+            return std::nullopt;
+        }
+        tx.inputs.push_back(input);
+    }
+    if (!reader.readUint64(output_count)) {
+        error = "truncated transaction output count";
+        return std::nullopt;
+    }
+    tx.outputs.reserve(static_cast<std::size_t>(output_count));
+    for (std::uint64_t i = 0; i < output_count; ++i) {
+        TxOutputV0 output;
+        if (!reader.readUint64(output.prime) ||
+            !readAmount(reader, output.amount) ||
+            !reader.readString(output.receiver_address)) {
+            error = "truncated transaction output";
+            return std::nullopt;
+        }
+        tx.outputs.push_back(output);
+    }
+    if (!reader.readUint64(tx.fee.prime) ||
+        !readAmount(reader, tx.fee.amount) ||
+        !reader.readUint64(tx.nonce) ||
+        !reader.readString(tx.sender_address) ||
+        !reader.readBytes(tx.sender_public_key) ||
+        !reader.readBytes(tx.signature)) {
+        error = "truncated transaction footer";
+        return std::nullopt;
+    }
+    if (!reader.consumed()) {
+        error = "trailing bytes in transaction";
+        return std::nullopt;
+    }
+    return tx;
 }
 
 std::vector<std::uint8_t> serializeCompositeRecord(const CompositeRecordV0& record) {
@@ -324,6 +415,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !reader.readUint64(record.integer) ||
         !readCompositeProof(reader, record.proof) ||
         !readTransactionBatch(reader, record.tx_batch) ||
+        !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated composite record payload";
@@ -350,6 +442,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !reader.readUint64(record.integer) ||
         !readPrattProof(reader, record.proof) ||
         !readTransactionBatch(reader, record.tx_batch) ||
+        !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated prime record payload";
@@ -364,6 +457,29 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
 
 Hash256 transactionHash(const TransactionV0& tx) {
     return crypto::devHash256(serializeTransaction(tx, true));
+}
+
+Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
+    if (transactions.empty()) {
+        return {};
+    }
+    std::vector<std::uint8_t> payload;
+    appendString(payload, "primechain-dev-tx-root-v0");
+    appendUint64(payload, transactions.size());
+    for (const auto& tx : transactions) {
+        appendHash(payload, transactionHash(tx));
+    }
+    return crypto::devHash256(payload);
+}
+
+void updateTransactionBatch(CompositeRecordV0& record) {
+    record.tx_batch.transaction_count = record.transactions.size();
+    record.tx_batch.transaction_merkle_root = transactionMerkleRoot(record.transactions);
+}
+
+void updateTransactionBatch(PrimeRecordV0& record) {
+    record.tx_batch.transaction_count = record.transactions.size();
+    record.tx_batch.transaction_merkle_root = transactionMerkleRoot(record.transactions);
 }
 
 Hash256 candidateRecordHash(const CompositeRecordV0& record) {
@@ -402,7 +518,23 @@ ValidatorVoteV0 makeDevelopmentVote(const Address& validator_address, const Hash
     return vote;
 }
 
+Bytes developmentTransactionSignature(const TransactionV0& tx) {
+    std::vector<std::uint8_t> payload;
+    appendString(payload, "primechain-dev-tx-signature-v0");
+    appendBytes(payload, tx.sender_public_key);
+    const auto unsigned_tx = serializeTransaction(tx, false);
+    appendBytes(payload, unsigned_tx);
+    const Hash256 hash = crypto::devHash256(payload);
+    return Bytes(hash.begin(), hash.end());
+}
+
+bool verifyDevelopmentTransactionSignature(const TransactionV0& tx) {
+    return tx.sender_address == developmentAddressFromPublicKey(tx.sender_public_key) &&
+           tx.signature == developmentTransactionSignature(tx);
+}
+
 void applyDevelopmentFinalization(CompositeRecordV0& record) {
+    updateTransactionBatch(record);
     record.finalized_by.rule = std::string(kDevelopmentFinalizationRule);
     record.finalized_by.votes.clear();
     const Hash256 candidate_hash = candidateRecordHash(record);
@@ -411,6 +543,7 @@ void applyDevelopmentFinalization(CompositeRecordV0& record) {
 }
 
 void applyDevelopmentFinalization(PrimeRecordV0& record) {
+    updateTransactionBatch(record);
     record.finalized_by.rule = std::string(kDevelopmentFinalizationRule);
     record.finalized_by.votes.clear();
     const Hash256 candidate_hash = candidateRecordHash(record);

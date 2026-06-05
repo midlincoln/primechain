@@ -329,6 +329,10 @@ During replay, `SequentialNode` currently verifies:
 
 - composite records deserialize and satisfy `d * e = g`
 - prime records deserialize and satisfy the stored Pratt proof
+- embedded transaction lists match the record transaction count/root
+- development transaction sender addresses derive from sender public keys
+- development transaction signatures match the deterministic dev signature rule
+- transaction debits and credits balance per prime asset
 - record payloads link to the previous record hash
 - development validator votes point to the candidate record hash
 - development validator signatures match the deterministic dev signature rule
@@ -336,7 +340,18 @@ During replay, `SequentialNode` currently verifies:
 
 The current finalization rule is development-only: `fixed-2-of-3-dev`. If this format changes, regenerate old local `.dat` stores with `primechain-sequential`.
 
-Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half. Non-empty transaction batches are rejected until full transaction bodies and wallet transfer rules are implemented.
+Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half.
+
+Development wallet/address tools:
+
+```bash
+./build/primechain-wallet new ./data/alice.wallet
+./build/primechain-wallet address ./data/alice.wallet
+./build/primechain-wallet balance ./data/sequential-500.dat ./data/alice.wallet
+./build/primechain-balance ./data/sequential-500.dat pcdev1_prime_miner
+```
+
+Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Current development transaction signatures are deterministic placeholders, not production cryptography.
 
 `SequentialNode` appends to the local `RecordStore` only after record validation succeeds. Rejected records do not advance the persisted frontier.
 

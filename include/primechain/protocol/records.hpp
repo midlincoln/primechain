@@ -39,6 +39,7 @@ struct TransactionV0 {
     FeeSpecV0 fee;
     std::uint64_t nonce{0};
     Address sender_address;
+    Bytes sender_public_key;
     Bytes signature;
 };
 
@@ -87,6 +88,7 @@ struct CompositeRecordV0 {
     PrimeValue integer{0};
     CompositeProofV0 proof;
     TransactionBatchV0 tx_batch;
+    std::vector<TransactionV0> transactions;
     Hash256 state_root{};
     FinalizationProofV0 finalized_by;
 };
@@ -98,19 +100,25 @@ struct PrimeRecordV0 {
     PrimeValue integer{0};
     PrattPrimeProofV0 proof;
     TransactionBatchV0 tx_batch;
+    std::vector<TransactionV0> transactions;
     Hash256 state_root{};
     FinalizationProofV0 finalized_by;
 };
 
 bool isDevelopmentAddress(const Address& address);
+Address developmentAddressFromPublicKey(const Bytes& public_key);
 
 std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool include_signature);
 std::vector<std::uint8_t> serializeCompositeRecord(const CompositeRecordV0& record);
 std::vector<std::uint8_t> serializePrimeRecord(const PrimeRecordV0& record);
+std::optional<TransactionV0> deserializeTransaction(const std::vector<std::uint8_t>& bytes, std::string& error);
 std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<std::uint8_t>& bytes, std::string& error);
 std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8_t>& bytes, std::string& error);
 
 Hash256 transactionHash(const TransactionV0& tx);
+Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions);
+void updateTransactionBatch(CompositeRecordV0& record);
+void updateTransactionBatch(PrimeRecordV0& record);
 Hash256 candidateRecordHash(const CompositeRecordV0& record);
 Hash256 candidateRecordHash(const PrimeRecordV0& record);
 Hash256 finalizedRecordHash(const CompositeRecordV0& record);
@@ -118,6 +126,8 @@ Hash256 finalizedRecordHash(const PrimeRecordV0& record);
 
 Bytes developmentVoteSignature(const Address& validator_address, const Hash256& record_hash, std::uint64_t round);
 ValidatorVoteV0 makeDevelopmentVote(const Address& validator_address, const Hash256& record_hash, std::uint64_t round);
+Bytes developmentTransactionSignature(const TransactionV0& tx);
+bool verifyDevelopmentTransactionSignature(const TransactionV0& tx);
 void applyDevelopmentFinalization(CompositeRecordV0& record);
 void applyDevelopmentFinalization(PrimeRecordV0& record);
 bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error);

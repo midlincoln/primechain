@@ -1,5 +1,6 @@
 #include "primechain/node/sequential_node.hpp"
 
+#include <map>
 #include <utility>
 
 #include "primechain/math/number_theory.hpp"
@@ -8,11 +9,24 @@ namespace primechain::node {
 
 namespace {
 
-bool isZeroHash(const Hash256& hash) {
-    for (std::uint8_t byte : hash) {
-        if (byte != 0) {
-            return false;
-        }
+std::optional<std::uint64_t> microUnits(const protocol::Amount& amount) {
+    if (amount.denominator != 1 || amount.numerator == 0) {
+        return std::nullopt;
+    }
+    return amount.numerator;
+}
+
+bool validateTransactionBatch(
+    const protocol::TransactionBatchV0& batch,
+    const std::vector<protocol::TransactionV0>& transactions,
+    std::string& error) {
+    if (batch.transaction_count != transactions.size()) {
+        error = "transaction batch count mismatch";
+        return false;
+    }
+    if (batch.transaction_merkle_root != protocol::transactionMerkleRoot(transactions)) {
+        error = "transaction batch root mismatch";
+        return false;
     }
     return true;
 }
@@ -71,8 +85,7 @@ bool validateStoredCompositePayload(
         error = "invalid composite payload proof";
         return false;
     }
-    if (decoded->tx_batch.transaction_count != 0 || !isZeroHash(decoded->tx_batch.transaction_merkle_root)) {
-        error = "transactions are not supported in replay yet";
+    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
@@ -109,8 +122,7 @@ bool validateStoredPrimePayload(
         error = "invalid prime payload Pratt proof";
         return false;
     }
-    if (decoded->tx_batch.transaction_count != 0 || !isZeroHash(decoded->tx_batch.transaction_merkle_root)) {
-        error = "transactions are not supported in replay yet";
+    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
@@ -160,7 +172,9 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
-            if (!decoded.has_value() || !applyCompositeLedger(*decoded, error)) {
+            if (!decoded.has_value() ||
+                !applyTransactions(decoded->transactions, error) ||
+                !applyCompositeLedger(*decoded, error)) {
                 return false;
             }
         } else {
@@ -168,7 +182,9 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             const auto decoded = protocol::deserializePrimeRecord(record.payload, error);
-            if (!decoded.has_value() || !applyPrimeLedger(*decoded, error)) {
+            if (!decoded.has_value() ||
+                !applyTransactions(decoded->transactions, error) ||
+                !applyPrimeLedger(*decoded, error)) {
                 return false;
             }
         }
@@ -224,25 +240,37 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         error = "invalid composite proof";
         return false;
     }
-    if (record.tx_batch.transaction_count != 0 || !isZeroHash(record.tx_batch.transaction_merkle_root)) {
-        error = "transactions are not supported yet";
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
         return false;
     }
 
+    const auto balances_before = balances_;
+    const auto total_supply_before = total_supply_;
+    const auto pending_before = pending_composite_providers_;
+    if (!applyTransactions(record.transactions, error)) {
+        return false;
+    }
+    if (!applyCompositeLedger(record, error)) {
+        balances_ = balances_before;
+        total_supply_ = total_supply_before;
+        pending_composite_providers_ = pending_before;
+        return false;
+    }
+
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
+        balances_ = balances_before;
+        total_supply_ = total_supply_before;
+        pending_composite_providers_ = pending_before;
         return false;
     }
 
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
-    if (!applyCompositeLedger(record, error)) {
-        return false;
-    }
     return true;
 }
 
@@ -262,8 +290,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         error = "invalid Pratt proof";
         return false;
     }
-    if (record.tx_batch.transaction_count != 0 || !isZeroHash(record.tx_batch.transaction_merkle_root)) {
-        error = "transactions are not supported yet";
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
@@ -274,17 +301,30 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         return false;
     }
 
+    const auto balances_before = balances_;
+    const auto total_supply_before = total_supply_;
+    const auto pending_before = pending_composite_providers_;
+    if (!applyTransactions(record.transactions, error)) {
+        return false;
+    }
+    if (!applyPrimeLedger(record, error)) {
+        balances_ = balances_before;
+        total_supply_ = total_supply_before;
+        pending_composite_providers_ = pending_before;
+        return false;
+    }
+
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
+        balances_ = balances_before;
+        total_supply_ = total_supply_before;
+        pending_composite_providers_ = pending_before;
         return false;
     }
 
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
-    if (!applyPrimeLedger(record, error)) {
-        return false;
-    }
     return true;
 }
 
@@ -302,6 +342,71 @@ std::uint64_t SequentialNode::totalSupplyMicroUnits(PrimeValue prime) const {
         return 0;
     }
     return found->second;
+}
+
+std::vector<std::pair<PrimeValue, std::uint64_t>> SequentialNode::holdingsForAddress(const Address& address) const {
+    std::vector<std::pair<PrimeValue, std::uint64_t>> out;
+    for (const auto& entry : balances_) {
+        if (entry.first.first == address && entry.second > 0) {
+            out.push_back({entry.first.second, entry.second});
+        }
+    }
+    return out;
+}
+
+bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0>& transactions, std::string& error) {
+    for (const auto& tx : transactions) {
+        if (!protocol::isDevelopmentAddress(tx.sender_address) ||
+            !protocol::verifyDevelopmentTransactionSignature(tx)) {
+            error = "invalid development transaction signature";
+            return false;
+        }
+        if (tx.inputs.empty() || tx.outputs.empty()) {
+            error = "transaction must have inputs and outputs";
+            return false;
+        }
+        if (tx.fee.amount.numerator != 0 || tx.fee.amount.denominator != 1) {
+            error = "non-zero fees are not supported yet";
+            return false;
+        }
+
+        std::map<PrimeValue, std::uint64_t> debits;
+        std::map<PrimeValue, std::uint64_t> credits;
+        for (const auto& input : tx.inputs) {
+            const auto units = microUnits(input.amount);
+            if (!units.has_value()) {
+                error = "transaction input amount must be positive integer micro-units";
+                return false;
+            }
+            debits[input.prime] += *units;
+        }
+        for (const auto& output : tx.outputs) {
+            if (!protocol::isDevelopmentAddress(output.receiver_address)) {
+                error = "invalid receiver address";
+                return false;
+            }
+            const auto units = microUnits(output.amount);
+            if (!units.has_value()) {
+                error = "transaction output amount must be positive integer micro-units";
+                return false;
+            }
+            credits[output.prime] += *units;
+        }
+        if (debits != credits) {
+            error = "transaction debits and credits do not balance";
+            return false;
+        }
+
+        for (const auto& debit_entry : debits) {
+            if (!debit(tx.sender_address, debit_entry.first, debit_entry.second, error)) {
+                return false;
+            }
+        }
+        for (const auto& output : tx.outputs) {
+            credit(output.receiver_address, output.prime, output.amount.numerator);
+        }
+    }
+    return true;
 }
 
 bool SequentialNode::applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error) {
@@ -341,6 +446,18 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
 void SequentialNode::credit(const Address& address, PrimeValue prime, std::uint64_t micro_units) {
     balances_[{address, prime}] += micro_units;
     total_supply_[prime] += micro_units;
+}
+
+bool SequentialNode::debit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error) {
+    const auto key = std::make_pair(address, prime);
+    const auto found = balances_.find(key);
+    if (found == balances_.end() || found->second < micro_units) {
+        error = "insufficient balance";
+        return false;
+    }
+    found->second -= micro_units;
+    total_supply_[prime] -= micro_units;
+    return true;
 }
 
 bool SequentialNode::validateCommon(

@@ -39,7 +39,8 @@ bool expect(bool condition, const std::string& name) {
 primechain::protocol::PrimeRecordV0 makePrimeRecord(
     const primechain::node::SequentialNodeStatus& status,
     primechain::PrimeValue p,
-    const primechain::math::PrattProof& proof) {
+    const primechain::math::PrattProof& proof,
+    const primechain::Address& provider = "pcdev1_prime_miner") {
     primechain::protocol::PrimeRecordV0 record;
     record.version = 0;
     record.height = status.height + 1;
@@ -50,7 +51,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
     for (const auto& factor : proof.factors_of_p_minus_1.factors) {
         record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
     }
-    record.proof.provider_address = "pcdev1_prime_miner";
+    record.proof.provider_address = provider;
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
@@ -175,9 +176,8 @@ int main(int argc, char** argv) {
 
     auto tx_record = makeCompositeRecord(node.status(), *proof6);
     tx_record.tx_batch.transaction_count = 1;
-    primechain::protocol::applyDevelopmentFinalization(tx_record);
     error.clear();
-    if (!expect(!node.appendComposite(tx_record, error), "reject non-empty tx batch until transaction application exists")) {
+    if (!expect(!node.appendComposite(tx_record, error), "reject stale transaction batch metadata")) {
         return 1;
     }
     primechain::node::SequentialNode after_rejected_tx(argv[1]);
@@ -266,6 +266,72 @@ int main(int argc, char** argv) {
     primechain::node::SequentialNode bad_prime_reload(bad_prime_path);
     error.clear();
     if (!expect(!bad_prime_reload.load(error), "reject bad prime on replay")) {
+        return 1;
+    }
+
+    const std::string tx_path = std::string(argv[1]) + ".tx";
+    std::remove(tx_path.c_str());
+    primechain::node::SequentialNode tx_node(tx_path);
+    error.clear();
+    if (!expect(tx_node.load(error), "load empty tx-node store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    error.clear();
+    if (!expect(tx_node.initializeGenesis(error), "initialize tx-node genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+
+    const std::vector<std::uint8_t> miner_public_key{1, 2, 3, 4};
+    const std::vector<std::uint8_t> alice_public_key{5, 6, 7, 8};
+    const auto miner_address = primechain::protocol::developmentAddressFromPublicKey(miner_public_key);
+    const auto alice_address = primechain::protocol::developmentAddressFromPublicKey(alice_public_key);
+    const auto tx_proof3 = primechain::math::makePrattProof(3, proofs);
+    if (!expect(tx_proof3.has_value(), "make tx-node Pratt proof for 3")) {
+        return 1;
+    }
+    error.clear();
+    if (!expect(tx_node.appendPrime(makePrimeRecord(tx_node.status(), 3, *tx_proof3, miner_address), error), "append tx-node prime 3")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+
+    const auto tx_proof4 = primechain::math::makeCompositeProof(4, "pcdev1_composite_miner");
+    if (!expect(tx_proof4.has_value(), "make tx-node composite proof for 4")) {
+        return 1;
+    }
+    auto transfer_record = makeCompositeRecord(tx_node.status(), *tx_proof4);
+    primechain::protocol::TransactionV0 transfer;
+    transfer.version = 0;
+    transfer.inputs.push_back({3, {250000, 1}});
+    transfer.outputs.push_back({3, {250000, 1}, alice_address});
+    transfer.fee = {3, {0, 1}};
+    transfer.nonce = 1;
+    transfer.sender_address = miner_address;
+    transfer.sender_public_key = miner_public_key;
+    transfer.signature = primechain::protocol::developmentTransactionSignature(transfer);
+    transfer_record.transactions.push_back(transfer);
+    primechain::protocol::applyDevelopmentFinalization(transfer_record);
+    error.clear();
+    if (!expect(tx_node.appendComposite(transfer_record, error), "append tx transfer in composite 4")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+
+    primechain::node::SequentialNode tx_reloaded(tx_path);
+    error.clear();
+    if (!expect(tx_reloaded.load(error), "reload tx-node")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(tx_reloaded.balanceMicroUnits(alice_address, 3) == 250000, "alice received prime 3 units")) {
+        return 1;
+    }
+    if (!expect(tx_reloaded.balanceMicroUnits(miner_address, 3) == 750000, "miner spent prime 3 units")) {
+        return 1;
+    }
+    if (!expect(tx_reloaded.totalSupplyMicroUnits(3) == primechain::node::kAssetMicroUnits, "tx replay preserves supply")) {
         return 1;
     }
 

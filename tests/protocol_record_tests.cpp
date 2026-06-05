@@ -64,8 +64,9 @@ int main() {
     tx.outputs.push_back({5, {1, 5}, "pcdev1_bob"});
     tx.fee = {5, {0, 1}};
     tx.nonce = 1;
-    tx.sender_address = "pcdev1_alice";
-    tx.signature = {1, 2, 3};
+    tx.sender_public_key = {9, 8, 7, 6};
+    tx.sender_address = developmentAddressFromPublicKey(tx.sender_public_key);
+    tx.signature = developmentTransactionSignature(tx);
 
     const auto tx_hash_a = transactionHash(tx);
     const auto tx_hash_b = transactionHash(tx);
@@ -75,6 +76,17 @@ int main() {
 
     tx.nonce = 2;
     if (!expect(tx_hash_a != transactionHash(tx), "transaction hash changes when nonce changes")) {
+        return 1;
+    }
+    tx.nonce = 1;
+    tx.signature = developmentTransactionSignature(tx);
+    std::string tx_decode_error;
+    const auto decoded_tx = deserializeTransaction(serializeTransaction(tx, true), tx_decode_error);
+    if (!expect(decoded_tx.has_value(), "deserialize transaction")) {
+        std::cerr << tx_decode_error << "\n";
+        return 1;
+    }
+    if (!expect(verifyDevelopmentTransactionSignature(*decoded_tx), "verify development transaction signature")) {
         return 1;
     }
 
