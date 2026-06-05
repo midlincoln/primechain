@@ -224,6 +224,14 @@ This local tool writes one arithmetic record for every integer from `2` through 
 ./build/primechain-sequential 500 ./data/sequential-500.log ./data/sequential-500.dat
 ```
 
+You can direct generated mining rewards to specific development addresses:
+
+```bash
+./build/primechain-sequential 500 ./data/wallet-chain.log ./data/wallet-chain.dat \
+  --prime-miner pcdev1_373830813f57da0581a814963cf165b3 \
+  --composite-miner pcdev1_composite_miner
+```
+
 Expected summary:
 
 ```text
@@ -231,6 +239,8 @@ sequential chain complete
 output_path: ./data/sequential-500.log
 record_store_path: ./data/sequential-500.dat
 limit: 500
+prime_miner_address: pcdev1_prime_miner
+composite_miner_address: pcdev1_composite_miner
 prime_records: 95
 composite_records: 404
 ```
