@@ -116,6 +116,31 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    error.clear();
+    const auto range = store.findRange(2, 4, error);
+    if (!expect(error.empty(), "range lookup without error")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(range.size() == 2, "range lookup returns existing records")) {
+        return 1;
+    }
+    if (!expect(range[0].integer == 2 && range[1].integer == 4, "range lookup preserves store order")) {
+        return 1;
+    }
+
+    error.clear();
+    const auto empty_range = store.findRange(10, 12, error);
+    if (!expect(error.empty() && empty_range.empty(), "empty range lookup")) {
+        return 1;
+    }
+
+    error.clear();
+    store.findRange(5, 4, error);
+    if (!expect(!error.empty(), "reject invalid range")) {
+        return 1;
+    }
+
     auto corrupted = composite;
     corrupted.record_hash[0] ^= 0xff;
     error.clear();

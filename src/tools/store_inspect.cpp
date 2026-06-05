@@ -12,9 +12,11 @@ constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [record_store_path] [integer]\n"
+              << "       " << argv0 << " [record_store_path] --range [start] [end]\n"
               << "example:\n"
               << "  " << argv0 << " ./data/sequential-500.dat\n"
-              << "  " << argv0 << " ./data/sequential-500.dat 500\n";
+              << "  " << argv0 << " ./data/sequential-500.dat 500\n"
+              << "  " << argv0 << " ./data/sequential-500.dat --range 490 500\n";
 }
 
 const char* kindName(primechain::storage::StoredRecordKind kind) {
@@ -36,12 +38,43 @@ int main(int argc, char** argv) {
     }
 
     const std::string store_path = argc > 1 ? argv[1] : kDefaultStorePath;
-    const bool lookup_record = argc > 2;
-    const primechain::PrimeValue lookup_integer = lookup_record ? std::stoull(argv[2]) : 0;
+    const bool range_lookup = argc > 2 && std::string(argv[2]) == "--range";
+    const bool lookup_record = argc > 2 && !range_lookup;
 
     std::string error;
     primechain::storage::RecordStore store(store_path);
+    if (range_lookup) {
+        if (argc != 5) {
+            printUsage(argv[0]);
+            return 1;
+        }
+
+        const primechain::PrimeValue start = std::stoull(argv[3]);
+        const primechain::PrimeValue end = std::stoull(argv[4]);
+        const auto records = store.findRange(start, end, error);
+        if (!error.empty()) {
+            std::cerr << "record_store_error: " << error << "\n";
+            return 1;
+        }
+
+        std::cout << "record range\n";
+        std::cout << "store_path: " << store_path << "\n";
+        std::cout << "start: " << start << "\n";
+        std::cout << "end: " << end << "\n";
+        std::cout << "records: " << records.size() << "\n";
+        std::cout << "integer height kind hash16 payload_bytes\n";
+        for (const auto& record : records) {
+            std::cout << record.integer << " "
+                      << record.height << " "
+                      << kindName(record.kind) << " "
+                      << primechain::crypto::toHex(record.record_hash).substr(0, 16) << " "
+                      << record.payload.size() << "\n";
+        }
+        return 0;
+    }
+
     if (lookup_record) {
+        const primechain::PrimeValue lookup_integer = std::stoull(argv[2]);
         const auto record = store.findByInteger(lookup_integer, error);
         if (!error.empty()) {
             std::cerr << "record_store_error: " << error << "\n";

@@ -266,6 +266,21 @@ kind: COMPOSITE
 payload_bytes: ...
 ```
 
+Look up a range of stored records:
+
+```bash
+./build/primechain-store-inspect ./data/sequential-500.dat --range 490 500
+```
+
+This prints one line per stored record:
+
+```text
+integer height kind hash16 payload_bytes
+490 ...
+...
+500 498 COMPOSITE ...
+```
+
 ## Development Roadmap
 
 Completed prototype milestones:

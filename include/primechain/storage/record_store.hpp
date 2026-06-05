@@ -33,6 +33,7 @@ public:
     std::vector<StoredRecord> loadAll(std::string& error) const;
     std::optional<StoredRecord> latest(std::string& error) const;
     std::optional<StoredRecord> findByInteger(PrimeValue integer, std::string& error) const;
+    std::vector<StoredRecord> findRange(PrimeValue start, PrimeValue end, std::string& error) const;
 
 private:
     std::string path_;

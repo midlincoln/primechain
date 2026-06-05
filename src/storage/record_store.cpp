@@ -166,6 +166,26 @@ std::optional<StoredRecord> RecordStore::findByInteger(PrimeValue integer, std::
     return std::nullopt;
 }
 
+std::vector<StoredRecord> RecordStore::findRange(PrimeValue start, PrimeValue end, std::string& error) const {
+    std::vector<StoredRecord> out;
+    if (start > end) {
+        error = "range start is greater than range end";
+        return out;
+    }
+
+    auto records = loadAll(error);
+    if (!error.empty()) {
+        return {};
+    }
+
+    for (const auto& record : records) {
+        if (record.integer >= start && record.integer <= end) {
+            out.push_back(record);
+        }
+    }
+    return out;
+}
+
 StoredRecord makeStoredRecord(const protocol::CompositeRecordV0& record) {
     StoredRecord out;
     out.kind = StoredRecordKind::Composite;
