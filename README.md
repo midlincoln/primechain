@@ -279,6 +279,15 @@ Generate a fresh chain that pulls TCP mempool transactions into record `4`:
 
 After the generated chain successfully reload-validates, the generator sends `ACK_MEMPOOL` for included transaction hashes. The TCP node removes acknowledged transactions from its in-memory mempool.
 
+Advance the running TCP node's own record store and include pending mempool transactions directly:
+
+```bash
+miner=$(./build/primechain-wallet address ./wallets/miner.wallet)
+./build/primechain-sync-query 127.0.0.1 18889 ADVANCE_TO 20 $miner pcdev1_composite_miner 4
+```
+
+`ADVANCE_TO limit prime_miner composite_miner mempool_target_integer` is a development command. It creates verified arithmetic records up to `limit`, embeds the current mempool at the chosen target record, reload-validates the resulting store, and removes included transactions from the mempool. If you spend prime `3`, use target record `4` or later because record `3` mints the asset before it can be spent.
+
 Expected summary:
 
 ```text

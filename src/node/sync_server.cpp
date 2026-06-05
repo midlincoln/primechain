@@ -2,6 +2,7 @@
 #include <csignal>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
@@ -190,6 +192,97 @@ std::string recordLine(const primechain::storage::StoredRecord& record) {
     return out.str();
 }
 
+class MapProofIndex final : public primechain::math::CompositeProofIndex {
+public:
+    void add(const primechain::CompositeProof& proof) {
+        proofs_[proof.m] = proof;
+    }
+
+    std::optional<primechain::CompositeProof> findCompositeProof(primechain::PrimeValue n) const override {
+        const auto found = proofs_.find(n);
+        if (found == proofs_.end()) {
+            return std::nullopt;
+        }
+        return found->second;
+    }
+
+private:
+    std::map<primechain::PrimeValue, primechain::CompositeProof> proofs_;
+};
+
+primechain::CompositeProof toLegacyCompositeProof(const primechain::protocol::CompositeProofV0& proof) {
+    primechain::CompositeProof out;
+    out.m = proof.g;
+    out.d = proof.d;
+    out.e = proof.e;
+    out.provider_address = proof.provider_address;
+    out.signature = proof.signature;
+    return out;
+}
+
+bool loadCompositeProofIndex(
+    const primechain::storage::RecordStore& store,
+    MapProofIndex& proofs,
+    std::string& error) {
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        return false;
+    }
+    for (const auto& stored : records) {
+        if (stored.kind != primechain::storage::StoredRecordKind::Composite) {
+            continue;
+        }
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) {
+            return false;
+        }
+        const auto proof = toLegacyCompositeProof(decoded->proof);
+        if (!primechain::math::verifyCompositeProof(proof)) {
+            error = "stored composite proof is invalid";
+            return false;
+        }
+        proofs.add(proof);
+    }
+    return true;
+}
+
+primechain::protocol::PrimeRecordV0 makePrimeRecord(
+    const primechain::node::SequentialNodeStatus& status,
+    primechain::PrimeValue p,
+    const primechain::math::PrattProof& proof,
+    const std::string& prime_miner_address) {
+    primechain::protocol::PrimeRecordV0 record;
+    record.version = 0;
+    record.height = status.height + 1;
+    record.previous_record_hash = status.latest_record_hash;
+    record.integer = p;
+    record.proof.p = proof.p;
+    record.proof.witness = proof.witness;
+    for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+        record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
+    }
+    record.proof.provider_address = prime_miner_address;
+    primechain::protocol::applyDevelopmentFinalization(record);
+    return record;
+}
+
+primechain::protocol::CompositeRecordV0 makeCompositeRecord(
+    const primechain::node::SequentialNodeStatus& status,
+    const primechain::CompositeProof& proof,
+    const std::string& composite_miner_address) {
+    primechain::protocol::CompositeRecordV0 record;
+    record.version = 0;
+    record.height = status.height + 1;
+    record.previous_record_hash = status.latest_record_hash;
+    record.integer = proof.m;
+    record.proof.g = proof.m;
+    record.proof.d = proof.d;
+    record.proof.e = proof.e;
+    record.proof.provider_address = composite_miner_address;
+    primechain::protocol::applyDevelopmentFinalization(record);
+    return record;
+}
+
 class SyncServer {
 public:
     explicit SyncServer(std::string store_path)
@@ -220,6 +313,10 @@ public:
             }
             if (line->rfind("ACK_MEMPOOL ", 0) == 0) {
                 ackMempool(fd, *line);
+                continue;
+            }
+            if (line->rfind("ADVANCE_TO ", 0) == 0) {
+                advanceTo(fd, *line);
                 continue;
             }
             writeAll(fd, "ERROR unknown command\n");
@@ -407,6 +504,141 @@ private:
 
         std::ostringstream out;
         out << "MEMPOOL_ACKED " << removed << " " << mempool_.size() << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void removeMempoolTransactions(const std::vector<primechain::protocol::TransactionV0>& included) {
+        if (included.empty()) {
+            return;
+        }
+
+        std::vector<primechain::protocol::TransactionV0> retained;
+        retained.reserve(mempool_.size());
+        for (const auto& tx : mempool_) {
+            const auto tx_hash = primechain::protocol::transactionHash(tx);
+            bool acknowledged = false;
+            for (const auto& included_tx : included) {
+                if (primechain::protocol::transactionHash(included_tx) == tx_hash) {
+                    acknowledged = true;
+                    break;
+                }
+            }
+            if (!acknowledged) {
+                retained.push_back(tx);
+            }
+        }
+        mempool_ = std::move(retained);
+    }
+
+    void advanceTo(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue limit = 0;
+        std::string prime_miner_address;
+        std::string composite_miner_address;
+        primechain::PrimeValue mempool_target_integer = 0;
+        in >> command >> limit >> prime_miner_address >> composite_miner_address >> mempool_target_integer;
+        if (!in ||
+            limit < 2 ||
+            mempool_target_integer < 3 ||
+            mempool_target_integer > limit ||
+            !primechain::protocol::isDevelopmentAddress(prime_miner_address) ||
+            !primechain::protocol::isDevelopmentAddress(composite_miner_address)) {
+            writeAll(fd, "ERROR invalid ADVANCE_TO; expected ADVANCE_TO limit prime_miner composite_miner mempool_target_integer\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!node.status().has_genesis) {
+            error.clear();
+            if (!node.initializeGenesis(error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+        }
+
+        MapProofIndex proofs;
+        error.clear();
+        if (!loadCompositeProofIndex(store_, proofs, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+
+        if (limit <= node.status().frontier_integer) {
+            std::ostringstream out;
+            out << "ADVANCED 0 included_txs=0 frontier=" << node.status().frontier_integer << "\n";
+            writeAll(fd, out.str());
+            return;
+        }
+
+        std::uint64_t appended = 0;
+        std::vector<primechain::protocol::TransactionV0> included_transactions;
+        for (primechain::PrimeValue n = node.status().frontier_integer + 1; n <= limit; ++n) {
+            const bool include_mempool_here = (n == mempool_target_integer);
+            if (primechain::math::isPrime(n)) {
+                const auto proof = primechain::math::makePrattProof(n, proofs);
+                if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
+                    writeAll(fd, "ERROR could not create valid Pratt proof for " + std::to_string(n) + "\n");
+                    return;
+                }
+                auto record = makePrimeRecord(node.status(), n, *proof, prime_miner_address);
+                if (include_mempool_here) {
+                    record.transactions = mempool_;
+                    included_transactions = mempool_;
+                    primechain::protocol::applyDevelopmentFinalization(record);
+                }
+                error.clear();
+                if (!node.appendPrime(record, error)) {
+                    writeAll(fd, "ERROR could not append prime record for " + std::to_string(n) + ": " + error + "\n");
+                    return;
+                }
+                ++appended;
+                continue;
+            }
+
+            const auto proof = primechain::math::makeCompositeProof(n, composite_miner_address);
+            if (!proof.has_value() || !primechain::math::verifyCompositeProof(*proof)) {
+                writeAll(fd, "ERROR could not create valid composite proof for " + std::to_string(n) + "\n");
+                return;
+            }
+            auto record = makeCompositeRecord(node.status(), *proof, composite_miner_address);
+            if (include_mempool_here) {
+                record.transactions = mempool_;
+                included_transactions = mempool_;
+                primechain::protocol::applyDevelopmentFinalization(record);
+            }
+            error.clear();
+            if (!node.appendComposite(record, error)) {
+                writeAll(fd, "ERROR could not append composite record for " + std::to_string(n) + ": " + error + "\n");
+                return;
+            }
+            proofs.add(*proof);
+            ++appended;
+        }
+
+        primechain::node::SequentialNode reloaded(store_path_);
+        error.clear();
+        if (!reloaded.load(error)) {
+            writeAll(fd, "ERROR reload failed after advance: " + error + "\n");
+            return;
+        }
+        if (!reloaded.status().has_genesis || reloaded.status().frontier_integer != limit) {
+            writeAll(fd, "ERROR reload frontier mismatch after advance\n");
+            return;
+        }
+
+        removeMempoolTransactions(included_transactions);
+
+        std::ostringstream out;
+        out << "ADVANCED " << appended
+            << " included_txs=" << included_transactions.size()
+            << " frontier=" << reloaded.status().frontier_integer
+            << "\n";
         writeAll(fd, out.str());
     }
 
