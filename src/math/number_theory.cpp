@@ -3,6 +3,7 @@
 #include <cmath>
 #include <map>
 #include <limits>
+#include <vector>
 
 namespace primechain::math {
 
@@ -29,6 +30,12 @@ bool addFactor(
 }
 
 } // namespace
+
+void appendUint64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+    for (int i = 0; i < 8; ++i) {
+        out.push_back(static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu));
+    }
+}
 
 bool isPrime(PrimeValue n) {
     if (n < 2) {
@@ -97,7 +104,51 @@ bool verifyPrimeCertificate(PrimeValue p, const PrimeCertificate& certificate) {
     return isPrime(p);
 }
 
-std::optional<std::vector<PrimePowerFactor>> factorizeFromProofIndex(
+bool isCanonicalFactorization(const Factorization& factorization) {
+    PrimeValue previous = 0;
+    for (const auto& factor : factorization.factors) {
+        if (factor.prime < 2 || factor.exponent == 0) {
+            return false;
+        }
+        if (!isPrime(factor.prime)) {
+            return false;
+        }
+        if (previous != 0 && factor.prime <= previous) {
+            return false;
+        }
+        previous = factor.prime;
+    }
+    return true;
+}
+
+std::optional<PrimeValue> multiplyFactorization(const Factorization& factorization) {
+    if (!isCanonicalFactorization(factorization)) {
+        return std::nullopt;
+    }
+
+    PrimeValue product = 1;
+    for (const auto& factor : factorization.factors) {
+        for (std::uint64_t i = 0; i < factor.exponent; ++i) {
+            if (product > std::numeric_limits<PrimeValue>::max() / factor.prime) {
+                return std::nullopt;
+            }
+            product *= factor.prime;
+        }
+    }
+    return product;
+}
+
+std::vector<std::uint8_t> serializeFactorization(const Factorization& factorization) {
+    std::vector<std::uint8_t> out;
+    appendUint64(out, factorization.factors.size());
+    for (const auto& factor : factorization.factors) {
+        appendUint64(out, factor.prime);
+        appendUint64(out, factor.exponent);
+    }
+    return out;
+}
+
+std::optional<Factorization> factorizeFromProofIndex(
     PrimeValue n,
     const CompositeProofIndex& proofs) {
     if (n < 2) {
@@ -109,9 +160,12 @@ std::optional<std::vector<PrimePowerFactor>> factorizeFromProofIndex(
         return std::nullopt;
     }
 
-    std::vector<PrimePowerFactor> out;
+    Factorization out;
     for (const auto& [prime, exponent] : factor_counts) {
-        out.push_back({prime, exponent});
+        out.factors.push_back({prime, exponent});
+    }
+    if (!isCanonicalFactorization(out)) {
+        return std::nullopt;
     }
     return out;
 }

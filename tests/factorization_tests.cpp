@@ -46,13 +46,13 @@ MapProofIndex makeIndexUpTo(primechain::PrimeValue n) {
 }
 
 bool equals(
-    const std::vector<primechain::math::PrimePowerFactor>& actual,
+    const primechain::math::Factorization& actual,
     const std::vector<primechain::math::PrimePowerFactor>& expected) {
-    if (actual.size() != expected.size()) {
+    if (actual.factors.size() != expected.size()) {
         return false;
     }
-    for (std::size_t i = 0; i < actual.size(); ++i) {
-        if (actual[i].prime != expected[i].prime || actual[i].exponent != expected[i].exponent) {
+    for (std::size_t i = 0; i < actual.factors.size(); ++i) {
+        if (actual.factors[i].prime != expected[i].prime || actual.factors[i].exponent != expected[i].exponent) {
             return false;
         }
     }
@@ -71,6 +71,16 @@ int main() {
     if (!expect(equals(*factor_30, {{2, 1}, {3, 1}, {5, 1}}), "30 = 2 * 3 * 5")) {
         return 1;
     }
+    if (!expect(primechain::math::isCanonicalFactorization(*factor_30), "30 factorization is canonical")) {
+        return 1;
+    }
+    const auto product_30 = primechain::math::multiplyFactorization(*factor_30);
+    if (!expect(product_30.has_value() && *product_30 == 30, "30 factorization multiplies back")) {
+        return 1;
+    }
+    if (!expect(primechain::math::serializeFactorization(*factor_30).size() == 56, "30 factorization canonical byte length")) {
+        return 1;
+    }
 
     const auto factor_504 = primechain::math::factorizeFromProofIndex(504, index);
     if (!expect(factor_504.has_value(), "factorize 504")) {
@@ -85,6 +95,24 @@ int main() {
         return 1;
     }
     if (!expect(equals(*factor_prime, {{97, 1}}), "97 = 97")) {
+        return 1;
+    }
+
+    primechain::math::Factorization unsorted;
+    unsorted.factors = {{3, 1}, {2, 1}};
+    if (!expect(!primechain::math::isCanonicalFactorization(unsorted), "reject unsorted factorization")) {
+        return 1;
+    }
+
+    primechain::math::Factorization repeated;
+    repeated.factors = {{2, 1}, {2, 1}};
+    if (!expect(!primechain::math::isCanonicalFactorization(repeated), "reject repeated prime factor entries")) {
+        return 1;
+    }
+
+    primechain::math::Factorization zero_exponent;
+    zero_exponent.factors = {{2, 0}};
+    if (!expect(!primechain::math::isCanonicalFactorization(zero_exponent), "reject zero exponent")) {
         return 1;
     }
 

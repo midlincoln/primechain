@@ -207,17 +207,24 @@ The proof does not need to contain a complete factorization. Complete factorizat
 
 A Pratt proof certifies that `p` is prime.
 
-For v0, a Pratt proof is represented as:
+### Canonical Factorization Format
+
+All full factorizations are represented as a canonical ordered list of prime powers:
 
 ```text
-PrattPrimeProof {
-    p: UInt64,
-    witness: UInt64,
-    factors_of_p_minus_1: [PrimePower],
-    provider_address: Address,
-    signature: Bytes
+Factorization {
+    factors: [PrimePower]
 }
 ```
+
+Canonical rules:
+
+- factors are sorted by strictly increasing `prime`,
+- every `prime >= 2`,
+- every `prime` must itself be prime,
+- every `exponent >= 1`,
+- repeated prime entries are invalid,
+- the empty factor list is valid only when a surrounding rule explicitly allows product `1`.
 
 Prime-power factor:
 
@@ -225,6 +232,37 @@ Prime-power factor:
 PrimePower {
     prime: UInt64,
     exponent: UInt64
+}
+```
+
+Canonical binary encoding:
+
+```text
+uint64 factor_count
+for each factor in increasing-prime order:
+    uint64 prime
+    uint64 exponent
+```
+
+The product represented by the factorization is:
+
+```text
+product(prime^exponent)
+```
+
+Validators must reject a factorization if multiplying the prime powers overflows the integer domain or does not equal the target integer required by the surrounding proof.
+
+### Pratt Proof
+
+For v0, a Pratt proof is represented as:
+
+```text
+PrattPrimeProof {
+    p: UInt64,
+    witness: UInt64,
+    factors_of_p_minus_1: Factorization,
+    provider_address: Address,
+    signature: Bytes
 }
 ```
 
