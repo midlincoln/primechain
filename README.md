@@ -252,6 +252,20 @@ composite_records: 404
 frontier_integer: 500
 ```
 
+Look up one stored integer record:
+
+```bash
+./build/primechain-store-inspect ./data/sequential-500.dat 500
+```
+
+Example fields:
+
+```text
+integer: 500
+kind: COMPOSITE
+payload_bytes: ...
+```
+
 ## Development Roadmap
 
 Completed prototype milestones:

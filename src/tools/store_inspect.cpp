@@ -11,9 +11,20 @@ namespace {
 constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [record_store_path]\n"
+    std::cerr << "usage: " << argv0 << " [record_store_path] [integer]\n"
               << "example:\n"
-              << "  " << argv0 << " ./data/sequential-500.dat\n";
+              << "  " << argv0 << " ./data/sequential-500.dat\n"
+              << "  " << argv0 << " ./data/sequential-500.dat 500\n";
+}
+
+const char* kindName(primechain::storage::StoredRecordKind kind) {
+    switch (kind) {
+        case primechain::storage::StoredRecordKind::Composite:
+            return "COMPOSITE";
+        case primechain::storage::StoredRecordKind::Prime:
+            return "PRIME";
+    }
+    return "UNKNOWN";
 }
 
 } // namespace
@@ -25,9 +36,32 @@ int main(int argc, char** argv) {
     }
 
     const std::string store_path = argc > 1 ? argv[1] : kDefaultStorePath;
+    const bool lookup_record = argc > 2;
+    const primechain::PrimeValue lookup_integer = lookup_record ? std::stoull(argv[2]) : 0;
 
     std::string error;
     primechain::storage::RecordStore store(store_path);
+    if (lookup_record) {
+        const auto record = store.findByInteger(lookup_integer, error);
+        if (!error.empty()) {
+            std::cerr << "record_store_error: " << error << "\n";
+            return 1;
+        }
+        if (!record.has_value()) {
+            std::cerr << "record_not_found: " << lookup_integer << "\n";
+            return 1;
+        }
+
+        std::cout << "record lookup\n";
+        std::cout << "store_path: " << store_path << "\n";
+        std::cout << "integer: " << record->integer << "\n";
+        std::cout << "height: " << record->height << "\n";
+        std::cout << "kind: " << kindName(record->kind) << "\n";
+        std::cout << "record_hash: " << primechain::crypto::toHex(record->record_hash) << "\n";
+        std::cout << "payload_bytes: " << record->payload.size() << "\n";
+        return 0;
+    }
+
     const auto records = store.loadAll(error);
     if (!error.empty()) {
         std::cerr << "record_store_error: " << error << "\n";

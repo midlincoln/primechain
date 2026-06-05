@@ -153,6 +153,19 @@ std::optional<StoredRecord> RecordStore::latest(std::string& error) const {
     return records.back();
 }
 
+std::optional<StoredRecord> RecordStore::findByInteger(PrimeValue integer, std::string& error) const {
+    auto records = loadAll(error);
+    if (!error.empty()) {
+        return std::nullopt;
+    }
+    for (const auto& record : records) {
+        if (record.integer == integer) {
+            return record;
+        }
+    }
+    return std::nullopt;
+}
+
 StoredRecord makeStoredRecord(const protocol::CompositeRecordV0& record) {
     StoredRecord out;
     out.kind = StoredRecordKind::Composite;

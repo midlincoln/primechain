@@ -93,6 +93,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    error.clear();
+    const auto found_genesis = store.findByInteger(2, error);
+    if (!expect(found_genesis.has_value(), "find genesis by integer")) {
+        return 1;
+    }
+    if (!expect(found_genesis->record_hash == genesis.record_hash, "found genesis hash matches")) {
+        return 1;
+    }
+
+    error.clear();
+    const auto found_composite = store.findByInteger(4, error);
+    if (!expect(found_composite.has_value(), "find composite by integer")) {
+        return 1;
+    }
+    if (!expect(found_composite->record_hash == composite.record_hash, "found composite hash matches")) {
+        return 1;
+    }
+
+    error.clear();
+    if (!expect(!store.findByInteger(3, error).has_value(), "missing integer not found")) {
+        return 1;
+    }
+
     auto corrupted = composite;
     corrupted.record_hash[0] ^= 0xff;
     error.clear();
