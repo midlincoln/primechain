@@ -243,6 +243,15 @@ You can inject one development transfer into a chosen arithmetic record:
 
 This sends `250000` micro-units of prime `3` from `miner.wallet` to Alice's address and embeds the transfer in record `4`. The sender must already own the units before the target record is applied.
 
+Shortcut using `primechain-send`:
+
+```bash
+./build/primechain-send 20 ./data/send-chain.log ./data/send-chain.dat \
+  ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 4
+```
+
+`primechain-send` uses the sender wallet address as the prime miner address for this fresh generated test chain, so the sender owns prime `3` before record `4` spends it.
+
 Expected summary:
 
 ```text

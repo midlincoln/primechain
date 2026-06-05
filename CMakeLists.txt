@@ -119,6 +119,15 @@ target_link_libraries(primechain-balance
         primechain_core
 )
 
+add_executable(primechain-send
+    src/tools/send.cpp
+)
+
+target_link_libraries(primechain-send
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-wallet
     src/wallet/wallet_main.cpp
 )
@@ -266,6 +275,12 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.log && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet >/dev/null && miner=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet) && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet) && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.log ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat --prime-miner $miner --composite-miner pcdev1_custom_composite_miner --transfer ${CMAKE_CURRENT_BINARY_DIR}/tx-miner.wallet $alice 3 250000 4 >/dev/null && $<TARGET_FILE:primechain-wallet> balance ${CMAKE_CURRENT_BINARY_DIR}/tx-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/tx-alice.wallet | grep -q '^3 250000'"
+)
+add_test(
+    NAME send_tool_transfer_to_wallet
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/send-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/send-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/send-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/send-chain.log && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/send-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/send-alice.wallet >/dev/null && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/send-alice.wallet) && $<TARGET_FILE:primechain-send> 20 ${CMAKE_CURRENT_BINARY_DIR}/send-chain.log ${CMAKE_CURRENT_BINARY_DIR}/send-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/send-miner.wallet $alice 3 250000 4 >/dev/null && $<TARGET_FILE:primechain-wallet> balance ${CMAKE_CURRENT_BINARY_DIR}/send-chain.dat ${CMAKE_CURRENT_BINARY_DIR}/send-alice.wallet | grep -q '^3 250000'"
 )
 add_test(
     NAME record_store
