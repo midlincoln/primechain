@@ -154,6 +154,8 @@ This architecture is still under design. Important unresolved questions include 
 
 See [docs/development-log.md](docs/development-log.md) for the current design discussion and decisions.
 
+The first development format specification is [docs/protocol-formats-v0.md](docs/protocol-formats-v0.md). It defines draft object formats for arithmetic records, composite proofs, Pratt prime proofs, transaction batches, addresses, and controlled 2-of-3 validator finalization.
+
 ## Transaction Batches In Arithmetic Records
 
 The current design direction is that every finalized arithmetic record can also carry a transaction batch:
