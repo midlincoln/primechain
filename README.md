@@ -257,3 +257,13 @@ Next milestones:
 9. Later add wallets, rewards, production hashing, and post-quantum signatures.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
+
+## Production Backlog
+
+The staged implementation backlog is documented in [docs/production-roadmap-v0.md](docs/production-roadmap-v0.md).
+
+Current production-track priority:
+
+```text
+canonical disk records -> sequential node -> peer sync -> controlled validator finalization
+```

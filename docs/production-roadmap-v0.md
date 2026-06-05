@@ -1,0 +1,127 @@
+# Primechain Production Backlog v0
+
+This document turns the unresolved production items into an implementation order.
+
+The current code is a development/testnet prototype. The goal is to build a real v0 experimental node without overstating production security.
+
+## Stage 1: Canonical Disk Records And Indexes
+
+Purpose: make the sequential arithmetic chain persistent and replayable.
+
+Deliverables:
+
+- binary record-store envelope,
+- append-only finalized record log,
+- replay with record-hash verification,
+- latest frontier lookup,
+- `integer -> record metadata` index,
+- later: factor and prime indexes.
+
+Why first:
+
+- sync depends on records,
+- voting signs record hashes,
+- transactions commit to record state,
+- wallet reconstruction depends on replay.
+
+## Stage 2: Sequential Node Core
+
+Purpose: replace one-off tools with a reusable node object.
+
+Deliverables:
+
+- `SequentialNode`,
+- append candidate composite record,
+- append candidate prime record,
+- verify next-integer rule,
+- update disk store,
+- expose status/frontier.
+
+## Stage 3: Multi-Node Sync
+
+Purpose: let a new node download already-mined records from peers and verify locally.
+
+Deliverables:
+
+- `GET_STATUS`,
+- `GET_RECORD`,
+- `GET_RECORD_RANGE`,
+- batch sync,
+- replay verification from genesis.
+
+## Stage 4: Controlled 2-of-3 Finalization
+
+Purpose: resolve competing proof candidates in the controlled testnet.
+
+Deliverables:
+
+- validator config,
+- validator vote object,
+- vote verification placeholder,
+- 2-of-3 finalization rule,
+- rejected duplicate/conflicting candidate handling.
+
+This is not permissionless consensus.
+
+## Stage 5: Signatures And Addresses
+
+Purpose: replace placeholders with real identity binding.
+
+Deliverables:
+
+- development keypair format,
+- signed proof submissions,
+- signed validator votes,
+- signed transactions,
+- later: ML-DSA/Dilithium or equivalent PQ signature scheme.
+
+## Stage 6: Transaction State And Wallet Ownership
+
+Purpose: make prime-indexed assets transferable.
+
+Deliverables:
+
+- UTXO or account model decision,
+- transaction validation,
+- sparse prime ownership index,
+- address balances,
+- transaction batch Merkle roots.
+
+## Stage 7: Rewards
+
+Purpose: pay contributors deterministically.
+
+Deliverables:
+
+- prime-discovery reward,
+- composite-proof reward pool,
+- transaction fee distribution,
+- contributor accounting.
+
+## Stage 8: Spam And DoS Protection
+
+Purpose: make public TCP testing survivable.
+
+Deliverables:
+
+- maximum message sizes,
+- proof-window limits,
+- per-peer rate limits,
+- candidate pool limits,
+- cheap rejection before storage,
+- temporary bans.
+
+## Stage 9: Reorg/Fork Handling
+
+Purpose: handle conflicting histories cleanly.
+
+Deliverables:
+
+- controlled-testnet conflict rules,
+- candidate branch storage,
+- rollback/replay,
+- finalized-record immutability after vote threshold.
+
+## Current Priority
+
+Implement Stage 1 first. Everything else depends on durable canonical records.
