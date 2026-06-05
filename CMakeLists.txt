@@ -13,6 +13,7 @@ add_library(primechain_core
     src/core/consensus.cpp
     src/crypto/hash.cpp
     src/math/number_theory.cpp
+    src/node/sequential_node.cpp
     src/protocol/records.cpp
     src/storage/record_store.cpp
 )
@@ -131,6 +132,15 @@ target_link_libraries(primechain-record-store-tests
         primechain_core
 )
 
+add_executable(primechain-sequential-node-tests
+    tests/sequential_node_tests.cpp
+)
+
+target_link_libraries(primechain-sequential-node-tests
+    PRIVATE
+        primechain_core
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -153,4 +163,10 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat && $<TARGET_FILE:primechain-record-store-tests> ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat"
+)
+add_test(
+    NAME sequential_node
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sequential-node-test.dat && $<TARGET_FILE:primechain-sequential-node-tests> ${CMAKE_CURRENT_BINARY_DIR}/sequential-node-test.dat"
 )
