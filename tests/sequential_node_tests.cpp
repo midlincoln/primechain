@@ -180,6 +180,15 @@ int main(int argc, char** argv) {
     if (!expect(!node.appendComposite(tx_record, error), "reject non-empty tx batch until transaction application exists")) {
         return 1;
     }
+    primechain::node::SequentialNode after_rejected_tx(argv[1]);
+    error.clear();
+    if (!expect(after_rejected_tx.load(error), "reload after rejected tx batch")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(after_rejected_tx.status().frontier_integer == 5, "rejected tx batch was not stored")) {
+        return 1;
+    }
 
     const std::string bad_path = std::string(argv[1]) + ".bad-composite";
     std::remove(bad_path.c_str());

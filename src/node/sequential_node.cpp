@@ -269,6 +269,10 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
         return false;
     }
+    if (totalSupplyMicroUnits(record.integer) != 0) {
+        error = "prime asset already minted";
+        return false;
+    }
 
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
