@@ -281,6 +281,26 @@ integer height kind hash16 payload_bytes
 500 498 COMPOSITE ...
 ```
 
+## Run Sync Server
+
+The sync server exposes the binary record store over localhost TCP.
+
+Terminal 1:
+
+```bash
+./build/primechain-sync-server 18889 ./data/sequential-500.dat
+```
+
+Terminal 2:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_STATUS
+./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD 500
+./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD_RANGE 490 500
+```
+
+This is the first local peer-sync API. It is still plain TCP and development-only.
+
 ## Development Roadmap
 
 Completed prototype milestones:
