@@ -252,6 +252,16 @@ Shortcut using `primechain-send`:
 
 `primechain-send` uses the sender wallet address as the prime miner address for this fresh generated test chain, so the sender owns prime `3` before record `4` spends it.
 
+Submit a signed development transaction to a running TCP node:
+
+```bash
+./build/primechain-sync-server 18889 ./data/send-chain.dat
+./build/primechain-send submit 127.0.0.1 18889 \
+  ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 1
+```
+
+The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool.
+
 Expected summary:
 
 ```text

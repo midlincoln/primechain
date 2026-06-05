@@ -15,6 +15,7 @@
 
 #include "primechain/crypto/hash.hpp"
 #include "primechain/node/sequential_node.hpp"
+#include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
 
 namespace {
@@ -147,6 +148,36 @@ std::string bytesToHex(const std::vector<std::uint8_t>& bytes) {
     return out;
 }
 
+std::vector<std::uint8_t> hexToBytes(const std::string& hex) {
+    auto value = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') {
+            return ch - '0';
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            return 10 + ch - 'a';
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            return 10 + ch - 'A';
+        }
+        return -1;
+    };
+
+    std::vector<std::uint8_t> out;
+    if (hex.size() % 2 != 0) {
+        return {};
+    }
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int high = value(hex[i]);
+        const int low = value(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        out.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    return out;
+}
+
 std::string recordLine(const primechain::storage::StoredRecord& record) {
     std::ostringstream out;
     out << "RECORD " << record.integer << " "
@@ -165,7 +196,7 @@ public:
         : store_path_(std::move(store_path)),
           store_(store_path_) {}
 
-    void handleClient(int fd) const {
+    void handleClient(int fd) {
         while (const auto line = readLine(fd)) {
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
@@ -177,6 +208,10 @@ public:
             }
             if (line->rfind("GET_RECORD_RANGE ", 0) == 0) {
                 sendRecordRange(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_TX ", 0) == 0) {
+                submitTx(fd, *line);
                 continue;
             }
             writeAll(fd, "ERROR unknown command\n");
@@ -271,8 +306,48 @@ private:
         writeAll(fd, "END_RECORD_RANGE\n");
     }
 
+    void submitTx(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        std::string tx_hex;
+        in >> command >> tx_hex;
+        if (!in || tx_hex.empty()) {
+            writeAll(fd, "ERROR invalid SUBMIT_TX\n");
+            return;
+        }
+
+        const auto tx_bytes = hexToBytes(tx_hex);
+        if (tx_bytes.empty()) {
+            writeAll(fd, "ERROR invalid tx hex\n");
+            return;
+        }
+
+        std::string error;
+        const auto tx = primechain::protocol::deserializeTransaction(tx_bytes, error);
+        if (!tx.has_value()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!primechain::protocol::verifyDevelopmentTransactionSignature(*tx)) {
+            writeAll(fd, "ERROR invalid transaction signature\n");
+            return;
+        }
+
+        const auto hash = primechain::protocol::transactionHash(*tx);
+        for (const auto& existing : mempool_) {
+            if (primechain::protocol::transactionHash(existing) == hash) {
+                writeAll(fd, "TX_DUPLICATE " + primechain::crypto::toHex(hash) + "\n");
+                return;
+            }
+        }
+
+        mempool_.push_back(*tx);
+        writeAll(fd, "TX_ACCEPTED " + primechain::crypto::toHex(hash) + "\n");
+    }
+
     std::string store_path_;
     primechain::storage::RecordStore store_;
+    std::vector<primechain::protocol::TransactionV0> mempool_;
 };
 
 void printUsage(const char* argv0) {

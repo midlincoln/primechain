@@ -1,9 +1,16 @@
 #include <cstdlib>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -13,9 +20,51 @@ namespace {
 
 struct DevWallet {
     std::string address;
+    std::vector<std::uint8_t> public_key;
 };
 
-bool loadWalletAddress(const std::string& path, DevWallet& wallet) {
+std::string bytesToHex(const std::vector<std::uint8_t>& bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (std::uint8_t byte : bytes) {
+        out.push_back(kHex[byte >> 4]);
+        out.push_back(kHex[byte & 0x0f]);
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> hexToBytes(const std::string& hex) {
+    auto value = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') {
+            return ch - '0';
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            return 10 + ch - 'a';
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            return 10 + ch - 'A';
+        }
+        return -1;
+    };
+
+    std::vector<std::uint8_t> out;
+    if (hex.size() % 2 != 0) {
+        return {};
+    }
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int high = value(hex[i]);
+        const int low = value(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        out.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    return out;
+}
+
+bool loadWallet(const std::string& path, DevWallet& wallet) {
     std::ifstream in(path);
     if (!in) {
         return false;
@@ -28,9 +77,13 @@ bool loadWalletAddress(const std::string& path, DevWallet& wallet) {
         }
         if (line.substr(0, pos) == "address") {
             wallet.address = line.substr(pos + 1);
+        } else if (line.substr(0, pos) == "public_key") {
+            wallet.public_key = hexToBytes(line.substr(pos + 1));
         }
     }
-    return primechain::protocol::isDevelopmentAddress(wallet.address);
+    return primechain::protocol::isDevelopmentAddress(wallet.address) &&
+           !wallet.public_key.empty() &&
+           wallet.address == primechain::protocol::developmentAddressFromPublicKey(wallet.public_key);
 }
 
 std::string siblingExecutable(const char* argv0, const std::string& executable_name) {
@@ -42,16 +95,159 @@ std::string siblingExecutable(const char* argv0, const std::string& executable_n
     return self.substr(0, slash + 1) + executable_name;
 }
 
+class Socket {
+public:
+    explicit Socket(int fd = -1) : fd_(fd) {}
+    ~Socket() {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    Socket(Socket&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+
+    Socket& operator=(Socket&& other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0) {
+                close(fd_);
+            }
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    int fd() const { return fd_; }
+
+private:
+    int fd_{-1};
+};
+
+std::optional<Socket> connectToServer(const std::string& host, int port) {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "socket failed: " << std::strerror(errno) << "\n";
+        return std::nullopt;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "invalid IPv4 address: " << host << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::cerr << "connect failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    return Socket(fd);
+}
+
+bool writeAll(int fd, const std::string& message) {
+    const char* cursor = message.data();
+    std::size_t remaining = message.size();
+    while (remaining > 0) {
+        const ssize_t sent = send(fd, cursor, remaining, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        cursor += sent;
+        remaining -= static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+primechain::protocol::TransactionV0 makeTransferTransaction(
+    const DevWallet& sender,
+    const std::string& receiver_address,
+    primechain::PrimeValue prime,
+    std::uint64_t amount,
+    std::uint64_t nonce) {
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 0;
+    tx.inputs.push_back({prime, {amount, 1}});
+    tx.outputs.push_back({prime, {amount, 1}, receiver_address});
+    tx.fee = {prime, {0, 1}};
+    tx.nonce = nonce;
+    tx.sender_address = sender.address;
+    tx.sender_public_key = sender.public_key;
+    tx.signature = primechain::protocol::developmentTransactionSignature(tx);
+    return tx;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
+              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
               << "example:\n"
-              << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n";
+              << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
+              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/miner.wallet pcdev1_alice 3 250000 1\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "submit") {
+        if (argc != 9) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        const std::string host = argv[2];
+        const int port = std::stoi(argv[3]);
+        const std::string sender_wallet_path = argv[4];
+        const std::string receiver_address = argv[5];
+        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
+        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[8]));
+
+        DevWallet sender;
+        if (!loadWallet(sender_wallet_path, sender)) {
+            std::cerr << "could not load sender wallet\n";
+            return 1;
+        }
+        if (!primechain::protocol::isDevelopmentAddress(receiver_address) || prime < 2 || amount == 0) {
+            std::cerr << "invalid transfer arguments\n";
+            return 1;
+        }
+
+        const auto tx = makeTransferTransaction(sender, receiver_address, prime, amount, nonce);
+        const std::string tx_hex = bytesToHex(primechain::protocol::serializeTransaction(tx, true));
+        auto socket = connectToServer(host, port);
+        if (!socket.has_value()) {
+            return 1;
+        }
+        if (!writeAll(socket->fd(), "SUBMIT_TX " + tx_hex + "\n")) {
+            std::cerr << "could not send transaction\n";
+            return 1;
+        }
+        shutdown(socket->fd(), SHUT_WR);
+
+        char buffer[4096];
+        while (true) {
+            const ssize_t received = recv(socket->fd(), buffer, sizeof(buffer), 0);
+            if (received == 0) {
+                break;
+            }
+            if (received < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                std::cerr << "recv failed: " << std::strerror(errno) << "\n";
+                return 1;
+            }
+            std::cout.write(buffer, received);
+        }
+        return 0;
+    }
+
     if (argc != 9 && argc != 11) {
         printUsage(argv[0]);
         return 1;
@@ -76,7 +272,7 @@ int main(int argc, char** argv) {
     }
 
     DevWallet sender;
-    if (!loadWalletAddress(sender_wallet_path, sender)) {
+    if (!loadWallet(sender_wallet_path, sender)) {
         std::cerr << "could not load sender wallet address\n";
         return 1;
     }
