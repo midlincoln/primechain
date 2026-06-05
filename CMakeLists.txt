@@ -79,6 +79,15 @@ target_link_libraries(primechain-sequential
         primechain_core
 )
 
+add_executable(primechain-store-inspect
+    src/tools/store_inspect.cpp
+)
+
+target_link_libraries(primechain-store-inspect
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-tests
     tests/consensus_tests.cpp
 )
@@ -157,6 +166,12 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.dat && $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.log ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.dat >/dev/null && $<TARGET_FILE:primechain-sequential-tests> ${CMAKE_CURRENT_BINARY_DIR}/sequential-500.log"
+)
+add_test(
+    NAME store_inspect_500
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/inspect-500.dat && $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/inspect-500.log ${CMAKE_CURRENT_BINARY_DIR}/inspect-500.dat >/dev/null && $<TARGET_FILE:primechain-store-inspect> ${CMAKE_CURRENT_BINARY_DIR}/inspect-500.dat | grep -q 'frontier_integer: 500'"
 )
 add_test(
     NAME record_store

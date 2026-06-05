@@ -237,6 +237,21 @@ composite_records: 404
 
 The `.log` file is human-readable. The `.dat` file is the binary finalized-record store used by `SequentialNode` replay.
 
+Inspect the binary store:
+
+```bash
+./build/primechain-store-inspect ./data/sequential-500.dat
+```
+
+Expected key fields:
+
+```text
+records: 499
+prime_records: 95
+composite_records: 404
+frontier_integer: 500
+```
+
 ## Development Roadmap
 
 Completed prototype milestones:
