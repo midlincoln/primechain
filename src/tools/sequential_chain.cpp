@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "primechain/crypto/hash.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
@@ -306,6 +307,39 @@ std::optional<std::vector<primechain::protocol::TransactionV0>> fetchMempool(
     return transactions;
 }
 
+bool acknowledgeMempool(
+    const std::string& host,
+    int port,
+    const std::vector<primechain::protocol::TransactionV0>& transactions) {
+    if (transactions.empty()) {
+        return true;
+    }
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        return false;
+    }
+
+    std::ostringstream command;
+    command << "ACK_MEMPOOL";
+    for (const auto& tx : transactions) {
+        command << " " << primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+    }
+    command << "\n";
+
+    if (!writeAll(socket->fd(), command.str())) {
+        std::cerr << "could not acknowledge mempool transactions\n";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value() || response->rfind("MEMPOOL_ACKED ", 0) != 0) {
+        std::cerr << "invalid mempool acknowledgement response\n";
+        return false;
+    }
+    return true;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [limit] [text_log_path] [record_store_path] [--prime-miner address] [--composite-miner address]\n"
               << "       [--transfer sender.wallet receiver_address prime amount target_integer]\n"
@@ -582,6 +616,9 @@ int main(int argc, char** argv) {
     }
     if (!reloaded.status().has_genesis || reloaded.status().frontier_integer != options.limit) {
         std::cerr << "reloaded frontier mismatch\n";
+        return 1;
+    }
+    if (options.has_mempool && !acknowledgeMempool(options.mempool_host, options.mempool_port, mempool_transactions)) {
         return 1;
     }
 

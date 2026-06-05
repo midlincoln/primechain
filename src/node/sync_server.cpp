@@ -218,6 +218,10 @@ public:
                 sendMempool(fd);
                 continue;
             }
+            if (line->rfind("ACK_MEMPOOL ", 0) == 0) {
+                ackMempool(fd, *line);
+                continue;
+            }
             writeAll(fd, "ERROR unknown command\n");
         }
     }
@@ -364,6 +368,46 @@ private:
                 + "\n");
         }
         writeAll(fd, "END_MEMPOOL\n");
+    }
+
+    void ackMempool(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        in >> command;
+
+        std::vector<std::string> hashes;
+        std::string hash;
+        while (in >> hash) {
+            hashes.push_back(hash);
+        }
+        if (hashes.empty()) {
+            writeAll(fd, "ERROR ACK_MEMPOOL requires at least one hash\n");
+            return;
+        }
+
+        std::uint64_t removed = 0;
+        std::vector<primechain::protocol::TransactionV0> retained;
+        retained.reserve(mempool_.size());
+        for (const auto& tx : mempool_) {
+            const std::string tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+            bool acknowledged = false;
+            for (const auto& requested_hash : hashes) {
+                if (requested_hash == tx_hash) {
+                    acknowledged = true;
+                    break;
+                }
+            }
+            if (acknowledged) {
+                ++removed;
+            } else {
+                retained.push_back(tx);
+            }
+        }
+        mempool_ = std::move(retained);
+
+        std::ostringstream out;
+        out << "MEMPOOL_ACKED " << removed << " " << mempool_.size() << "\n";
+        writeAll(fd, out.str());
     }
 
     std::string store_path_;

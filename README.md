@@ -277,6 +277,8 @@ Generate a fresh chain that pulls TCP mempool transactions into record `4`:
   --mempool 127.0.0.1 18889 4
 ```
 
+After the generated chain successfully reload-validates, the generator sends `ACK_MEMPOOL` for included transaction hashes. The TCP node removes acknowledged transactions from its in-memory mempool.
+
 Expected summary:
 
 ```text
