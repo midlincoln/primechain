@@ -306,6 +306,16 @@ Bootstrap-download records into a fresh local store:
 ./build/primechain-store-inspect ./data/downloaded-500.dat
 ```
 
+Resume download in batches:
+
+```bash
+./build/primechain-sync-download 127.0.0.1 18889 2 250 ./data/resume-500.dat
+./build/primechain-sync-download 127.0.0.1 18889 251 500 ./data/resume-500.dat
+./build/primechain-store-inspect ./data/resume-500.dat
+```
+
+The downloader rejects duplicate or skipped ranges. A non-empty destination store must resume exactly at `frontier + 1`.
+
 This is the first local peer-sync API. It is still plain TCP and development-only.
 
 ## Development Roadmap

@@ -217,6 +217,27 @@ int main(int argc, char** argv) {
     const primechain::PrimeValue start = std::stoull(argv[3]);
     const primechain::PrimeValue end = std::stoull(argv[4]);
     const std::string output_store = argv[5];
+    if (start > end) {
+        std::cerr << "invalid range: start is greater than end\n";
+        return 1;
+    }
+
+    std::string error;
+    primechain::node::SequentialNode existing_node(output_store);
+    if (!existing_node.load(error)) {
+        std::cerr << "existing output store did not replay: " << error << "\n";
+        return 1;
+    }
+    if (!existing_node.status().has_genesis) {
+        if (start != 2) {
+            std::cerr << "empty output store must start syncing at integer 2\n";
+            return 1;
+        }
+    } else if (start != existing_node.status().frontier_integer + 1) {
+        std::cerr << "resume start must be exactly frontier + 1; current frontier is "
+                  << existing_node.status().frontier_integer << "\n";
+        return 1;
+    }
 
     auto socket = connectToServer(host, port);
     if (!socket.has_value()) {
@@ -249,7 +270,6 @@ int main(int argc, char** argv) {
     }
 
     primechain::storage::RecordStore output(output_store);
-    std::string error;
     std::uint64_t downloaded = 0;
     while (const auto line = readLine(socket->fd())) {
         if (*line == "END_RECORD_RANGE") {
@@ -282,6 +302,8 @@ int main(int argc, char** argv) {
     std::cout << "sync download complete\n";
     std::cout << "output_store: " << output_store << "\n";
     std::cout << "records: " << downloaded << "\n";
+    std::cout << "start: " << start << "\n";
+    std::cout << "end: " << end << "\n";
     std::cout << "frontier_integer: " << node.status().frontier_integer << "\n";
     return 0;
 }
