@@ -13,6 +13,7 @@ add_library(primechain_core
     src/core/consensus.cpp
     src/crypto/hash.cpp
     src/math/number_theory.cpp
+    src/protocol/records.cpp
 )
 
 target_include_directories(primechain_core
@@ -80,6 +81,15 @@ add_executable(primechain-arithmetic-bench-tests
     tests/arithmetic_bench_tests.cpp
 )
 
+add_executable(primechain-protocol-record-tests
+    tests/protocol_record_tests.cpp
+)
+
+target_link_libraries(primechain-protocol-record-tests
+    PRIVATE
+        primechain_core
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -88,3 +98,4 @@ add_test(
         /bin/sh -c
         "$<TARGET_FILE:primechain-arithmetic-bench> 20 7 3 ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log >/dev/null && $<TARGET_FILE:primechain-arithmetic-bench-tests> ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log"
 )
+add_test(NAME protocol_records COMMAND primechain-protocol-record-tests)
