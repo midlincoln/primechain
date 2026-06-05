@@ -195,6 +195,10 @@ bool verifyPrattProof(const PrattProof& proof) {
         return false;
     }
 
+    if (!isCanonicalFactorization(proof.factors_of_p_minus_1)) {
+        return false;
+    }
+
     const auto product = multiplyFactorization(proof.factors_of_p_minus_1);
     if (!product.has_value() || *product != proof.p - 1) {
         return false;

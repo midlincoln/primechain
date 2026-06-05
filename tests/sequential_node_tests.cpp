@@ -199,6 +199,40 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::string bad_prime_path = std::string(argv[1]) + ".bad-prime";
+    std::remove(bad_prime_path.c_str());
+    primechain::node::SequentialNode bad_prime_node(bad_prime_path);
+    error.clear();
+    if (!expect(bad_prime_node.load(error), "load empty bad-prime store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    error.clear();
+    if (!expect(bad_prime_node.initializeGenesis(error), "initialize bad-prime genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    primechain::protocol::PrimeRecordV0 bad_prime;
+    bad_prime.version = 0;
+    bad_prime.height = bad_prime_node.status().height + 1;
+    bad_prime.previous_record_hash = bad_prime_node.status().latest_record_hash;
+    bad_prime.integer = 3;
+    bad_prime.proof.p = 3;
+    bad_prime.proof.witness = 2;
+    bad_prime.proof.factors_of_p_minus_1.push_back({2, 2});
+    bad_prime.proof.provider_address = "pcdev1_prime_miner";
+    primechain::storage::RecordStore bad_prime_store(bad_prime_path);
+    error.clear();
+    if (!expect(bad_prime_store.append(primechain::storage::makeStoredRecord(bad_prime), error), "append hashed bad prime directly to store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    primechain::node::SequentialNode bad_prime_reload(bad_prime_path);
+    error.clear();
+    if (!expect(!bad_prime_reload.load(error), "reject bad prime on replay")) {
+        return 1;
+    }
+
     std::cout << "sequential node tests passed\n";
     return 0;
 }

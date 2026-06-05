@@ -89,6 +89,10 @@ bool validateStoredPrimePayload(
         error = "invalid prime payload provider address";
         return false;
     }
+    if (!math::verifyPrattProof(toMathPrattProof(decoded->proof))) {
+        error = "invalid prime payload Pratt proof";
+        return false;
+    }
     return true;
 }
 
