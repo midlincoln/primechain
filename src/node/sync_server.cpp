@@ -319,6 +319,10 @@ public:
                 advanceTo(fd, *line);
                 continue;
             }
+            if (line->rfind("GET_BALANCE ", 0) == 0) {
+                sendBalance(fd, *line);
+                continue;
+            }
             writeAll(fd, "ERROR unknown command\n");
         }
     }
@@ -639,6 +643,33 @@ private:
             << " included_txs=" << included_transactions.size()
             << " frontier=" << reloaded.status().frontier_integer
             << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void sendBalance(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        std::string address;
+        in >> command >> address;
+        if (!in || !primechain::protocol::isDevelopmentAddress(address)) {
+            writeAll(fd, "ERROR invalid GET_BALANCE\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+
+        const auto holdings = node.holdingsForAddress(address);
+        std::ostringstream out;
+        out << "BALANCE " << address << " " << holdings.size() << "\n";
+        for (const auto& holding : holdings) {
+            out << "HOLDING " << holding.first << " " << holding.second << "\n";
+        }
+        out << "END_BALANCE\n";
         writeAll(fd, out.str());
     }
 

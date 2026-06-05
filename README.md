@@ -363,6 +363,7 @@ Terminal 2:
 ./build/primechain-sync-query 127.0.0.1 18889 GET_STATUS
 ./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD 500
 ./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD_RANGE 490 500
+./build/primechain-sync-query 127.0.0.1 18889 GET_BALANCE pcdev1_prime_miner
 ```
 
 Bootstrap-download records into a fresh local store:
@@ -381,6 +382,21 @@ rm -f ./data/tcp-node-copy.dat
 ```
 
 This is the current node-to-node replay test: the second store is reconstructed only from downloaded records, then wallet balances are derived by replaying those records locally.
+
+Query a running node's replayed wallet state directly:
+
+```bash
+alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
+./build/primechain-sync-query 127.0.0.1 18889 GET_BALANCE $alice
+```
+
+Expected shape:
+
+```text
+BALANCE pcdev1_... 1
+HOLDING 3 250000
+END_BALANCE
+```
 
 Resume download in batches:
 
@@ -428,6 +444,40 @@ Development wallet/address tools:
 ```
 
 Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Current development transaction signatures are deterministic placeholders, not production cryptography.
+
+## Recreate Current Prototype From GitHub
+
+The current implementation does not depend on any private server state. The source of truth is the public GitHub repository. To recreate the working prototype on a suitable Linux machine:
+
+```bash
+git clone https://github.com/midlincoln/primechain.git
+cd primechain
+cmake -S . -B build
+cmake --build build
+cd build
+ctest --output-on-failure
+```
+
+If the machine has an older CMake but supports C++17:
+
+```bash
+mkdir -p build
+cd build
+cmake ..
+cmake --build .
+ctest --output-on-failure
+```
+
+Known minimum practical toolchain for this prototype:
+
+```text
+C++17 compiler, e.g. g++ 7+
+CMake
+make
+git
+```
+
+Local `.dat` chain stores and `.wallet` files are test artifacts. They can be regenerated from the code and are not required to rebuild or continue development.
 
 `SequentialNode` appends to the local `RecordStore` only after record validation succeeds. Rejected records do not advance the persisted frontier.
 
