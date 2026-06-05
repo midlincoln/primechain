@@ -280,6 +280,19 @@ int main(int argc, char** argv) {
             std::cerr << "invalid record line\n";
             return 1;
         }
+        const primechain::PrimeValue expected_integer = start + downloaded;
+        const std::uint64_t expected_height = expected_integer - 2;
+        if (record->integer != expected_integer) {
+            std::cerr << "downloaded record integer sequence mismatch: expected "
+                      << expected_integer << " got " << record->integer << "\n";
+            return 1;
+        }
+        if (record->height != expected_height) {
+            std::cerr << "downloaded record height mismatch for integer "
+                      << record->integer << ": expected " << expected_height
+                      << " got " << record->height << "\n";
+            return 1;
+        }
         if (!output.append(*record, error)) {
             std::cerr << "could not append downloaded record: " << error << "\n";
             return 1;

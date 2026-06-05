@@ -316,6 +316,15 @@ Resume download in batches:
 
 The downloader rejects duplicate or skipped ranges. A non-empty destination store must resume exactly at `frontier + 1`.
 
+During sync download, the client currently verifies:
+
+- the peer returned the requested range header
+- every record payload hash matches the transmitted record hash
+- each record arrives in exact integer order
+- each record height matches `integer - 2`
+- the local output store accepts the record hash
+- the completed store replays through `SequentialNode`
+
 This is the first local peer-sync API. It is still plain TCP and development-only.
 
 ## Development Roadmap
