@@ -1,9 +1,34 @@
 #include "primechain/math/number_theory.hpp"
 
 #include <cmath>
+#include <map>
 #include <limits>
 
 namespace primechain::math {
+
+namespace {
+
+bool addFactor(
+    PrimeValue n,
+    const CompositeProofIndex& proofs,
+    std::map<PrimeValue, std::uint64_t>& factors) {
+    if (n < 2) {
+        return false;
+    }
+    if (isPrime(n)) {
+        ++factors[n];
+        return true;
+    }
+
+    const auto proof = proofs.findCompositeProof(n);
+    if (!proof.has_value() || !verifyCompositeProof(*proof) || proof->m != n) {
+        return false;
+    }
+
+    return addFactor(proof->d, proofs, factors) && addFactor(proof->e, proofs, factors);
+}
+
+} // namespace
 
 bool isPrime(PrimeValue n) {
     if (n < 2) {
@@ -70,6 +95,25 @@ bool verifyCompositeProof(const CompositeProof& proof) {
 bool verifyPrimeCertificate(PrimeValue p, const PrimeCertificate& certificate) {
     (void)certificate;
     return isPrime(p);
+}
+
+std::optional<std::vector<PrimePowerFactor>> factorizeFromProofIndex(
+    PrimeValue n,
+    const CompositeProofIndex& proofs) {
+    if (n < 2) {
+        return std::nullopt;
+    }
+
+    std::map<PrimeValue, std::uint64_t> factor_counts;
+    if (!addFactor(n, proofs, factor_counts)) {
+        return std::nullopt;
+    }
+
+    std::vector<PrimePowerFactor> out;
+    for (const auto& [prime, exponent] : factor_counts) {
+        out.push_back({prime, exponent});
+    }
+    return out;
 }
 
 } // namespace primechain::math

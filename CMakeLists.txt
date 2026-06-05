@@ -90,6 +90,15 @@ target_link_libraries(primechain-protocol-record-tests
         primechain_core
 )
 
+add_executable(primechain-factorization-tests
+    tests/factorization_tests.cpp
+)
+
+target_link_libraries(primechain-factorization-tests
+    PRIVATE
+        primechain_core
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -99,3 +108,4 @@ add_test(
         "$<TARGET_FILE:primechain-arithmetic-bench> 20 7 3 ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log >/dev/null && $<TARGET_FILE:primechain-arithmetic-bench-tests> ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log"
 )
 add_test(NAME protocol_records COMMAND primechain-protocol-record-tests)
+add_test(NAME recursive_factorization COMMAND primechain-factorization-tests)
