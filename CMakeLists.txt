@@ -99,6 +99,15 @@ target_link_libraries(primechain-factorization-tests
         primechain_core
 )
 
+add_executable(primechain-pratt-tests
+    tests/pratt_tests.cpp
+)
+
+target_link_libraries(primechain-pratt-tests
+    PRIVATE
+        primechain_core
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -109,3 +118,4 @@ add_test(
 )
 add_test(NAME protocol_records COMMAND primechain-protocol-record-tests)
 add_test(NAME recursive_factorization COMMAND primechain-factorization-tests)
+add_test(NAME pratt_proofs COMMAND primechain-pratt-tests)

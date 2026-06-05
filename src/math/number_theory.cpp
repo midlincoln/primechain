@@ -29,6 +29,45 @@ bool addFactor(
     return addFactor(proof->d, proofs, factors) && addFactor(proof->e, proofs, factors);
 }
 
+PrimeValue gcd(PrimeValue a, PrimeValue b) {
+    while (b != 0) {
+        const PrimeValue r = a % b;
+        a = b;
+        b = r;
+    }
+    return a;
+}
+
+PrimeValue mulMod(PrimeValue a, PrimeValue b, PrimeValue mod) {
+    PrimeValue result = 0;
+    a %= mod;
+    while (b > 0) {
+        if ((b & 1u) != 0) {
+            result = (result + a) % mod;
+        }
+        b >>= 1u;
+        if (b > 0) {
+            a = (a + a) % mod;
+        }
+    }
+    return result;
+}
+
+PrimeValue powMod(PrimeValue base, PrimeValue exponent, PrimeValue mod) {
+    PrimeValue result = 1 % mod;
+    base %= mod;
+    while (exponent > 0) {
+        if ((exponent & 1u) != 0) {
+            result = mulMod(result, base, mod);
+        }
+        exponent >>= 1u;
+        if (exponent > 0) {
+            base = mulMod(base, base, mod);
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 void appendUint64(std::vector<std::uint8_t>& out, std::uint64_t value) {
@@ -146,6 +185,35 @@ std::vector<std::uint8_t> serializeFactorization(const Factorization& factorizat
         appendUint64(out, factor.exponent);
     }
     return out;
+}
+
+bool verifyPrattProof(const PrattProof& proof) {
+    if (proof.p == 2) {
+        return proof.witness == 0 && proof.factors_of_p_minus_1.factors.empty();
+    }
+    if (proof.p < 2 || proof.witness <= 1 || proof.witness >= proof.p) {
+        return false;
+    }
+
+    const auto product = multiplyFactorization(proof.factors_of_p_minus_1);
+    if (!product.has_value() || *product != proof.p - 1) {
+        return false;
+    }
+
+    if (powMod(proof.witness, proof.p - 1, proof.p) != 1) {
+        return false;
+    }
+
+    for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+        const PrimeValue exponent = (proof.p - 1) / factor.prime;
+        const PrimeValue residue = powMod(proof.witness, exponent, proof.p);
+        const PrimeValue diff = residue == 0 ? proof.p - 1 : residue - 1;
+        if (gcd(diff, proof.p) != 1) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 std::optional<Factorization> factorizeFromProofIndex(

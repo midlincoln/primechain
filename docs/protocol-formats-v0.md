@@ -284,6 +284,12 @@ For `p = 2`, the certificate is the genesis prime rule and may use an empty fact
 
 Pratt proof generation can use the stored arithmetic chain to reconstruct the factorization of `p - 1`.
 
+v0 implementation note:
+
+- `verifyPrattProof` verifies the submitted canonical factorization, the Fermat/order condition, and the gcd condition.
+- The current small-number implementation confirms factor bases using local `isPrime`.
+- A later consensus implementation must replace that shortcut with checks that every factor base has an earlier finalized `PrimeRecord`.
+
 ## 7. Arithmetic Record Formats
 
 Every finalized integer classification uses one of two payloads.

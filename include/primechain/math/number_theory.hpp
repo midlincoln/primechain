@@ -17,6 +17,12 @@ struct Factorization {
     std::vector<PrimePowerFactor> factors;
 };
 
+struct PrattProof {
+    PrimeValue p{0};
+    PrimeValue witness{0};
+    Factorization factors_of_p_minus_1;
+};
+
 class CompositeProofIndex {
 public:
     virtual ~CompositeProofIndex() = default;
@@ -31,6 +37,7 @@ bool verifyPrimeCertificate(PrimeValue p, const PrimeCertificate& certificate);
 bool isCanonicalFactorization(const Factorization& factorization);
 std::optional<PrimeValue> multiplyFactorization(const Factorization& factorization);
 std::vector<std::uint8_t> serializeFactorization(const Factorization& factorization);
+bool verifyPrattProof(const PrattProof& proof);
 std::optional<Factorization> factorizeFromProofIndex(
     PrimeValue n,
     const CompositeProofIndex& proofs);
