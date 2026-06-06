@@ -262,6 +262,27 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
+Submit one miner-produced composite proof to a running TCP node:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 \
+  SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_miner
+```
+
+Format:
+
+```text
+SUBMIT_COMPOSITE g d e provider_address
+```
+
+The node checks that `d * e = g`, that `provider_address` is a development address, and that `g` is exactly the next integer after the local frontier. If the local store is empty, genesis is initialized first. Accepted composite submissions are finalized as normal composite records, stored on disk, and propagated to configured peers with `SUBMIT_RECORD`.
+
+Current success response:
+
+```text
+COMPOSITE_ACCEPTED <g> <record_hash>
+```
+
 When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 
 Current development conflict responses:
@@ -634,12 +655,14 @@ Completed prototype milestones:
 - first-pass TCP message, range, and mempool limits
 - first-pass peer discovery with `GET_PEERS` and `ADD_PEER`
 - first-pass peer connection/read timeouts and dead-peer warnings
+- basic per-connection TCP rate limits
+- first miner-submitted composite flow with `SUBMIT_COMPOSITE`
 
 Next milestones:
 
-1. Add basic per-peer rate limits.
-2. Add stricter propagation timing tests for active writers.
-3. Replace `ADVANCE_TO` with real miner-submitted record flow.
+1. Add `SUBMIT_PRIME` with Pratt proof fields.
+2. Add a miner tool mode that submits composites one integer at a time instead of using `ADVANCE_TO`.
+3. Add stricter propagation timing tests for active writers.
 4. Add commit-reveal and contributor authentication.
 5. Later add production hashing, real signatures, and post-quantum signatures.
 

@@ -238,6 +238,7 @@ std::optional<std::string> readLine(int fd) {
 bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
+           line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
            line.rfind("ACK_MEMPOOL ", 0) == 0 ||
            line.rfind("ADVANCE_TO ", 0) == 0;
@@ -860,6 +861,10 @@ public:
                 submitTx(fd, *line);
                 continue;
             }
+            if (line->rfind("SUBMIT_COMPOSITE ", 0) == 0) {
+                submitComposite(fd, *line);
+                continue;
+            }
             if (line->rfind("SUBMIT_RECORD ", 0) == 0) {
                 submitRecord(fd, *line);
                 continue;
@@ -1265,6 +1270,73 @@ private:
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
+    }
+
+    void submitComposite(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        primechain::PrimeValue d = 0;
+        primechain::PrimeValue e = 0;
+        std::string provider_address;
+        in >> command >> g >> d >> e >> provider_address;
+        if (!in ||
+            command != "SUBMIT_COMPOSITE" ||
+            !primechain::protocol::isDevelopmentAddress(provider_address)) {
+            writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE; expected SUBMIT_COMPOSITE g d e provider_address\n");
+            return;
+        }
+
+        primechain::CompositeProof proof;
+        proof.m = g;
+        proof.d = d;
+        proof.e = e;
+        proof.provider_address = provider_address;
+        if (!primechain::math::verifyCompositeProof(proof)) {
+            writeAll(fd, "ERROR invalid composite proof\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!node.status().has_genesis) {
+            error.clear();
+            if (!node.initializeGenesis(error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            propagateRecord(
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
+        }
+        if (g != node.status().frontier_integer + 1) {
+            std::ostringstream out;
+            out << "ERROR SUBMIT_COMPOSITE must extend frontier "
+                << node.status().frontier_integer
+                << " with integer "
+                << (node.status().frontier_integer + 1)
+                << "\n";
+            writeAll(fd, out.str());
+            return;
+        }
+
+        auto record = makeCompositeRecord(node.status(), proof, provider_address);
+        error.clear();
+        if (!node.appendComposite(record, error)) {
+            writeAll(fd, "ERROR could not append composite record: " + error + "\n");
+            return;
+        }
+
+        const auto stored = primechain::storage::makeStoredRecord(record);
+        propagateRecord(stored);
+        writeAll(fd, "COMPOSITE_ACCEPTED "
+            + std::to_string(g)
+            + " "
+            + primechain::crypto::toHex(stored.record_hash)
+            + "\n");
     }
 
     void propagateRecord(const primechain::storage::StoredRecord& record) const {

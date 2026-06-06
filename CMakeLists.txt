@@ -337,6 +337,24 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log; $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet >/dev/null && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid) && sleep 0.2 && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet) && $<TARGET_FILE:primechain-send> submit 127.0.0.1 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet $alice 3 250000 1 >/dev/null && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18994 GET_MEMPOOL | grep -q '^MEMPOOL 1' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid)"
 )
 add_test(
+    NAME tcp_submit_composite_extends_frontier
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/submit-composite.dat ${CMAKE_CURRENT_BINARY_DIR}/submit-composite.log ${CMAKE_CURRENT_BINARY_DIR}/submit-composite-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/submit-composite.log ${CMAKE_CURRENT_BINARY_DIR}/submit-composite.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19021 ${CMAKE_CURRENT_BINARY_DIR}/submit-composite.dat > ${CMAKE_CURRENT_BINARY_DIR}/submit-composite-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/submit-composite-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19021 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_submitter | grep -q '^COMPOSITE_ACCEPTED 4 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19021 GET_STATUS | grep -q 'STATUS 3 2 1 1 2 4' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/submit-composite-server.pid)"
+)
+add_test(
+    NAME tcp_submit_composite_rejects_wrong_frontier
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.dat ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.log; ($<TARGET_FILE:primechain-sync-server> 19022 ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.dat > ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19022 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_submitter | grep -q '^ERROR SUBMIT_COMPOSITE must extend frontier 2 with integer 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.pid)"
+)
+add_test(
+    NAME tcp_submit_composite_propagates_to_peer
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat >/dev/null && ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat && ($<TARGET_FILE:primechain-sync-server> 19023 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19024 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat --peer 127.0.0.1 19023 > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19024 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_submitter | grep -q '^COMPOSITE_ACCEPTED 4 ' && sleep 0.4 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19023 GET_STATUS | grep -q 'STATUS 3 2 1 1 2 4' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.pid)"
+)
+add_test(
     NAME sequential_include_tcp_mempool
     COMMAND
         /bin/sh -c
