@@ -287,6 +287,34 @@ Current success response:
 COMPOSITE_ACCEPTED <g> <record_hash>
 ```
 
+Submit one miner-produced Pratt prime proof to a running TCP node:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 \
+  SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_miner
+```
+
+Format:
+
+```text
+SUBMIT_PRIME p witness factor_count factor_1 exponent_1 ... provider_address
+```
+
+The example certifies `5` using witness `2` and factorization `5 - 1 = 2^2`. For `11`, whose `p - 1` factorization is `2^1 * 5^1`, the line shape is:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 \
+  SUBMIT_PRIME 11 2 2 2 1 5 1 pcdev1_prime_miner
+```
+
+The current prototype accepts Pratt certificates only. Future protocol versions can add certificate-type fields for ECPP/APR-CL without changing the basic rule that nodes verify the certificate locally before advancing.
+
+Current success response:
+
+```text
+PRIME_ACCEPTED <p> <record_hash>
+```
+
 When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 
 Current development conflict responses:
@@ -663,11 +691,12 @@ Completed prototype milestones:
 - first-pass peer connection/read timeouts and dead-peer warnings
 - basic per-connection TCP rate limits
 - first miner-submitted composite flow with `SUBMIT_COMPOSITE`
+- first miner-submitted Pratt prime flow with `SUBMIT_PRIME`
 
 Next milestones:
 
-1. Add `SUBMIT_PRIME` with Pratt proof fields.
-2. Add a miner tool mode that submits composites one integer at a time instead of using `ADVANCE_TO`.
+1. Add a miner tool mode that submits composites/primes one integer at a time instead of using `ADVANCE_TO`.
+2. Add sync rejection tests for corrupt prime proofs.
 3. Add stricter propagation timing tests for active writers.
 4. Add commit-reveal and contributor authentication.
 5. Later add production hashing, real signatures, and post-quantum signatures.

@@ -239,6 +239,7 @@ bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
+           line.rfind("SUBMIT_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
            line.rfind("ACK_MEMPOOL ", 0) == 0 ||
            line.rfind("ADVANCE_TO ", 0) == 0;
@@ -883,6 +884,10 @@ public:
                 submitComposite(fd, *line);
                 continue;
             }
+            if (line->rfind("SUBMIT_PRIME ", 0) == 0) {
+                submitPrime(fd, *line);
+                continue;
+            }
             if (line->rfind("SUBMIT_RECORD ", 0) == 0) {
                 submitRecord(fd, *line);
                 continue;
@@ -1408,6 +1413,119 @@ private:
         propagateRecord(stored);
         writeAll(fd, "COMPOSITE_ACCEPTED "
             + std::to_string(g)
+            + " "
+            + primechain::crypto::toHex(stored.record_hash)
+            + "\n");
+    }
+
+    void submitPrime(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::math::PrattProof proof;
+        std::uint64_t factor_count = 0;
+        std::string provider_address;
+        in >> command >> proof.p >> proof.witness >> factor_count;
+        if (!in || command != "SUBMIT_PRIME" || factor_count > 64) {
+            writeAll(fd, "ERROR invalid SUBMIT_PRIME; expected SUBMIT_PRIME p witness factor_count factor exponent ... provider_address\n");
+            return;
+        }
+        for (std::uint64_t i = 0; i < factor_count; ++i) {
+            primechain::math::PrimePowerFactor factor;
+            in >> factor.prime >> factor.exponent;
+            if (!in) {
+                writeAll(fd, "ERROR invalid SUBMIT_PRIME factor list\n");
+                return;
+            }
+            proof.factors_of_p_minus_1.factors.push_back(factor);
+        }
+        in >> provider_address;
+        if (!in || !primechain::protocol::isDevelopmentAddress(provider_address)) {
+            writeAll(fd, "ERROR invalid SUBMIT_PRIME provider address\n");
+            return;
+        }
+        std::string extra;
+        if (in >> extra) {
+            writeAll(fd, "ERROR invalid SUBMIT_PRIME trailing data\n");
+            return;
+        }
+
+        if (!primechain::math::verifyPrattProof(proof)) {
+            writeAll(fd, "ERROR invalid Pratt proof\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!node.status().has_genesis) {
+            error.clear();
+            if (!node.initializeGenesis(error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            propagateRecord(
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
+        }
+
+        if (proof.p == node.status().frontier_integer && node.status().frontier_integer > 2) {
+            const auto existing = store_.findByInteger(proof.p, error);
+            if (!error.empty()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            if (!existing.has_value()) {
+                writeAll(fd, "ERROR current frontier record not found\n");
+                return;
+            }
+            error.clear();
+            const auto previous_hash = previousRecordHash(*existing, error);
+            if (!previous_hash.has_value()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+
+            primechain::protocol::PrimeRecordV0 record;
+            record.version = 0;
+            record.height = node.status().height;
+            record.previous_record_hash = *previous_hash;
+            record.integer = proof.p;
+            record.proof.p = proof.p;
+            record.proof.witness = proof.witness;
+            for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+                record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
+            }
+            record.proof.provider_address = provider_address;
+            primechain::protocol::applyDevelopmentFinalization(record);
+            const auto stored = primechain::storage::makeStoredRecord(record);
+            handleExistingOrConflictingRecord(fd, stored, node.status().frontier_integer);
+            return;
+        }
+
+        if (proof.p != node.status().frontier_integer + 1) {
+            std::ostringstream out;
+            out << "ERROR SUBMIT_PRIME must extend frontier "
+                << node.status().frontier_integer
+                << " with integer "
+                << (node.status().frontier_integer + 1)
+                << "\n";
+            writeAll(fd, out.str());
+            return;
+        }
+
+        auto record = makePrimeRecord(node.status(), proof.p, proof, provider_address);
+        error.clear();
+        if (!node.appendPrime(record, error)) {
+            writeAll(fd, "ERROR could not append prime record: " + error + "\n");
+            return;
+        }
+
+        const auto stored = primechain::storage::makeStoredRecord(record);
+        propagateRecord(stored);
+        writeAll(fd, "PRIME_ACCEPTED "
+            + std::to_string(proof.p)
             + " "
             + primechain::crypto::toHex(stored.record_hash)
             + "\n");

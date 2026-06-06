@@ -391,6 +391,36 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat >/dev/null && ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat && ($<TARGET_FILE:primechain-sync-server> 19023 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19024 ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.dat --peer 127.0.0.1 19023 > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19024 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_submitter | grep -q '^COMPOSITE_ACCEPTED 4 ' && sleep 0.4 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19023 GET_STATUS | grep -q 'STATUS 3 2 1 1 2 4' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/composite-prop-b.pid)"
 )
 add_test(
+    NAME tcp_submit_prime_from_genesis
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.dat ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.log; ($<TARGET_FILE:primechain-sync-server> 19029 ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.dat > ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19029 SUBMIT_PRIME 3 2 1 2 1 pcdev1_prime_submitter | grep -q '^PRIME_ACCEPTED 3 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19029 GET_STATUS | grep -q 'STATUS 2 2 0 1 1 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-genesis.pid)"
+)
+add_test(
+    NAME tcp_submit_prime_after_composite
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.dat ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.log ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5-server.log; $<TARGET_FILE:primechain-sequential> 4 ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.log ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19030 ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.dat > ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19030 SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_submitter | grep -q '^PRIME_ACCEPTED 5 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19030 GET_STATUS | grep -q 'STATUS 4 3 1 1 3 5' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/submit-prime-5.pid)"
+)
+add_test(
+    NAME tcp_submit_prime_rejects_bad_pratt
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.dat ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.log; ($<TARGET_FILE:primechain-sync-server> 19031 ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.dat > ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19031 SUBMIT_PRIME 3 2 1 2 2 pcdev1_prime_submitter | grep -q '^ERROR invalid Pratt proof' && $<TARGET_FILE:primechain-store-inspect> ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.dat | grep -q 'has_genesis: no' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/bad-prime.pid)"
+)
+add_test(
+    NAME tcp_submit_prime_rejects_wrong_frontier
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.dat ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.log; ($<TARGET_FILE:primechain-sync-server> 19032 ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.dat > ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19032 SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_submitter | grep -q '^ERROR SUBMIT_PRIME must extend frontier 2 with integer 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/wrong-prime.pid)"
+)
+add_test(
+    NAME tcp_submit_prime_propagates_to_peer
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.log; $<TARGET_FILE:primechain-sequential> 4 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat >/dev/null && ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat && ($<TARGET_FILE:primechain-sync-server> 19033 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19034 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat --peer 127.0.0.1 19033 > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19034 SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_submitter | grep -q '^PRIME_ACCEPTED 5 ' && sleep 0.4 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19033 GET_STATUS | grep -q 'STATUS 4 3 1 1 3 5' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.pid)"
+)
+add_test(
     NAME sequential_include_tcp_mempool
     COMMAND
         /bin/sh -c
