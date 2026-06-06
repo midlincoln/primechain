@@ -386,6 +386,16 @@ Peers should connect using the machine's public IP or DNS name:
 
 Do not expose development write commands on a public port unless the test is intentionally controlled. `ADVANCE_TO` and `ACK_MEMPOOL` remain disabled unless `--enable-advance` or `--enable-ack-mempool` is supplied.
 
+Current TCP safety limits:
+
+```text
+max line size: 8192 bytes
+max GET_RECORD_RANGE count: 10000 records
+max in-memory mempool: 1000 transactions
+```
+
+These are first-pass development limits, not production DoS protection.
+
 Terminal 2:
 
 ```bash
@@ -586,12 +596,13 @@ Completed prototype milestones:
 - safe same-tip replacement for lower-hash records
 - two active writers converge on the lower same-tip record in local TCP tests
 - bind-address option for public-server tests
+- first-pass TCP message, range, and mempool limits
 
 Next milestones:
 
 1. Add peer discovery and gossip beyond manually configured peers.
 2. Add stricter propagation timing tests for active writers.
-3. Add strict message, connection, proof-window, and pool-size limits.
+3. Add connection timeouts and per-peer rate limits.
 4. Add commit-reveal and contributor authentication.
 5. Later add production hashing, real signatures, and post-quantum signatures.
 

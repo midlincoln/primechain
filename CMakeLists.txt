@@ -259,6 +259,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18992 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 2 250 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat >/dev/null && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 251 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat | grep -q 'frontier_integer: 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid)"
 )
 add_test(
+    NAME sync_rejects_large_record_range
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18988 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18988 GET_RECORD_RANGE 2 10002 | grep -q '^ERROR GET_RECORD_RANGE too large' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid)"
+)
+add_test(
     NAME wallet_new_address
     COMMAND
         /bin/sh -c

@@ -28,6 +28,9 @@ namespace {
 
 constexpr int kDefaultPort = 18889;
 constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
+constexpr std::size_t kMaxLineBytes = 8192;
+constexpr std::uint64_t kMaxRecordRangeCount = 10000;
+constexpr std::size_t kMaxMempoolTransactions = 1000;
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -158,7 +161,7 @@ std::optional<std::string> readLine(int fd) {
         if (ch == '\n') {
             return line;
         }
-        if (line.size() > 8192) {
+        if (line.size() >= kMaxLineBytes) {
             return std::nullopt;
         }
         line.push_back(ch);
@@ -859,6 +862,16 @@ private:
             writeAll(fd, "ERROR invalid GET_RECORD_RANGE\n");
             return;
         }
+        if (end < start) {
+            writeAll(fd, "ERROR invalid GET_RECORD_RANGE: start greater than end\n");
+            return;
+        }
+        if ((end - start + 1) > kMaxRecordRangeCount) {
+            writeAll(fd, "ERROR GET_RECORD_RANGE too large; max="
+                + std::to_string(kMaxRecordRangeCount)
+                + "\n");
+            return;
+        }
 
         std::string error;
         const auto records = store_.findRange(start, end, error);
@@ -883,6 +896,12 @@ private:
         in >> command >> tx_hex;
         if (!in || tx_hex.empty()) {
             writeAll(fd, "ERROR invalid SUBMIT_TX\n");
+            return;
+        }
+        if (mempool_.size() >= kMaxMempoolTransactions) {
+            writeAll(fd, "ERROR mempool full; max="
+                + std::to_string(kMaxMempoolTransactions)
+                + "\n");
             return;
         }
 
