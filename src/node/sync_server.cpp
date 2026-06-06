@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstring>
@@ -290,6 +291,28 @@ std::optional<primechain::storage::StoredRecord> parseSubmitRecordLine(const std
         return std::nullopt;
     }
     return parseRecordLine("RECORD " + line.substr(std::string("SUBMIT_RECORD ").size()));
+}
+
+bool hashLess(const primechain::Hash256& left, const primechain::Hash256& right) {
+    return std::lexicographical_compare(left.begin(), left.end(), right.begin(), right.end());
+}
+
+std::optional<primechain::Hash256> previousRecordHash(
+    const primechain::storage::StoredRecord& stored,
+    std::string& error) {
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) {
+            return std::nullopt;
+        }
+        return decoded->previous_record_hash;
+    }
+
+    const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+    return decoded->previous_record_hash;
 }
 
 bool appendStoredRecord(
@@ -853,6 +876,45 @@ private:
             }
             if (existing.has_value() && existing->record_hash == submitted->record_hash) {
                 writeAll(fd, "RECORD_DUPLICATE " + primechain::crypto::toHex(submitted->record_hash) + "\n");
+                return;
+            }
+            if (existing.has_value() && submitted->integer == node.status().frontier_integer) {
+                error.clear();
+                const auto submitted_previous = previousRecordHash(*submitted, error);
+                if (!submitted_previous.has_value()) {
+                    writeAll(fd, "ERROR " + error + "\n");
+                    return;
+                }
+                error.clear();
+                const auto existing_previous = previousRecordHash(*existing, error);
+                if (!existing_previous.has_value()) {
+                    writeAll(fd, "ERROR " + error + "\n");
+                    return;
+                }
+
+                if (*submitted_previous != *existing_previous) {
+                    writeAll(fd, "RECORD_CONFLICT_FORK "
+                        + primechain::crypto::toHex(submitted->record_hash)
+                        + " "
+                        + primechain::crypto::toHex(existing->record_hash)
+                        + "\n");
+                    return;
+                }
+
+                if (hashLess(submitted->record_hash, existing->record_hash)) {
+                    writeAll(fd, "RECORD_CONFLICT_BETTER "
+                        + primechain::crypto::toHex(submitted->record_hash)
+                        + " "
+                        + primechain::crypto::toHex(existing->record_hash)
+                        + "\n");
+                    return;
+                }
+
+                writeAll(fd, "RECORD_CONFLICT_WORSE "
+                    + primechain::crypto::toHex(submitted->record_hash)
+                    + " "
+                    + primechain::crypto::toHex(existing->record_hash)
+                    + "\n");
                 return;
             }
             writeAll(fd, "ERROR conflicting historical record\n");
