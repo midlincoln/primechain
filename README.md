@@ -568,12 +568,13 @@ Completed prototype milestones:
 - development record propagation to configured peers
 - same-tip record conflict classification
 - safe same-tip replacement for lower-hash records
+- two active writers converge on the lower same-tip record in local TCP tests
 
 Next milestones:
 
-1. Add multiple active writers in local tests.
-2. Add bind-address support for public-server tests.
-3. Add peer discovery and gossip beyond manually configured peers.
+1. Add bind-address support for public-server tests.
+2. Add peer discovery and gossip beyond manually configured peers.
+3. Add stricter propagation timing tests for active writers.
 4. Add strict message, connection, proof-window, and pool-size limits.
 5. Add commit-reveal and contributor authentication.
 6. Later add production hashing, real signatures, and post-quantum signatures.
