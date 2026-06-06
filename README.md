@@ -260,7 +260,7 @@ Submit a signed development transaction to a running TCP node:
   ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 1
 ```
 
-The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool.
+The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
 Inspect the TCP mempool:
 
@@ -547,18 +547,20 @@ Completed prototype milestones:
 - separate sharded composite miner
 - contributor logging
 - long-run chain scale estimator
+- sequential arithmetic record store
+- wallet/reward replay
+- TCP transaction submission and mempool inspection
+- startup and continuous peer sync
+- development mempool propagation to configured peers
 
 Next milestones:
 
-1. Add an arithmetic-record benchmark that persists one classification record per integer.
-2. Add synthetic transaction batches and Merkle roots to arithmetic records.
-3. Specify canonical `CompositeRecord`, `PrattPrimeRecord`, `ValidatorVote`, and `FinalizedRecord` formats.
-4. Add an indexed factor database and recursive factorization reconstruction.
-5. Implement small-number Pratt certificate generation and verification.
-6. Add strict message, connection, proof-window, and pool-size limits.
-7. Implement three-node synchronization and simulated 2/3 voting.
-8. Add commit-reveal and contributor authentication.
-9. Later add wallets, rewards, production hashing, and post-quantum signatures.
+1. Add proof/record propagation between configured peers.
+2. Add deterministic conflict handling for competing records at the same integer.
+3. Add multiple active writers in local tests.
+4. Add strict message, connection, proof-window, and pool-size limits.
+5. Add commit-reveal and contributor authentication.
+6. Later add production hashing, real signatures, and post-quantum signatures.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 

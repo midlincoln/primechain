@@ -481,10 +481,40 @@ bool downloadRecordRange(
     return true;
 }
 
+bool submitTransactionToPeer(
+    const PeerEndpoint& peer,
+    const primechain::protocol::TransactionV0& tx,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    const auto bytes = primechain::protocol::serializeTransaction(tx, true);
+    if (!writeAll(socket->fd(), "SUBMIT_TX " + bytesToHex(bytes) + "\n")) {
+        error = "could not submit transaction to peer";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "peer did not return transaction response";
+        return false;
+    }
+    if (response->rfind("TX_ACCEPTED ", 0) == 0 || response->rfind("TX_DUPLICATE ", 0) == 0) {
+        return true;
+    }
+    error = "peer rejected transaction: " + *response;
+    return false;
+}
+
 class SyncServer {
 public:
-    explicit SyncServer(std::string store_path)
+    SyncServer(std::string store_path, std::vector<PeerEndpoint> peers)
         : store_path_(std::move(store_path)),
+          peers_(std::move(peers)),
           store_(store_path_) {}
 
     void handleClient(int fd) {
@@ -705,7 +735,18 @@ private:
         }
 
         mempool_.push_back(*tx);
+        propagateTransaction(*tx);
         writeAll(fd, "TX_ACCEPTED " + primechain::crypto::toHex(hash) + "\n");
+    }
+
+    void propagateTransaction(const primechain::protocol::TransactionV0& tx) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitTransactionToPeer(peer, tx, error)) {
+                std::cerr << "mempool propagation warning to " << peer.host << ":" << peer.port
+                          << ": " << error << "\n";
+            }
+        }
     }
 
     void sendMempool(int fd) const {
@@ -928,6 +969,7 @@ private:
     }
 
     std::string store_path_;
+    std::vector<PeerEndpoint> peers_;
     primechain::storage::RecordStore store_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
 };
@@ -1007,7 +1049,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    SyncServer sync_server(options.store_path);
+    SyncServer sync_server(options.store_path, options.peers);
     if (!options.peers.empty()) {
         std::string error;
         if (!sync_server.syncFromPeers(options.peers, error)) {
