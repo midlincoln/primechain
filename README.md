@@ -378,10 +378,10 @@ For a public-server test, bind to all IPv4 interfaces and ensure the server fire
 ./build/primechain-sync-server 18889 ./data/public-node.dat --bind 0.0.0.0
 ```
 
-Peers should connect using the machine's public IP or DNS name:
+Peers should connect using the machine's public IPv4 address:
 
 ```bash
-./build/primechain-sync-server 18890 ./data/node-b.dat --peer PUBLIC_IP_OR_DNS 18889 --sync-interval 5
+./build/primechain-sync-server 18890 ./data/node-b.dat --peer PUBLIC_IP 18889 --sync-interval 5
 ```
 
 Do not expose development write commands on a public port unless the test is intentionally controlled. `ADVANCE_TO` and `ACK_MEMPOOL` remain disabled unless `--enable-advance` or `--enable-ack-mempool` is supplied.
@@ -393,9 +393,11 @@ max line size: 8192 bytes
 max GET_RECORD_RANGE count: 10000 records
 max in-memory mempool: 1000 transactions
 max known peers: 32
+outbound peer connect timeout: 1500 ms
+socket read/write timeout: 3000 ms
 ```
 
-These are first-pass development limits, not production DoS protection.
+These are first-pass development limits, not production DoS protection. If a configured peer is dead or slow, the node logs a warning and continues trying other known peers.
 
 Peer discovery is first-pass and development-only. Nodes can list and add peers:
 
@@ -609,11 +611,12 @@ Completed prototype milestones:
 - bind-address option for public-server tests
 - first-pass TCP message, range, and mempool limits
 - first-pass peer discovery with `GET_PEERS` and `ADD_PEER`
+- first-pass peer connection/read timeouts and dead-peer warnings
 
 Next milestones:
 
-1. Add stricter propagation timing tests for active writers.
-2. Add connection timeouts and per-peer rate limits.
+1. Add basic per-peer rate limits.
+2. Add stricter propagation timing tests for active writers.
 3. Replace `ADVANCE_TO` with real miner-submitted record flow.
 4. Add commit-reveal and contributor authentication.
 5. Later add production hashing, real signatures, and post-quantum signatures.

@@ -14,6 +14,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -32,6 +33,8 @@ constexpr std::size_t kMaxLineBytes = 8192;
 constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
 constexpr std::size_t kMaxKnownPeers = 32;
+constexpr int kPeerConnectTimeoutMs = 1500;
+constexpr int kPeerReadTimeoutMs = 3000;
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -120,6 +123,14 @@ std::optional<Socket> listenOnPort(const std::string& bind_address, int port) {
     return Socket(fd);
 }
 
+bool setSocketTimeouts(int fd, int timeout_ms) {
+    timeval timeout{};
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+
 std::optional<Socket> connectToServer(const std::string& host, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -135,11 +146,52 @@ std::optional<Socket> connectToServer(const std::string& host, int port) {
         close(fd);
         return std::nullopt;
     }
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        std::cerr << "fcntl failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+
+    const int result = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (result != 0 && errno != EINPROGRESS) {
         std::cerr << "connect failed: " << std::strerror(errno) << "\n";
         close(fd);
         return std::nullopt;
     }
+    if (result != 0) {
+        fd_set write_fds;
+        FD_ZERO(&write_fds);
+        FD_SET(fd, &write_fds);
+
+        timeval timeout{};
+        timeout.tv_sec = kPeerConnectTimeoutMs / 1000;
+        timeout.tv_usec = (kPeerConnectTimeoutMs % 1000) * 1000;
+        const int ready = select(fd + 1, nullptr, &write_fds, nullptr, &timeout);
+        if (ready <= 0) {
+            std::cerr << "connect timeout\n";
+            close(fd);
+            return std::nullopt;
+        }
+
+        int socket_error = 0;
+        socklen_t socket_error_len = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) != 0 ||
+            socket_error != 0) {
+            std::cerr << "connect failed: "
+                      << std::strerror(socket_error != 0 ? socket_error : errno) << "\n";
+            close(fd);
+            return std::nullopt;
+        }
+    }
+
+    if (fcntl(fd, F_SETFL, flags) != 0) {
+        std::cerr << "fcntl restore failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    setSocketTimeouts(fd, kPeerReadTimeoutMs);
     return Socket(fd);
 }
 
@@ -1608,6 +1660,7 @@ int main(int argc, char** argv) {
         }
 
         Socket client(client_fd);
+        setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
         sync_server.handleClient(client.fd());
         runPeriodicSync();
     }
