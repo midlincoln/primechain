@@ -146,7 +146,7 @@ Under this model:
 - a composite proof acts like a mini-block that advances the integer frontier,
 - a Pratt certificate records a prime checkpoint,
 - stored composite records form reusable factor-decomposition trees,
-- the stored factorization of `g - 1` helps miners construct a Pratt certificate for frontier integer `g`,
+- the derived factorization of `g - 1` helps miners construct a Pratt certificate for frontier integer `g`,
 - miners may use any search algorithm, while nodes independently verify submitted proofs,
 - a controlled multi-node testnet can initially use 2/3 validator voting to finalize competing valid submissions.
 
@@ -155,6 +155,29 @@ This architecture is still under design. Important unresolved questions include 
 See [docs/development-log.md](docs/development-log.md) for the current design discussion and decisions.
 
 The first development format specification is [docs/protocol-formats-v0.md](docs/protocol-formats-v0.md). It defines draft object formats for arithmetic records, composite proofs, Pratt prime proofs, transaction batches, addresses, and controlled 2-of-3 validator finalization.
+
+## Consensus Data Vs Client Tools
+
+The blockchain consensus layer should stay minimal:
+
+- one record per classified integer,
+- one immediate composite proof `g = d * e` for composite records,
+- one locally verifiable prime certificate for prime records,
+- transaction/event commitments attached to arithmetic records,
+- deterministic replay and balance updates.
+
+Full recursive factorization is not consensus state. It is derived client data.
+A miner or researcher may download the full arithmetic record database, build a
+local proof index, and ask local tools for:
+
+- factors of a covered integer `m`,
+- full factorization of `m - 1`,
+- Pratt proof construction data for candidate prime `m`,
+- cached factorization results for repeated local mining work.
+
+This keeps server nodes focused on serving records and validating submitted
+proofs. Expensive factorization work belongs to miners/clients unless a node
+explicitly opts into helper service for development.
 
 ## Transaction Batches In Arithmetic Records
 
@@ -218,7 +241,7 @@ It reports records per second, synthetic transactions per second, prime/composit
 
 ## Run Sequential Chain To 500
 
-This local tool writes one arithmetic record for every integer from `2` through the requested limit. Composites get factor proofs and full recursive factorizations. Primes get small-number Pratt proofs using the stored factorization of `p - 1`.
+This local tool writes one arithmetic record for every integer from `2` through the requested limit. Composites get immediate factor proofs. Primes get small-number Pratt proofs using factorization of `p - 1` derived from earlier composite records.
 
 ```bash
 ./build/primechain-sequential 500 ./data/sequential-500.log ./data/sequential-500.dat
@@ -316,9 +339,11 @@ PRIME_ACCEPTED <p> <record_hash>
 ```
 
 Ask a running TCP node for the recursive factorization it can reconstruct from
-stored arithmetic records:
+stored arithmetic records. This is a development/helper command, not normal
+node consensus work, and is disabled by default:
 
 ```bash
+./build/primechain-sync-server 18889 ./data/frontier-node.dat --enable-factorization-helper
 ./build/primechain-sync-query 127.0.0.1 18889 GET_FACTORIZATION 12
 ```
 
@@ -344,6 +369,12 @@ returns:
 ```text
 ERROR factorization unavailable
 ```
+
+Production rule: nodes should not be required to spend CPU recursively
+factorizing numbers for remote clients. Miners that need this data should
+download the arithmetic record database, build their own local proof index, and
+compute/cache factorizations on their own machines. The chain stores proofs;
+client tools derive full factorization knowledge.
 
 Run the prototype frontier miner loop against a TCP sync node:
 
@@ -485,7 +516,7 @@ Peers should connect using the machine's public IPv4 address:
 ./build/primechain-sync-server 18890 ./data/node-b.dat --peer PUBLIC_IP 18889 --sync-interval 5
 ```
 
-Do not expose development write commands on a public port unless the test is intentionally controlled. `ADVANCE_TO` and `ACK_MEMPOOL` remain disabled unless `--enable-advance` or `--enable-ack-mempool` is supplied.
+Do not expose development write commands on a public port unless the test is intentionally controlled. `ADVANCE_TO` and `ACK_MEMPOOL` remain disabled unless `--enable-advance` or `--enable-ack-mempool` is supplied. Expensive helper work is also opt-in: `GET_FACTORIZATION` remains disabled unless `--enable-factorization-helper` is supplied.
 
 Current TCP safety limits:
 
