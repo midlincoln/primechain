@@ -265,6 +265,18 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18988 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18988 GET_RECORD_RANGE 2 10002 | grep -q '^ERROR GET_RECORD_RANGE too large' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid)"
 )
 add_test(
+    NAME sync_rejects_too_many_commands
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/command-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/command-limit.log; ($<TARGET_FILE:primechain-sync-server> 19019 ${CMAKE_CURRENT_BINARY_DIR}/command-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/command-limit.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/command-limit.pid) && sleep 0.2 && /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/19019; for i in $(seq 1 129); do printf \"GET_STATUS\\n\" >&3; done; cat <&3' | grep -q '^ERROR rate limit exceeded: too many commands' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/command-limit.pid)"
+)
+add_test(
+    NAME sync_rejects_too_many_write_commands
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/write-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/write-limit.log; ($<TARGET_FILE:primechain-sync-server> 19020 ${CMAKE_CURRENT_BINARY_DIR}/write-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/write-limit.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/write-limit.pid) && sleep 0.2 && /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/19020; for i in $(seq 1 17); do printf \"ADD_PEER 127.0.0.1 19021\\n\" >&3; done; cat <&3' | grep -q '^ERROR rate limit exceeded: too many write commands' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/write-limit.pid)"
+)
+add_test(
     NAME peer_add_and_list
     COMMAND
         /bin/sh -c

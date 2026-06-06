@@ -35,6 +35,8 @@ constexpr std::size_t kMaxMempoolTransactions = 1000;
 constexpr std::size_t kMaxKnownPeers = 32;
 constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 3000;
+constexpr std::size_t kMaxCommandsPerConnection = 128;
+constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -231,6 +233,14 @@ std::optional<std::string> readLine(int fd) {
         }
         line.push_back(ch);
     }
+}
+
+bool isWriteCommand(const std::string& line) {
+    return line.rfind("ADD_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_TX ", 0) == 0 ||
+           line.rfind("SUBMIT_RECORD ", 0) == 0 ||
+           line.rfind("ACK_MEMPOOL ", 0) == 0 ||
+           line.rfind("ADVANCE_TO ", 0) == 0;
 }
 
 const char* kindName(primechain::storage::StoredRecordKind kind) {
@@ -811,7 +821,21 @@ public:
     }
 
     void handleClient(int fd) {
+        std::size_t command_count = 0;
+        std::size_t write_command_count = 0;
         while (const auto line = readLine(fd)) {
+            ++command_count;
+            if (command_count > kMaxCommandsPerConnection) {
+                writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
+                return;
+            }
+            if (isWriteCommand(*line)) {
+                ++write_command_count;
+                if (write_command_count > kMaxWriteCommandsPerConnection) {
+                    writeAll(fd, "ERROR rate limit exceeded: too many write commands on one connection\n");
+                    return;
+                }
+            }
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
                 continue;

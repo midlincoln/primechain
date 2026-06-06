@@ -395,9 +395,11 @@ max in-memory mempool: 1000 transactions
 max known peers: 32
 outbound peer connect timeout: 1500 ms
 socket read/write timeout: 3000 ms
+max commands per TCP connection: 128
+max write commands per TCP connection: 16
 ```
 
-These are first-pass development limits, not production DoS protection. If a configured peer is dead or slow, the node logs a warning and continues trying other known peers.
+These are first-pass development limits, not production DoS protection. If a configured peer is dead or slow, the node logs a warning and continues trying other known peers. If one TCP connection sends too many commands, the server returns `ERROR rate limit exceeded` and closes that connection.
 
 Peer discovery is first-pass and development-only. Nodes can list and add peers:
 
@@ -420,7 +422,7 @@ Current identifiers are development-level only:
 - transaction records include a development signature/hash check, but this is not yet a production key/address scheme;
 - peer messages are not signed, and nodes do not yet have persistent public-key identities.
 
-This means the next rate-limit layer can only be simple:
+This means the current rate-limit layer is intentionally simple:
 
 - per TCP connection;
 - per source address if added later;
