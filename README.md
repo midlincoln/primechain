@@ -392,9 +392,19 @@ Current TCP safety limits:
 max line size: 8192 bytes
 max GET_RECORD_RANGE count: 10000 records
 max in-memory mempool: 1000 transactions
+max known peers: 32
 ```
 
 These are first-pass development limits, not production DoS protection.
+
+Peer discovery is first-pass and development-only. Nodes can list and add peers:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_PEERS
+./build/primechain-sync-query 127.0.0.1 18889 ADD_PEER 127.0.0.1 18890
+```
+
+On startup and during periodic sync, a node asks known peers for their peer lists and adds discovered peers up to the current cap.
 
 Terminal 2:
 
@@ -403,6 +413,7 @@ Terminal 2:
 ./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD 500
 ./build/primechain-sync-query 127.0.0.1 18889 GET_RECORD_RANGE 490 500
 ./build/primechain-sync-query 127.0.0.1 18889 GET_BALANCE pcdev1_prime_miner
+./build/primechain-sync-query 127.0.0.1 18889 GET_PEERS
 ```
 
 Bootstrap-download records into a fresh local store:
@@ -597,12 +608,13 @@ Completed prototype milestones:
 - two active writers converge on the lower same-tip record in local TCP tests
 - bind-address option for public-server tests
 - first-pass TCP message, range, and mempool limits
+- first-pass peer discovery with `GET_PEERS` and `ADD_PEER`
 
 Next milestones:
 
-1. Add peer discovery and gossip beyond manually configured peers.
-2. Add stricter propagation timing tests for active writers.
-3. Add connection timeouts and per-peer rate limits.
+1. Add stricter propagation timing tests for active writers.
+2. Add connection timeouts and per-peer rate limits.
+3. Replace `ADVANCE_TO` with real miner-submitted record flow.
 4. Add commit-reveal and contributor authentication.
 5. Later add production hashing, real signatures, and post-quantum signatures.
 

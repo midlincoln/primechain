@@ -265,6 +265,18 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18988 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18988 GET_RECORD_RANGE 2 10002 | grep -q '^ERROR GET_RECORD_RANGE too large' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid)"
 )
 add_test(
+    NAME peer_add_and_list
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/peer-add.dat ${CMAKE_CURRENT_BINARY_DIR}/peer-add.log; ($<TARGET_FILE:primechain-sync-server> 19014 ${CMAKE_CURRENT_BINARY_DIR}/peer-add.dat > ${CMAKE_CURRENT_BINARY_DIR}/peer-add.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/peer-add.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19014 ADD_PEER 127.0.0.1 19015 | grep -q '^PEER_ADDED 127.0.0.1 19015' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19014 GET_PEERS | grep -q '^PEER 127.0.0.1 19015' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/peer-add.pid)"
+)
+add_test(
+    NAME peer_discovers_peer_of_peer
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/discover-c.dat ${CMAKE_CURRENT_BINARY_DIR}/discover-c.log ${CMAKE_CURRENT_BINARY_DIR}/discover-b.dat ${CMAKE_CURRENT_BINARY_DIR}/discover-b.log ${CMAKE_CURRENT_BINARY_DIR}/discover-a.dat ${CMAKE_CURRENT_BINARY_DIR}/discover-a.log ${CMAKE_CURRENT_BINARY_DIR}/discover-chain.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/discover-chain.log ${CMAKE_CURRENT_BINARY_DIR}/discover-c.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19016 ${CMAKE_CURRENT_BINARY_DIR}/discover-c.dat > ${CMAKE_CURRENT_BINARY_DIR}/discover-c.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/discover-c.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19015 ${CMAKE_CURRENT_BINARY_DIR}/discover-b.dat --peer 127.0.0.1 19016 > ${CMAKE_CURRENT_BINARY_DIR}/discover-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/discover-b.pid) && sleep 0.3 && ($<TARGET_FILE:primechain-sync-server> 19014 ${CMAKE_CURRENT_BINARY_DIR}/discover-a.dat --peer 127.0.0.1 19015 > ${CMAKE_CURRENT_BINARY_DIR}/discover-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/discover-a.pid) && sleep 0.4 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19014 GET_PEERS | grep -q '^PEER 127.0.0.1 19016' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19014 GET_STATUS | grep -q 'STATUS 19 8 11 1 18 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/discover-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/discover-b.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/discover-c.pid)"
+)
+add_test(
     NAME wallet_new_address
     COMMAND
         /bin/sh -c

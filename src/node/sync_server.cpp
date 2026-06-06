@@ -31,6 +31,7 @@ constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 constexpr std::size_t kMaxLineBytes = 8192;
 constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
+constexpr std::size_t kMaxKnownPeers = 32;
 volatile std::sig_atomic_t g_running = 1;
 
 void handleSignal(int) {
@@ -41,6 +42,18 @@ struct PeerEndpoint {
     std::string host;
     int port{0};
 };
+
+bool samePeer(const PeerEndpoint& left, const PeerEndpoint& right) {
+    return left.host == right.host && left.port == right.port;
+}
+
+bool validPeerEndpoint(const PeerEndpoint& peer) {
+    if (peer.port <= 0 || peer.port > 65535) {
+        return false;
+    }
+    sockaddr_in addr{};
+    return inet_pton(AF_INET, peer.host.c_str(), &addr.sin_addr) == 1;
+}
 
 class Socket {
 public:
@@ -549,6 +562,63 @@ std::optional<PeerStatus> requestPeerStatus(const std::string& host, int port, s
     return status;
 }
 
+std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port, std::string& error) {
+    std::vector<PeerEndpoint> peers;
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return {};
+    }
+    if (!writeAll(socket->fd(), "GET_PEERS\n")) {
+        error = "could not request peer list";
+        return {};
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        error = "peer did not return peer list header";
+        return {};
+    }
+
+    std::istringstream header_in(*header);
+    std::string header_tag;
+    std::uint64_t expected_count = 0;
+    header_in >> header_tag >> expected_count;
+    if (!header_in || header_tag != "PEERS") {
+        error = "invalid peer list header";
+        return {};
+    }
+    if (expected_count > kMaxKnownPeers) {
+        error = "peer list too large";
+        return {};
+    }
+
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_PEERS") {
+            break;
+        }
+        std::istringstream in(*line);
+        std::string tag;
+        PeerEndpoint peer;
+        in >> tag >> peer.host >> peer.port;
+        if (!in || tag != "PEER" || !validPeerEndpoint(peer)) {
+            error = "invalid peer list entry";
+            return {};
+        }
+        peers.push_back(peer);
+        if (peers.size() > expected_count || peers.size() > kMaxKnownPeers) {
+            error = "peer list count mismatch";
+            return {};
+        }
+    }
+    if (peers.size() != expected_count) {
+        error = "peer list count mismatch";
+        return {};
+    }
+    return peers;
+}
+
 bool downloadRecordRange(
     const std::string& host,
     int port,
@@ -680,10 +750,13 @@ public:
         bool advance_enabled,
         bool ack_mempool_enabled)
         : store_path_(std::move(store_path)),
-          peers_(std::move(peers)),
           advance_enabled_(advance_enabled),
           ack_mempool_enabled_(ack_mempool_enabled),
-          store_(store_path_) {}
+          store_(store_path_) {
+        for (const auto& peer : peers) {
+            addPeer(peer);
+        }
+    }
 
     void handleClient(int fd) {
         while (const auto line = readLine(fd)) {
@@ -697,6 +770,14 @@ public:
             }
             if (line->rfind("GET_RECORD_RANGE ", 0) == 0) {
                 sendRecordRange(fd, *line);
+                continue;
+            }
+            if (*line == "GET_PEERS") {
+                sendPeers(fd);
+                continue;
+            }
+            if (line->rfind("ADD_PEER ", 0) == 0) {
+                addPeerCommand(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_TX ", 0) == 0) {
@@ -773,6 +854,14 @@ public:
         return true;
     }
 
+    bool syncFromKnownPeers(std::string& error) const {
+        return syncFromPeers(peers_, error);
+    }
+
+    bool hasKnownPeers() const {
+        return !peers_.empty();
+    }
+
     bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) const {
         bool synced_any = false;
         for (const auto& peer : peers) {
@@ -791,7 +880,74 @@ public:
         return false;
     }
 
+    void discoverPeersFromKnown() {
+        const auto snapshot = peers_;
+        for (const auto& peer : snapshot) {
+            std::string error;
+            const auto discovered = requestPeerList(peer.host, peer.port, error);
+            if (!error.empty()) {
+                std::cerr << "peer discovery warning from " << peer.host << ":" << peer.port
+                          << ": " << error << "\n";
+                continue;
+            }
+            for (const auto& discovered_peer : discovered) {
+                addPeer(discovered_peer);
+            }
+        }
+    }
+
 private:
+    bool addPeer(const PeerEndpoint& peer) {
+        if (!validPeerEndpoint(peer)) {
+            return false;
+        }
+        const auto found = std::find_if(peers_.begin(), peers_.end(), [&](const PeerEndpoint& existing) {
+            return samePeer(existing, peer);
+        });
+        if (found != peers_.end()) {
+            return true;
+        }
+        if (peers_.size() >= kMaxKnownPeers) {
+            return false;
+        }
+        peers_.push_back(peer);
+        return true;
+    }
+
+    void sendPeers(int fd) const {
+        std::ostringstream out;
+        out << "PEERS " << peers_.size() << "\n";
+        for (const auto& peer : peers_) {
+            out << "PEER " << peer.host << " " << peer.port << "\n";
+        }
+        out << "END_PEERS\n";
+        writeAll(fd, out.str());
+    }
+
+    void addPeerCommand(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        PeerEndpoint peer;
+        in >> command >> peer.host >> peer.port;
+        if (!in || !validPeerEndpoint(peer)) {
+            writeAll(fd, "ERROR invalid ADD_PEER\n");
+            return;
+        }
+
+        const auto before = peers_.size();
+        if (!addPeer(peer)) {
+            writeAll(fd, "ERROR peer table full; max="
+                + std::to_string(kMaxKnownPeers)
+                + "\n");
+            return;
+        }
+        if (peers_.size() == before) {
+            writeAll(fd, "PEER_DUPLICATE " + peer.host + " " + std::to_string(peer.port) + "\n");
+            return;
+        }
+        writeAll(fd, "PEER_ADDED " + peer.host + " " + std::to_string(peer.port) + "\n");
+    }
+
     void sendStatus(int fd) const {
         std::string error;
         const auto records = store_.loadAll(error);
@@ -1382,7 +1538,8 @@ int main(int argc, char** argv) {
         options.enable_ack_mempool);
     if (!options.peers.empty()) {
         std::string error;
-        if (!sync_server.syncFromPeers(options.peers, error)) {
+        sync_server.discoverPeersFromKnown();
+        if (!sync_server.syncFromKnownPeers(error)) {
             std::cerr << "peer sync failed: " << error << "\n";
             return 1;
         }
@@ -1404,7 +1561,7 @@ int main(int argc, char** argv) {
     auto next_sync = std::chrono::steady_clock::now()
         + std::chrono::seconds(options.sync_interval_seconds > 0 ? options.sync_interval_seconds : 1);
     auto runPeriodicSync = [&]() {
-        if (options.sync_interval_seconds <= 0 || options.peers.empty()) {
+        if (options.sync_interval_seconds <= 0 || !sync_server.hasKnownPeers()) {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -1412,7 +1569,8 @@ int main(int argc, char** argv) {
             return;
         }
         std::string error;
-        sync_server.syncFromPeers(options.peers, error);
+        sync_server.discoverPeersFromKnown();
+        sync_server.syncFromKnownPeers(error);
         next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
     };
 
