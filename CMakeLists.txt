@@ -97,6 +97,24 @@ target_link_libraries(primechain-store-inspect
         primechain_core
 )
 
+add_executable(primechain-write-corrupt-store
+    src/tools/write_corrupt_store.cpp
+)
+
+target_link_libraries(primechain-write-corrupt-store
+    PRIVATE
+        primechain_core
+)
+
+add_executable(primechain-corrupt-sync-server
+    src/tools/corrupt_sync_server.cpp
+)
+
+target_link_libraries(primechain-corrupt-sync-server
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-sync-query
     src/tools/sync_query.cpp
 )
@@ -257,6 +275,12 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.log ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18992 ${CMAKE_CURRENT_BINARY_DIR}/resume-src-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 2 250 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat >/dev/null && $<TARGET_FILE:primechain-sync-download> 127.0.0.1 18992 251 500 ${CMAKE_CURRENT_BINARY_DIR}/resume-downloaded-500.dat | grep -q 'frontier_integer: 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/resume-server.pid)"
+)
+add_test(
+    NAME sync_rejects_corrupt_peer_record
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.dat ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.log ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.dat ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.log; $<TARGET_FILE:primechain-write-corrupt-store> ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.dat >/dev/null && ($<TARGET_FILE:primechain-corrupt-sync-server> 19027 ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.dat > ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19028 ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.dat --peer 127.0.0.1 19027 > ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.log 2>&1; echo $? > ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.exit) & clean_pid=$! && sleep 0.8 && wait $clean_pid && grep -q '^1$' ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.exit && grep -q 'invalid composite payload proof' ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.log && $<TARGET_FILE:primechain-store-inspect> ${CMAKE_CURRENT_BINARY_DIR}/corrupt-clean.dat | grep -q 'has_genesis: no' && (kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/corrupt-peer.pid) 2>/dev/null || true)"
 )
 add_test(
     NAME sync_rejects_large_record_range

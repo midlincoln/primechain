@@ -449,6 +449,24 @@ bool copyFile(const std::string& source, const std::string& destination, std::st
     return true;
 }
 
+bool copyFileOrCreateEmpty(const std::string& source, const std::string& destination, std::string& error) {
+    std::ifstream in(source, std::ios::binary);
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "could not open temporary store for sync";
+        return false;
+    }
+    if (!in) {
+        return true;
+    }
+    out << in.rdbuf();
+    if (!out) {
+        error = "failed while copying temporary sync store";
+        return false;
+    }
+    return true;
+}
+
 std::optional<primechain::storage::StoredRecord> validateTipReplacementCandidate(
     const std::string& store_path,
     const primechain::storage::StoredRecord& local_tip,
@@ -919,19 +937,35 @@ public:
 
         const primechain::PrimeValue start =
             local.status().has_genesis ? local.status().frontier_integer + 1 : 2;
-        if (!downloadRecordRange(host, port, start, peer_status->frontier_integer, store_, error)) {
+        const std::string temp_path = store_path_ + ".sync." + std::to_string(getpid());
+        std::remove(temp_path.c_str());
+        if (!copyFileOrCreateEmpty(store_path_, temp_path, error)) {
             return false;
         }
 
-        primechain::node::SequentialNode reloaded(store_path_);
+        primechain::storage::RecordStore temp_store(temp_path);
+        if (!downloadRecordRange(host, port, start, peer_status->frontier_integer, temp_store, error)) {
+            std::remove(temp_path.c_str());
+            return false;
+        }
+
+        primechain::node::SequentialNode reloaded(temp_path);
         if (!reloaded.load(error)) {
+            std::remove(temp_path.c_str());
             return false;
         }
         if (!reloaded.status().has_genesis ||
             reloaded.status().frontier_integer != peer_status->frontier_integer) {
             error = "auto-sync replay frontier mismatch";
+            std::remove(temp_path.c_str());
             return false;
         }
+
+        if (!copyFile(temp_path, store_path_, error)) {
+            std::remove(temp_path.c_str());
+            return false;
+        }
+        std::remove(temp_path.c_str());
         return true;
     }
 
