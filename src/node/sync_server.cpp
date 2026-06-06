@@ -6,6 +6,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -85,6 +86,29 @@ std::optional<Socket> listenOnPort(int port) {
     }
     if (listen(fd, 16) != 0) {
         std::cerr << "listen failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    return Socket(fd);
+}
+
+std::optional<Socket> connectToServer(const std::string& host, int port) {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "socket failed: " << std::strerror(errno) << "\n";
+        return std::nullopt;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "invalid IPv4 address: " << host << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::cerr << "connect failed: " << std::strerror(errno) << "\n";
         close(fd);
         return std::nullopt;
     }
@@ -178,6 +202,57 @@ std::vector<std::uint8_t> hexToBytes(const std::string& hex) {
         out.push_back(static_cast<std::uint8_t>((high << 4) | low));
     }
     return out;
+}
+
+std::optional<primechain::Hash256> parseHash(const std::string& hex) {
+    const auto bytes = hexToBytes(hex);
+    if (bytes.size() != 32) {
+        return std::nullopt;
+    }
+    primechain::Hash256 hash{};
+    for (std::size_t i = 0; i < hash.size(); ++i) {
+        hash[i] = bytes[i];
+    }
+    return hash;
+}
+
+std::optional<primechain::storage::StoredRecordKind> parseKind(const std::string& value) {
+    if (value == "COMPOSITE") {
+        return primechain::storage::StoredRecordKind::Composite;
+    }
+    if (value == "PRIME") {
+        return primechain::storage::StoredRecordKind::Prime;
+    }
+    return std::nullopt;
+}
+
+std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::string& line) {
+    std::istringstream in(line);
+    std::string tag;
+    std::string kind_text;
+    std::string hash_hex;
+    std::string payload_hex;
+    std::uint64_t payload_size = 0;
+    primechain::storage::StoredRecord record;
+
+    in >> tag >> record.integer >> record.height >> kind_text >> hash_hex >> payload_size >> payload_hex;
+    if (!in || tag != "RECORD") {
+        return std::nullopt;
+    }
+    const auto kind = parseKind(kind_text);
+    const auto hash = parseHash(hash_hex);
+    const auto payload = hexToBytes(payload_hex);
+    if (!kind.has_value() || !hash.has_value() || payload.empty()) {
+        return std::nullopt;
+    }
+    if (payload.size() != payload_size || primechain::crypto::devHash256(payload) != *hash) {
+        return std::nullopt;
+    }
+
+    record.kind = *kind;
+    record.record_hash = *hash;
+    record.payload = payload;
+    return record;
 }
 
 std::string recordLine(const primechain::storage::StoredRecord& record) {
@@ -283,6 +358,123 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord(
     return record;
 }
 
+struct PeerStatus {
+    std::uint64_t record_count{0};
+    std::uint64_t prime_records{0};
+    std::uint64_t composite_records{0};
+    bool has_genesis{false};
+    std::uint64_t height{0};
+    primechain::PrimeValue frontier_integer{0};
+    primechain::Hash256 latest_record_hash{};
+};
+
+std::optional<PeerStatus> requestPeerStatus(const std::string& host, int port, std::string& error) {
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return std::nullopt;
+    }
+    if (!writeAll(socket->fd(), "GET_STATUS\n")) {
+        error = "could not request peer status";
+        return std::nullopt;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto line = readLine(socket->fd());
+    if (!line.has_value()) {
+        error = "peer did not return status";
+        return std::nullopt;
+    }
+
+    std::istringstream in(*line);
+    std::string tag;
+    std::uint64_t has_genesis = 0;
+    std::string hash_hex;
+    PeerStatus status;
+    in >> tag
+       >> status.record_count
+       >> status.prime_records
+       >> status.composite_records
+       >> has_genesis
+       >> status.height
+       >> status.frontier_integer
+       >> hash_hex;
+    const auto hash = parseHash(hash_hex);
+    if (!in || tag != "STATUS" || !hash.has_value()) {
+        error = "invalid peer status response";
+        return std::nullopt;
+    }
+    status.has_genesis = has_genesis != 0;
+    status.latest_record_hash = *hash;
+    return status;
+}
+
+bool downloadRecordRange(
+    const std::string& host,
+    int port,
+    primechain::PrimeValue start,
+    primechain::PrimeValue end,
+    const primechain::storage::RecordStore& output,
+    std::string& error) {
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    std::ostringstream command;
+    command << "GET_RECORD_RANGE " << start << " " << end << "\n";
+    if (!writeAll(socket->fd(), command.str())) {
+        error = "could not request peer record range";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        error = "peer did not return range header";
+        return false;
+    }
+
+    std::istringstream header_in(*header);
+    std::string header_tag;
+    primechain::PrimeValue response_start = 0;
+    primechain::PrimeValue response_end = 0;
+    std::uint64_t expected_count = 0;
+    header_in >> header_tag >> response_start >> response_end >> expected_count;
+    if (!header_in || header_tag != "RECORD_RANGE" || response_start != start || response_end != end) {
+        error = "invalid peer range header";
+        return false;
+    }
+
+    std::uint64_t downloaded = 0;
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_RECORD_RANGE") {
+            break;
+        }
+        const auto record = parseRecordLine(*line);
+        if (!record.has_value()) {
+            error = "invalid peer record line";
+            return false;
+        }
+        const primechain::PrimeValue expected_integer = start + downloaded;
+        const std::uint64_t expected_height = expected_integer - 2;
+        if (record->integer != expected_integer || record->height != expected_height) {
+            error = "peer record sequence mismatch";
+            return false;
+        }
+        if (!output.append(*record, error)) {
+            return false;
+        }
+        ++downloaded;
+    }
+    if (downloaded != expected_count) {
+        error = "peer range count mismatch";
+        return false;
+    }
+    return true;
+}
+
 class SyncServer {
 public:
     explicit SyncServer(std::string store_path)
@@ -325,6 +517,44 @@ public:
             }
             writeAll(fd, "ERROR unknown command\n");
         }
+    }
+
+    bool syncFromPeer(const std::string& host, int port, std::string& error) const {
+        primechain::node::SequentialNode local(store_path_);
+        if (!local.load(error)) {
+            return false;
+        }
+
+        const auto peer_status = requestPeerStatus(host, port, error);
+        if (!peer_status.has_value()) {
+            return false;
+        }
+        if (!peer_status->has_genesis) {
+            return true;
+        }
+
+        const primechain::PrimeValue local_frontier =
+            local.status().has_genesis ? local.status().frontier_integer : 0;
+        if (peer_status->frontier_integer <= local_frontier) {
+            return true;
+        }
+
+        const primechain::PrimeValue start =
+            local.status().has_genesis ? local.status().frontier_integer + 1 : 2;
+        if (!downloadRecordRange(host, port, start, peer_status->frontier_integer, store_, error)) {
+            return false;
+        }
+
+        primechain::node::SequentialNode reloaded(store_path_);
+        if (!reloaded.load(error)) {
+            return false;
+        }
+        if (!reloaded.status().has_genesis ||
+            reloaded.status().frontier_integer != peer_status->frontier_integer) {
+            error = "auto-sync replay frontier mismatch";
+            return false;
+        }
+        return true;
     }
 
 private:
@@ -678,10 +908,40 @@ private:
     std::vector<primechain::protocol::TransactionV0> mempool_;
 };
 
+struct Options {
+    int port{kDefaultPort};
+    std::string store_path{kDefaultStorePath};
+    bool has_peer{false};
+    std::string peer_host;
+    int peer_port{0};
+};
+
+std::optional<Options> parseOptions(int argc, char** argv) {
+    Options options;
+    int index = 1;
+    if (index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
+        options.port = std::stoi(argv[index++]);
+    }
+    if (index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
+        options.store_path = argv[index++];
+    }
+    while (index < argc) {
+        const std::string flag = argv[index++];
+        if (flag != "--peer" || index + 1 >= argc) {
+            return std::nullopt;
+        }
+        options.has_peer = true;
+        options.peer_host = argv[index++];
+        options.peer_port = std::stoi(argv[index++]);
+    }
+    return options;
+}
+
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--peer host port]\n"
               << "example:\n"
-              << "  " << argv0 << " 18889 ./data/sequential-500.dat\n";
+              << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
+              << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889\n";
 }
 
 } // namespace
@@ -692,20 +952,33 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    const auto parsed = parseOptions(argc, argv);
+    if (!parsed.has_value()) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    const Options options = *parsed;
+
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
-    const int port = argc > 1 ? std::stoi(argv[1]) : kDefaultPort;
-    const std::string store_path = argc > 2 ? argv[2] : kDefaultStorePath;
-
-    auto server = listenOnPort(port);
+    auto server = listenOnPort(options.port);
     if (!server.has_value()) {
         return 1;
     }
 
-    SyncServer sync_server(store_path);
-    std::cout << "Primechain sync server listening on 127.0.0.1:" << port << "\n";
-    std::cout << "record store: " << store_path << "\n";
+    SyncServer sync_server(options.store_path);
+    if (options.has_peer) {
+        std::string error;
+        if (!sync_server.syncFromPeer(options.peer_host, options.peer_port, error)) {
+            std::cerr << "peer sync failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << "peer sync complete from " << options.peer_host << ":" << options.peer_port << "\n";
+    }
+
+    std::cout << "Primechain sync server listening on 127.0.0.1:" << options.port << "\n";
+    std::cout << "record store: " << options.store_path << "\n";
 
     while (g_running) {
         fd_set read_fds;

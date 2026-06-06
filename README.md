@@ -410,7 +410,7 @@ rm -f ./data/node-a.dat ./data/node-b.dat ./data/node-c.dat
 ./build/primechain-sync-server 18889 ./data/node-a.dat
 ```
 
-Terminal 2, advance node A and copy its records into node B and node C stores:
+Terminal 2, advance node A:
 
 ```bash
 cd ~/primechain
@@ -419,23 +419,20 @@ alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
 
 ./build/primechain-send submit 127.0.0.1 18889 ./wallets/miner.wallet $alice 3 250000 1
 ./build/primechain-sync-query 127.0.0.1 18889 ADVANCE_TO 20 $miner pcdev1_composite_miner 4
-
-./build/primechain-sync-download 127.0.0.1 18889 2 20 ./data/node-b.dat
-./build/primechain-sync-download 127.0.0.1 18889 2 20 ./data/node-c.dat
 ```
 
-Terminal 3, node B:
+Terminal 3, node B starts and automatically syncs from node A:
 
 ```bash
 cd ~/primechain
-./build/primechain-sync-server 18890 ./data/node-b.dat
+./build/primechain-sync-server 18890 ./data/node-b.dat --peer 127.0.0.1 18889
 ```
 
-Terminal 4, node C:
+Terminal 4, node C starts and automatically syncs from node A:
 
 ```bash
 cd ~/primechain
-./build/primechain-sync-server 18891 ./data/node-c.dat
+./build/primechain-sync-server 18891 ./data/node-c.dat --peer 127.0.0.1 18889
 ```
 
 Query all three nodes:
@@ -453,7 +450,7 @@ Each node should report:
 HOLDING 3 250000
 ```
 
-This proves three separate node stores converge when records are copied through the sync protocol. It is not automatic peer gossip yet.
+This proves three separate node stores converge when follower nodes bootstrap from a peer at startup. This is startup peer sync, not continuous peer gossip yet.
 
 Resume download in batches:
 
