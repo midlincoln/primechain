@@ -30,6 +30,7 @@ public:
     const std::string& path() const { return path_; }
 
     bool append(const StoredRecord& record, std::string& error) const;
+    bool replaceTip(const Hash256& expected_old_tip_hash, const StoredRecord& replacement, std::string& error) const;
     std::vector<StoredRecord> loadAll(std::string& error) const;
     std::optional<StoredRecord> latest(std::string& error) const;
     std::optional<StoredRecord> findByInteger(PrimeValue integer, std::string& error) const;

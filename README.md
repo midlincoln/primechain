@@ -262,18 +262,18 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
-When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are classified deterministically but are not rewritten yet: if two records have the same integer and same previous record hash, the lower finalized record hash is reported as the better candidate. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
+When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 
 Current development conflict responses:
 
 ```text
 RECORD_DUPLICATE <hash>
-RECORD_CONFLICT_BETTER <incoming_hash> <local_hash>
+RECORD_REPLACED <incoming_hash> <old_local_hash>
 RECORD_CONFLICT_WORSE <incoming_hash> <local_hash>
 RECORD_CONFLICT_FORK <incoming_hash> <local_hash>
 ```
 
-`RECORD_CONFLICT_BETTER` is advisory in this version. The node does not roll back or replace the local tip yet.
+Only the current tip can be replaced. Deep rollback is not implemented.
 
 Inspect the TCP mempool:
 
@@ -567,12 +567,13 @@ Completed prototype milestones:
 - development mempool propagation to configured peers
 - development record propagation to configured peers
 - same-tip record conflict classification
+- safe same-tip replacement for lower-hash records
 
 Next milestones:
 
-1. Add safe tip replacement for `RECORD_CONFLICT_BETTER`.
-2. Add multiple active writers in local tests.
-3. Add bind-address support for public-server tests.
+1. Add multiple active writers in local tests.
+2. Add bind-address support for public-server tests.
+3. Add peer discovery and gossip beyond manually configured peers.
 4. Add strict message, connection, proof-window, and pool-size limits.
 5. Add commit-reveal and contributor authentication.
 6. Later add production hashing, real signatures, and post-quantum signatures.

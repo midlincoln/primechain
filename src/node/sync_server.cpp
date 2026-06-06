@@ -3,6 +3,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -344,6 +345,59 @@ bool appendStoredRecord(
         return false;
     }
     return node.appendPrime(*decoded, error);
+}
+
+bool copyFile(const std::string& source, const std::string& destination, std::string& error) {
+    std::ifstream in(source, std::ios::binary);
+    if (!in) {
+        error = "could not open source store for copy";
+        return false;
+    }
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "could not open temporary store for copy";
+        return false;
+    }
+    out << in.rdbuf();
+    if (!out) {
+        error = "failed while copying temporary store";
+        return false;
+    }
+    return true;
+}
+
+std::optional<primechain::storage::StoredRecord> validateTipReplacementCandidate(
+    const std::string& store_path,
+    const primechain::storage::StoredRecord& local_tip,
+    const primechain::storage::StoredRecord& replacement,
+    std::string& error) {
+    const std::string temp_path = store_path + ".tipcheck." + std::to_string(getpid());
+    if (!copyFile(store_path, temp_path, error)) {
+        return std::nullopt;
+    }
+
+    primechain::storage::RecordStore temp_store(temp_path);
+    if (!temp_store.replaceTip(local_tip.record_hash, replacement, error)) {
+        std::remove(temp_path.c_str());
+        return std::nullopt;
+    }
+
+    primechain::node::SequentialNode candidate(temp_path);
+    if (!candidate.load(error)) {
+        std::remove(temp_path.c_str());
+        return std::nullopt;
+    }
+    if (!candidate.status().has_genesis ||
+        candidate.status().frontier_integer != replacement.integer ||
+        candidate.status().height != replacement.height ||
+        candidate.status().latest_record_hash != replacement.record_hash) {
+        error = "replacement replay did not converge to candidate tip";
+        std::remove(temp_path.c_str());
+        return std::nullopt;
+    }
+
+    std::remove(temp_path.c_str());
+    return replacement;
 }
 
 class MapProofIndex final : public primechain::math::CompositeProofIndex {
@@ -902,8 +956,21 @@ private:
                 }
 
                 if (hashLess(submitted->record_hash, existing->record_hash)) {
-                    writeAll(fd, "RECORD_CONFLICT_BETTER "
-                        + primechain::crypto::toHex(submitted->record_hash)
+                    error.clear();
+                    const auto validated =
+                        validateTipReplacementCandidate(store_path_, *existing, *submitted, error);
+                    if (!validated.has_value()) {
+                        writeAll(fd, "ERROR invalid better tip replacement: " + error + "\n");
+                        return;
+                    }
+                    error.clear();
+                    if (!store_.replaceTip(existing->record_hash, *validated, error)) {
+                        writeAll(fd, "ERROR could not replace tip: " + error + "\n");
+                        return;
+                    }
+                    propagateRecord(*validated);
+                    writeAll(fd, "RECORD_REPLACED "
+                        + primechain::crypto::toHex(validated->record_hash)
                         + " "
                         + primechain::crypto::toHex(existing->record_hash)
                         + "\n");

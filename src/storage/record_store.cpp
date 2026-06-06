@@ -81,6 +81,59 @@ bool RecordStore::append(const StoredRecord& record, std::string& error) const {
     return true;
 }
 
+bool RecordStore::replaceTip(
+    const Hash256& expected_old_tip_hash,
+    const StoredRecord& replacement,
+    std::string& error) const {
+    auto records = loadAll(error);
+    if (!error.empty()) {
+        return false;
+    }
+    if (records.empty()) {
+        error = "cannot replace tip in empty store";
+        return false;
+    }
+    if (records.back().record_hash != expected_old_tip_hash) {
+        error = "tip hash changed before replacement";
+        return false;
+    }
+    if (replacement.payload.empty()) {
+        error = "replacement payload is empty";
+        return false;
+    }
+    if (crypto::devHash256(replacement.payload) != replacement.record_hash) {
+        error = "replacement hash does not match payload";
+        return false;
+    }
+    if (replacement.height != records.back().height ||
+        replacement.integer != records.back().integer) {
+        error = "replacement is not for current tip";
+        return false;
+    }
+
+    records.back() = replacement;
+
+    std::ofstream out(path_, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "could not open record store for tip replacement";
+        return false;
+    }
+    for (const auto& record : records) {
+        writeUint64(out, kRecordStoreMagic);
+        writeUint64(out, static_cast<std::uint64_t>(record.kind));
+        writeUint64(out, record.height);
+        writeUint64(out, record.integer);
+        writeHash(out, record.record_hash);
+        writeUint64(out, record.payload.size());
+        out.write(reinterpret_cast<const char*>(record.payload.data()), record.payload.size());
+        if (!out) {
+            error = "failed while rewriting record store";
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<StoredRecord> RecordStore::loadAll(std::string& error) const {
     std::vector<StoredRecord> records;
     std::ifstream in(path_, std::ios::binary);
