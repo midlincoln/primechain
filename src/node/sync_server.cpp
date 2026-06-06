@@ -671,9 +671,15 @@ bool submitRecordToPeer(
 
 class SyncServer {
 public:
-    SyncServer(std::string store_path, std::vector<PeerEndpoint> peers)
+    SyncServer(
+        std::string store_path,
+        std::vector<PeerEndpoint> peers,
+        bool advance_enabled,
+        bool ack_mempool_enabled)
         : store_path_(std::move(store_path)),
           peers_(std::move(peers)),
+          advance_enabled_(advance_enabled),
+          ack_mempool_enabled_(ack_mempool_enabled),
           store_(store_path_) {}
 
     void handleClient(int fd) {
@@ -703,10 +709,18 @@ public:
                 continue;
             }
             if (line->rfind("ACK_MEMPOOL ", 0) == 0) {
+                if (!ack_mempool_enabled_) {
+                    writeAll(fd, "ERROR ACK_MEMPOOL disabled; restart with --enable-ack-mempool\n");
+                    continue;
+                }
                 ackMempool(fd, *line);
                 continue;
             }
             if (line->rfind("ADVANCE_TO ", 0) == 0) {
+                if (!advance_enabled_) {
+                    writeAll(fd, "ERROR ADVANCE_TO disabled; restart with --enable-advance\n");
+                    continue;
+                }
                 advanceTo(fd, *line);
                 continue;
             }
@@ -1241,6 +1255,8 @@ private:
 
     std::string store_path_;
     std::vector<PeerEndpoint> peers_;
+    bool advance_enabled_{false};
+    bool ack_mempool_enabled_{false};
     primechain::storage::RecordStore store_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
 };
@@ -1251,6 +1267,8 @@ struct Options {
     std::string store_path{kDefaultStorePath};
     std::vector<PeerEndpoint> peers;
     int sync_interval_seconds{0};
+    bool enable_advance{false};
+    bool enable_ack_mempool{false};
 };
 
 std::optional<Options> parseOptions(int argc, char** argv) {
@@ -1291,6 +1309,14 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             }
             continue;
         }
+        if (flag == "--enable-advance") {
+            options.enable_advance = true;
+            continue;
+        }
+        if (flag == "--enable-ack-mempool") {
+            options.enable_ack_mempool = true;
+            continue;
+        }
         {
             return std::nullopt;
         }
@@ -1299,11 +1325,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
-              << "  " << argv0 << " 18889 ./data/public-node.dat --bind 0.0.0.0\n";
+              << "  " << argv0 << " 18889 ./data/public-node.dat --bind 0.0.0.0\n"
+              << "  " << argv0 << " 18889 ./data/dev-node.dat --enable-advance --enable-ack-mempool\n";
 }
 
 } // namespace
@@ -1329,7 +1356,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    SyncServer sync_server(options.store_path, options.peers);
+    SyncServer sync_server(
+        options.store_path,
+        options.peers,
+        options.enable_advance,
+        options.enable_ack_mempool);
     if (!options.peers.empty()) {
         std::string error;
         if (!sync_server.syncFromPeers(options.peers, error)) {
@@ -1343,6 +1374,12 @@ int main(int argc, char** argv) {
     std::cout << "record store: " << options.store_path << "\n";
     if (options.sync_interval_seconds > 0 && !options.peers.empty()) {
         std::cout << "continuous peer sync interval: " << options.sync_interval_seconds << "s\n";
+    }
+    if (options.enable_advance) {
+        std::cout << "development command enabled: ADVANCE_TO\n";
+    }
+    if (options.enable_ack_mempool) {
+        std::cout << "development command enabled: ACK_MEMPOOL\n";
     }
 
     auto next_sync = std::chrono::steady_clock::now()

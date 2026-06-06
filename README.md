@@ -255,7 +255,7 @@ Shortcut using `primechain-send`:
 Submit a signed development transaction to a running TCP node:
 
 ```bash
-./build/primechain-sync-server 18889 ./data/send-chain.dat
+./build/primechain-sync-server 18889 ./data/send-chain.dat --enable-ack-mempool
 ./build/primechain-send submit 127.0.0.1 18889 \
   ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 1
 ```
@@ -299,7 +299,9 @@ miner=$(./build/primechain-wallet address ./wallets/miner.wallet)
 ./build/primechain-sync-query 127.0.0.1 18889 ADVANCE_TO 20 $miner pcdev1_composite_miner 4
 ```
 
-`ADVANCE_TO limit prime_miner composite_miner mempool_target_integer` is a development command. It creates verified arithmetic records up to `limit`, embeds the current mempool at the chosen target record, reload-validates the resulting store, and removes included transactions from the mempool. If you spend prime `3`, use target record `4` or later because record `3` mints the asset before it can be spent.
+`ADVANCE_TO limit prime_miner composite_miner mempool_target_integer` is a development command. It creates verified arithmetic records up to `limit`, embeds the current mempool at the chosen target record, reload-validates the resulting store, and removes included transactions from the mempool. The TCP server rejects it by default; start the server with `--enable-advance` for local development tests. If you spend prime `3`, use target record `4` or later because record `3` mints the asset before it can be spent.
+
+`ACK_MEMPOOL` is also disabled by default because it removes pending transactions. Start the server with `--enable-ack-mempool` only for local development tests that intentionally acknowledge included transactions.
 
 Expected summary:
 
@@ -382,6 +384,8 @@ Peers should connect using the machine's public IP or DNS name:
 ./build/primechain-sync-server 18890 ./data/node-b.dat --peer PUBLIC_IP_OR_DNS 18889 --sync-interval 5
 ```
 
+Do not expose development write commands on a public port unless the test is intentionally controlled. `ADVANCE_TO` and `ACK_MEMPOOL` remain disabled unless `--enable-advance` or `--enable-ack-mempool` is supplied.
+
 Terminal 2:
 
 ```bash
@@ -432,7 +436,7 @@ Terminal 1, node A:
 ```bash
 cd ~/primechain
 rm -f ./data/node-a.dat ./data/node-b.dat ./data/node-c.dat
-./build/primechain-sync-server 18889 ./data/node-a.dat
+./build/primechain-sync-server 18889 ./data/node-a.dat --enable-advance
 ```
 
 Terminal 2, advance node A:
