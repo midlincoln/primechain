@@ -315,6 +315,36 @@ Current success response:
 PRIME_ACCEPTED <p> <record_hash>
 ```
 
+Ask a running TCP node for the recursive factorization it can reconstruct from
+stored arithmetic records:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_FACTORIZATION 12
+```
+
+Response format:
+
+```text
+FACTORIZATION <n> FACTORS <k> PRIME <p1> EXP <e1> PRIME <p2> EXP <e2> ...
+```
+
+Examples:
+
+```text
+FACTORIZATION 12 FACTORS 2 PRIME 2 EXP 2 PRIME 3 EXP 1
+FACTORIZATION 19 FACTORS 1 PRIME 19 EXP 1
+```
+
+The labels are intentional: `PRIME 2 EXP 2` means `2^2`, not two separate
+factor entries. A client must still verify that factors are prime, strictly
+increasing, exponents are positive, and the product equals `<n>`. If the node
+does not have enough prior composite records to recursively factor `<n>`, it
+returns:
+
+```text
+ERROR factorization unavailable
+```
+
 Run the prototype frontier miner loop against a TCP sync node:
 
 ```bash

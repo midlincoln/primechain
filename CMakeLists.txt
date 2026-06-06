@@ -268,6 +268,24 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18989 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18989 GET_STATUS | grep -q 'STATUS 499 95 404 1 498 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid)"
 )
 add_test(
+    NAME sync_get_factorization_12
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/factor-20.dat ${CMAKE_CURRENT_BINARY_DIR}/factor-20.log ${CMAKE_CURRENT_BINARY_DIR}/factor-20-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/factor-20.log ${CMAKE_CURRENT_BINARY_DIR}/factor-20.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19038 ${CMAKE_CURRENT_BINARY_DIR}/factor-20.dat > ${CMAKE_CURRENT_BINARY_DIR}/factor-20-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/factor-20.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19038 GET_FACTORIZATION 12 | grep -q '^FACTORIZATION 12 FACTORS 2 PRIME 2 EXP 2 PRIME 3 EXP 1$' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/factor-20.pid)"
+)
+add_test(
+    NAME sync_get_factorization_prime_19
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.dat ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.log ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.log ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19039 ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.dat > ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19039 GET_FACTORIZATION 19 | grep -q '^FACTORIZATION 19 FACTORS 1 PRIME 19 EXP 1$' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/factor-prime-20.pid)"
+)
+add_test(
+    NAME sync_get_factorization_unavailable
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/factor-short.dat ${CMAKE_CURRENT_BINARY_DIR}/factor-short.log ${CMAKE_CURRENT_BINARY_DIR}/factor-short-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/factor-short.log ${CMAKE_CURRENT_BINARY_DIR}/factor-short.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19040 ${CMAKE_CURRENT_BINARY_DIR}/factor-short.dat > ${CMAKE_CURRENT_BINARY_DIR}/factor-short-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/factor-short.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19040 GET_FACTORIZATION 12 | grep -q '^ERROR factorization unavailable$' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/factor-short.pid)"
+)
+add_test(
     NAME sync_server_bind_any
     COMMAND
         /bin/sh -c

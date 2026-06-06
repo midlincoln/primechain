@@ -868,6 +868,10 @@ public:
                 sendRecordRange(fd, *line);
                 continue;
             }
+            if (line->rfind("GET_FACTORIZATION ", 0) == 0) {
+                sendFactorization(fd, *line);
+                continue;
+            }
             if (*line == "GET_PEERS") {
                 sendPeers(fd);
                 continue;
@@ -1163,6 +1167,47 @@ private:
             writeAll(fd, recordLine(record));
         }
         writeAll(fd, "END_RECORD_RANGE\n");
+    }
+
+    void sendFactorization(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue n = 0;
+        in >> command >> n;
+        std::string extra;
+        if (!in || command != "GET_FACTORIZATION" || n < 2 || (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_FACTORIZATION; expected GET_FACTORIZATION n\n");
+            return;
+        }
+
+        MapProofIndex proofs;
+        std::string error;
+        if (!loadCompositeProofIndex(store_, proofs, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+
+        const auto factorization = primechain::math::factorizeFromProofIndex(n, proofs);
+        if (!factorization.has_value()) {
+            writeAll(fd, "ERROR factorization unavailable\n");
+            return;
+        }
+
+        const auto product = primechain::math::multiplyFactorization(*factorization);
+        if (!primechain::math::isCanonicalFactorization(*factorization) ||
+            !product.has_value() ||
+            *product != n) {
+            writeAll(fd, "ERROR internal factorization validation failed\n");
+            return;
+        }
+
+        std::ostringstream out;
+        out << "FACTORIZATION " << n << " FACTORS " << factorization->factors.size();
+        for (const auto& factor : factorization->factors) {
+            out << " PRIME " << factor.prime << " EXP " << factor.exponent;
+        }
+        out << "\n";
+        writeAll(fd, out.str());
     }
 
     void submitTx(int fd, const std::string& line) {
