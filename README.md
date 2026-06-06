@@ -408,6 +408,26 @@ Peer discovery is first-pass and development-only. Nodes can list and add peers:
 
 On startup and during periodic sync, a node asks known peers for their peer lists and adds discovered peers up to the current cap.
 
+### Current Identity Model
+
+The prototype does not yet identify TCP clients cryptographically.
+
+Current identifiers are development-level only:
+
+- peers are known by IPv4 address and port, for example `127.0.0.1:18889`;
+- wallet addresses are development strings such as `pcdev1_...`;
+- miner and composite provider fields are address strings embedded in records;
+- transaction records include a development signature/hash check, but this is not yet a production key/address scheme;
+- peer messages are not signed, and nodes do not yet have persistent public-key identities.
+
+This means the next rate-limit layer can only be simple:
+
+- per TCP connection;
+- per source address if added later;
+- global caps such as max mempool size and max known peers.
+
+Real contributor identity is a later protocol layer. The intended path is keypair generation, address derivation from public key, signed transaction submission, signed composite record submission, signed prime record submission, and node-side signature verification before rewards are assigned.
+
 Terminal 2:
 
 ```bash
