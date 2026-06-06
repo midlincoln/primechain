@@ -277,6 +277,10 @@ SUBMIT_COMPOSITE g d e provider_address
 
 The node checks that `d * e = g`, that `provider_address` is a development address, and that `g` is exactly the next integer after the local frontier. If the local store is empty, genesis is initialized first. Accepted composite submissions are finalized as normal composite records, stored on disk, and propagated to configured peers with `SUBMIT_RECORD`.
 
+A correct peer independently replays this validation. For example, a corrupted node or miner claiming `SUBMIT_COMPOSITE 5 2 2 pcdev1_bad` is rejected because `2 * 2 != 5`, and the receiving node's frontier does not advance.
+
+If a second valid `SUBMIT_COMPOSITE` arrives for the current tip integer, the node builds the competing canonical record and applies the same lower-hash conflict rule used by `SUBMIT_RECORD`. The lower finalized record hash wins; the worse candidate is rejected as `RECORD_CONFLICT_WORSE`.
+
 Current success response:
 
 ```text

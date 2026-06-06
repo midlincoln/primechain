@@ -1197,68 +1197,7 @@ private:
         }
 
         if (submitted->integer <= node.status().frontier_integer) {
-            const auto existing = store_.findByInteger(submitted->integer, error);
-            if (!error.empty()) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
-            if (existing.has_value() && existing->record_hash == submitted->record_hash) {
-                writeAll(fd, "RECORD_DUPLICATE " + primechain::crypto::toHex(submitted->record_hash) + "\n");
-                return;
-            }
-            if (existing.has_value() && submitted->integer == node.status().frontier_integer) {
-                error.clear();
-                const auto submitted_previous = previousRecordHash(*submitted, error);
-                if (!submitted_previous.has_value()) {
-                    writeAll(fd, "ERROR " + error + "\n");
-                    return;
-                }
-                error.clear();
-                const auto existing_previous = previousRecordHash(*existing, error);
-                if (!existing_previous.has_value()) {
-                    writeAll(fd, "ERROR " + error + "\n");
-                    return;
-                }
-
-                if (*submitted_previous != *existing_previous) {
-                    writeAll(fd, "RECORD_CONFLICT_FORK "
-                        + primechain::crypto::toHex(submitted->record_hash)
-                        + " "
-                        + primechain::crypto::toHex(existing->record_hash)
-                        + "\n");
-                    return;
-                }
-
-                if (hashLess(submitted->record_hash, existing->record_hash)) {
-                    error.clear();
-                    const auto validated =
-                        validateTipReplacementCandidate(store_path_, *existing, *submitted, error);
-                    if (!validated.has_value()) {
-                        writeAll(fd, "ERROR invalid better tip replacement: " + error + "\n");
-                        return;
-                    }
-                    error.clear();
-                    if (!store_.replaceTip(existing->record_hash, *validated, error)) {
-                        writeAll(fd, "ERROR could not replace tip: " + error + "\n");
-                        return;
-                    }
-                    propagateRecord(*validated);
-                    writeAll(fd, "RECORD_REPLACED "
-                        + primechain::crypto::toHex(validated->record_hash)
-                        + " "
-                        + primechain::crypto::toHex(existing->record_hash)
-                        + "\n");
-                    return;
-                }
-
-                writeAll(fd, "RECORD_CONFLICT_WORSE "
-                    + primechain::crypto::toHex(submitted->record_hash)
-                    + " "
-                    + primechain::crypto::toHex(existing->record_hash)
-                    + "\n");
-                return;
-            }
-            writeAll(fd, "ERROR conflicting historical record\n");
+            handleExistingOrConflictingRecord(fd, *submitted, node.status().frontier_integer);
             return;
         }
 
@@ -1270,6 +1209,75 @@ private:
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
+    }
+
+    void handleExistingOrConflictingRecord(
+        int fd,
+        const primechain::storage::StoredRecord& submitted,
+        primechain::PrimeValue frontier_integer) {
+        std::string error;
+        const auto existing = store_.findByInteger(submitted.integer, error);
+        if (!error.empty()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (existing.has_value() && existing->record_hash == submitted.record_hash) {
+            writeAll(fd, "RECORD_DUPLICATE " + primechain::crypto::toHex(submitted.record_hash) + "\n");
+            return;
+        }
+        if (existing.has_value() && submitted.integer == frontier_integer) {
+            error.clear();
+            const auto submitted_previous = previousRecordHash(submitted, error);
+            if (!submitted_previous.has_value()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            error.clear();
+            const auto existing_previous = previousRecordHash(*existing, error);
+            if (!existing_previous.has_value()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+
+            if (*submitted_previous != *existing_previous) {
+                writeAll(fd, "RECORD_CONFLICT_FORK "
+                    + primechain::crypto::toHex(submitted.record_hash)
+                    + " "
+                    + primechain::crypto::toHex(existing->record_hash)
+                    + "\n");
+                return;
+            }
+
+            if (hashLess(submitted.record_hash, existing->record_hash)) {
+                error.clear();
+                const auto validated =
+                    validateTipReplacementCandidate(store_path_, *existing, submitted, error);
+                if (!validated.has_value()) {
+                    writeAll(fd, "ERROR invalid better tip replacement: " + error + "\n");
+                    return;
+                }
+                error.clear();
+                if (!store_.replaceTip(existing->record_hash, *validated, error)) {
+                    writeAll(fd, "ERROR could not replace tip: " + error + "\n");
+                    return;
+                }
+                propagateRecord(*validated);
+                writeAll(fd, "RECORD_REPLACED "
+                    + primechain::crypto::toHex(validated->record_hash)
+                    + " "
+                    + primechain::crypto::toHex(existing->record_hash)
+                    + "\n");
+                return;
+            }
+
+            writeAll(fd, "RECORD_CONFLICT_WORSE "
+                + primechain::crypto::toHex(submitted.record_hash)
+                + " "
+                + primechain::crypto::toHex(existing->record_hash)
+                + "\n");
+            return;
+        }
+        writeAll(fd, "ERROR conflicting historical record\n");
     }
 
     void submitComposite(int fd, const std::string& line) {
@@ -1312,6 +1320,38 @@ private:
             propagateRecord(
                 primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
         }
+        if (g == node.status().frontier_integer && node.status().frontier_integer > 2) {
+            const auto existing = store_.findByInteger(g, error);
+            if (!error.empty()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            if (!existing.has_value()) {
+                writeAll(fd, "ERROR current frontier record not found\n");
+                return;
+            }
+            error.clear();
+            const auto previous_hash = previousRecordHash(*existing, error);
+            if (!previous_hash.has_value()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+
+            primechain::protocol::CompositeRecordV0 record;
+            record.version = 0;
+            record.height = node.status().height;
+            record.previous_record_hash = *previous_hash;
+            record.integer = proof.m;
+            record.proof.g = proof.m;
+            record.proof.d = proof.d;
+            record.proof.e = proof.e;
+            record.proof.provider_address = provider_address;
+            primechain::protocol::applyDevelopmentFinalization(record);
+            const auto stored = primechain::storage::makeStoredRecord(record);
+            handleExistingOrConflictingRecord(fd, stored, node.status().frontier_integer);
+            return;
+        }
+
         if (g != node.status().frontier_integer + 1) {
             std::ostringstream out;
             out << "ERROR SUBMIT_COMPOSITE must extend frontier "

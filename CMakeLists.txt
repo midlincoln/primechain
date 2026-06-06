@@ -349,6 +349,18 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.dat ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.log; ($<TARGET_FILE:primechain-sync-server> 19022 ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.dat > ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19022 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_submitter | grep -q '^ERROR SUBMIT_COMPOSITE must extend frontier 2 with integer 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/wrong-composite.pid)"
 )
 add_test(
+    NAME tcp_submit_composite_rejects_bad_arithmetic
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/bad-composite.dat ${CMAKE_CURRENT_BINARY_DIR}/bad-composite.log ${CMAKE_CURRENT_BINARY_DIR}/bad-composite-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/bad-composite.log ${CMAKE_CURRENT_BINARY_DIR}/bad-composite.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19025 ${CMAKE_CURRENT_BINARY_DIR}/bad-composite.dat > ${CMAKE_CURRENT_BINARY_DIR}/bad-composite-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/bad-composite-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19025 SUBMIT_COMPOSITE 5 2 2 pcdev1_bad_composite | grep -q '^ERROR invalid composite proof' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19025 GET_STATUS | grep -q 'STATUS 2 2 0 1 1 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/bad-composite-server.pid)"
+)
+add_test(
+    NAME tcp_submit_composite_same_tip_uses_lower_hash
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/same-composite.dat ${CMAKE_CURRENT_BINARY_DIR}/same-composite.log ${CMAKE_CURRENT_BINARY_DIR}/same-composite-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/same-composite.log ${CMAKE_CURRENT_BINARY_DIR}/same-composite.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19026 ${CMAKE_CURRENT_BINARY_DIR}/same-composite.dat > ${CMAKE_CURRENT_BINARY_DIR}/same-composite-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/same-composite-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19026 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_a | grep -q '^COMPOSITE_ACCEPTED 4 ' && first=$($<TARGET_FILE:primechain-sync-query> 127.0.0.1 19026 GET_RECORD 4 | awk '{print $5}') && response=$($<TARGET_FILE:primechain-sync-query> 127.0.0.1 19026 SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_b) && second=$($<TARGET_FILE:primechain-sync-query> 127.0.0.1 19026 GET_RECORD 4 | awk '{print $5}') && lower=$(printf '%s\\n%s\\n' \"$first\" \"$second\" | sort | head -n 1) && printf '%s\\n' \"$response\" | grep -Eq '^RECORD_(REPLACED|CONFLICT_WORSE) ' && [ \"$second\" = \"$lower\" ] && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/same-composite-server.pid)"
+)
+add_test(
     NAME tcp_submit_composite_propagates_to_peer
     COMMAND
         /bin/sh -c
