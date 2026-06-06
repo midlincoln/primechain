@@ -66,6 +66,15 @@ target_link_libraries(primechain-composite-miner
         primechain_core
 )
 
+add_executable(primechain-frontier-miner
+    src/miner/frontier_main.cpp
+)
+
+target_link_libraries(primechain-frontier-miner
+    PRIVATE
+        primechain_core
+)
+
 add_executable(primechain-estimator
     src/tools/estimator.cpp
 )
@@ -419,6 +428,18 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.log; $<TARGET_FILE:primechain-sequential> 4 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat >/dev/null && ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat && ($<TARGET_FILE:primechain-sync-server> 19033 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19034 ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.dat --peer 127.0.0.1 19033 > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19034 SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_submitter | grep -q '^PRIME_ACCEPTED 5 ' && sleep 0.4 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19033 GET_STATUS | grep -q 'STATUS 4 3 1 1 3 5' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/prime-prop-b.pid)"
+)
+add_test(
+    NAME frontier_miner_advances_to_20
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.dat ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.log; ($<TARGET_FILE:primechain-sync-server> 19035 ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.dat > ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.pid) && sleep 0.2 && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19035 20 pcdev1_frontier_prime pcdev1_frontier_composite | grep -q 'frontier miner complete frontier=20' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19035 GET_STATUS | grep -q 'STATUS 19 8 11 1 18 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/frontier-miner.pid)"
+)
+add_test(
+    NAME frontier_miner_records_propagate_to_peer
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.log; ($<TARGET_FILE:primechain-sync-server> 19036 ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19037 ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.dat --peer 127.0.0.1 19036 > ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19037 20 pcdev1_frontier_prime pcdev1_frontier_composite | grep -q 'frontier miner complete frontier=20' && sleep 0.8 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19036 GET_STATUS | grep -q 'STATUS 19 8 11 1 18 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/frontier-prop-b.pid)"
 )
 add_test(
     NAME sequential_include_tcp_mempool

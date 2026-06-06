@@ -315,6 +315,24 @@ Current success response:
 PRIME_ACCEPTED <p> <record_hash>
 ```
 
+Run the prototype frontier miner loop against a TCP sync node:
+
+```bash
+./build/primechain-sync-server 18889 ./data/frontier-node.dat
+./build/primechain-frontier-miner 127.0.0.1 18889 20 \
+  pcdev1_prime_miner pcdev1_composite_miner
+```
+
+The frontier miner repeatedly:
+
+- asks the node for `GET_STATUS`;
+- tests `frontier + 1`;
+- submits `SUBMIT_COMPOSITE` when the next integer is composite;
+- submits `SUBMIT_PRIME` with a Pratt proof when the next integer is prime;
+- stops when the node frontier reaches the requested limit.
+
+This is the first real mining flow for the sequential arithmetic chain. It is still a prototype: it keeps its composite proof index locally during the run, so it works best from a fresh node or a node whose needed composite proofs were mined by this same process.
+
 When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 
 Current development conflict responses:
@@ -692,10 +710,11 @@ Completed prototype milestones:
 - basic per-connection TCP rate limits
 - first miner-submitted composite flow with `SUBMIT_COMPOSITE`
 - first miner-submitted Pratt prime flow with `SUBMIT_PRIME`
+- first frontier miner loop using `SUBMIT_COMPOSITE` and `SUBMIT_PRIME`
 
 Next milestones:
 
-1. Add a miner tool mode that submits composites/primes one integer at a time instead of using `ADVANCE_TO`.
+1. Add proof-index bootstrap so miners can resume from an existing node store.
 2. Add sync rejection tests for corrupt prime proofs.
 3. Add stricter propagation timing tests for active writers.
 4. Add commit-reveal and contributor authentication.
