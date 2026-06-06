@@ -421,18 +421,18 @@ alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
 ./build/primechain-sync-query 127.0.0.1 18889 ADVANCE_TO 20 $miner pcdev1_composite_miner 4
 ```
 
-Terminal 3, node B starts and automatically syncs from node A:
+Terminal 3, node B starts and automatically syncs from node A. With `--sync-interval 5`, it keeps checking node A every five seconds:
 
 ```bash
 cd ~/primechain
-./build/primechain-sync-server 18890 ./data/node-b.dat --peer 127.0.0.1 18889
+./build/primechain-sync-server 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5
 ```
 
 Terminal 4, node C starts and automatically syncs from node A:
 
 ```bash
 cd ~/primechain
-./build/primechain-sync-server 18891 ./data/node-c.dat --peer 127.0.0.1 18889
+./build/primechain-sync-server 18891 ./data/node-c.dat --peer 127.0.0.1 18889 --sync-interval 5
 ```
 
 Query all three nodes:
@@ -450,7 +450,7 @@ Each node should report:
 HOLDING 3 250000
 ```
 
-This proves three separate node stores converge when follower nodes bootstrap from a peer at startup. This is startup peer sync, not continuous peer gossip yet.
+This proves three separate node stores converge when follower nodes sync from a peer. Continuous sync is polling-based: followers periodically ask peers for status and download missing records. It is not full peer gossip yet.
 
 Resume download in batches:
 

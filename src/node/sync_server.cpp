@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <iostream>
@@ -30,6 +31,11 @@ volatile std::sig_atomic_t g_running = 1;
 void handleSignal(int) {
     g_running = 0;
 }
+
+struct PeerEndpoint {
+    std::string host;
+    int port{0};
+};
 
 class Socket {
 public:
@@ -557,6 +563,24 @@ public:
         return true;
     }
 
+    bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) const {
+        bool synced_any = false;
+        for (const auto& peer : peers) {
+            error.clear();
+            if (syncFromPeer(peer.host, peer.port, error)) {
+                synced_any = true;
+                continue;
+            }
+            std::cerr << "peer sync warning from " << peer.host << ":" << peer.port
+                      << ": " << error << "\n";
+        }
+        if (synced_any || peers.empty()) {
+            error.clear();
+            return true;
+        }
+        return false;
+    }
+
 private:
     void sendStatus(int fd) const {
         std::string error;
@@ -911,9 +935,8 @@ private:
 struct Options {
     int port{kDefaultPort};
     std::string store_path{kDefaultStorePath};
-    bool has_peer{false};
-    std::string peer_host;
-    int peer_port{0};
+    std::vector<PeerEndpoint> peers;
+    int sync_interval_seconds{0};
 };
 
 std::optional<Options> parseOptions(int argc, char** argv) {
@@ -927,21 +950,38 @@ std::optional<Options> parseOptions(int argc, char** argv) {
     }
     while (index < argc) {
         const std::string flag = argv[index++];
-        if (flag != "--peer" || index + 1 >= argc) {
+        if (flag == "--peer") {
+            if (index + 1 >= argc) {
+                return std::nullopt;
+            }
+            PeerEndpoint peer;
+            peer.host = argv[index++];
+            peer.port = std::stoi(argv[index++]);
+            options.peers.push_back(peer);
+            continue;
+        }
+        if (flag == "--sync-interval") {
+            if (index >= argc) {
+                return std::nullopt;
+            }
+            options.sync_interval_seconds = std::stoi(argv[index++]);
+            if (options.sync_interval_seconds < 0) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        {
             return std::nullopt;
         }
-        options.has_peer = true;
-        options.peer_host = argv[index++];
-        options.peer_port = std::stoi(argv[index++]);
     }
     return options;
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--peer host port]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--peer host port] [--sync-interval seconds]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
-              << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889\n";
+              << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n";
 }
 
 } // namespace
@@ -968,17 +1008,35 @@ int main(int argc, char** argv) {
     }
 
     SyncServer sync_server(options.store_path);
-    if (options.has_peer) {
+    if (!options.peers.empty()) {
         std::string error;
-        if (!sync_server.syncFromPeer(options.peer_host, options.peer_port, error)) {
+        if (!sync_server.syncFromPeers(options.peers, error)) {
             std::cerr << "peer sync failed: " << error << "\n";
             return 1;
         }
-        std::cout << "peer sync complete from " << options.peer_host << ":" << options.peer_port << "\n";
+        std::cout << "peer sync complete from " << options.peers.size() << " configured peer(s)\n";
     }
 
     std::cout << "Primechain sync server listening on 127.0.0.1:" << options.port << "\n";
     std::cout << "record store: " << options.store_path << "\n";
+    if (options.sync_interval_seconds > 0 && !options.peers.empty()) {
+        std::cout << "continuous peer sync interval: " << options.sync_interval_seconds << "s\n";
+    }
+
+    auto next_sync = std::chrono::steady_clock::now()
+        + std::chrono::seconds(options.sync_interval_seconds > 0 ? options.sync_interval_seconds : 1);
+    auto runPeriodicSync = [&]() {
+        if (options.sync_interval_seconds <= 0 || options.peers.empty()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_sync) {
+            return;
+        }
+        std::string error;
+        sync_server.syncFromPeers(options.peers, error);
+        next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
+    };
 
     while (g_running) {
         fd_set read_fds;
@@ -998,6 +1056,7 @@ int main(int argc, char** argv) {
             break;
         }
         if (ready == 0) {
+            runPeriodicSync();
             continue;
         }
 
@@ -1014,6 +1073,7 @@ int main(int argc, char** argv) {
 
         Socket client(client_fd);
         sync_server.handleClient(client.fd());
+        runPeriodicSync();
     }
 
     std::cout << "sync server stopped\n";
