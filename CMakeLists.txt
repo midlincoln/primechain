@@ -241,6 +241,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18989 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18989 GET_STATUS | grep -q 'STATUS 499 95 404 1 498 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid)"
 )
 add_test(
+    NAME sync_server_bind_any
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/bind-any.dat ${CMAKE_CURRENT_BINARY_DIR}/bind-any.log ${CMAKE_CURRENT_BINARY_DIR}/bind-any-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/bind-any.log ${CMAKE_CURRENT_BINARY_DIR}/bind-any.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18992 ${CMAKE_CURRENT_BINARY_DIR}/bind-any.dat --bind 0.0.0.0 > ${CMAKE_CURRENT_BINARY_DIR}/bind-any-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/bind-any-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18992 GET_STATUS | grep -q 'STATUS 19 8 11 1 18 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/bind-any-server.pid)"
+)
+add_test(
     NAME sync_download_500
     COMMAND
         /bin/sh -c

@@ -72,7 +72,7 @@ private:
     int fd_{-1};
 };
 
-std::optional<Socket> listenOnPort(int port) {
+std::optional<Socket> listenOnPort(const std::string& bind_address, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         std::cerr << "socket failed: " << std::strerror(errno) << "\n";
@@ -84,7 +84,11 @@ std::optional<Socket> listenOnPort(int port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (inet_pton(AF_INET, bind_address.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "invalid bind IPv4 address: " << bind_address << "\n";
+        close(fd);
+        return std::nullopt;
+    }
     addr.sin_port = htons(static_cast<std::uint16_t>(port));
 
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -1243,6 +1247,7 @@ private:
 
 struct Options {
     int port{kDefaultPort};
+    std::string bind_address{"127.0.0.1"};
     std::string store_path{kDefaultStorePath};
     std::vector<PeerEndpoint> peers;
     int sync_interval_seconds{0};
@@ -1259,6 +1264,13 @@ std::optional<Options> parseOptions(int argc, char** argv) {
     }
     while (index < argc) {
         const std::string flag = argv[index++];
+        if (flag == "--bind") {
+            if (index >= argc) {
+                return std::nullopt;
+            }
+            options.bind_address = argv[index++];
+            continue;
+        }
         if (flag == "--peer") {
             if (index + 1 >= argc) {
                 return std::nullopt;
@@ -1287,10 +1299,11 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--peer host port] [--sync-interval seconds]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
-              << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n";
+              << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
+              << "  " << argv0 << " 18889 ./data/public-node.dat --bind 0.0.0.0\n";
 }
 
 } // namespace
@@ -1311,7 +1324,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
-    auto server = listenOnPort(options.port);
+    auto server = listenOnPort(options.bind_address, options.port);
     if (!server.has_value()) {
         return 1;
     }
@@ -1326,7 +1339,7 @@ int main(int argc, char** argv) {
         std::cout << "peer sync complete from " << options.peers.size() << " configured peer(s)\n";
     }
 
-    std::cout << "Primechain sync server listening on 127.0.0.1:" << options.port << "\n";
+    std::cout << "Primechain sync server listening on " << options.bind_address << ":" << options.port << "\n";
     std::cout << "record store: " << options.store_path << "\n";
     if (options.sync_interval_seconds > 0 && !options.peers.empty()) {
         std::cout << "continuous peer sync interval: " << options.sync_interval_seconds << "s\n";

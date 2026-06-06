@@ -362,12 +362,24 @@ integer height kind hash16 payload_bytes
 
 ## Run Sync Server
 
-The sync server exposes the binary record store over localhost TCP.
+The sync server exposes the binary record store over TCP. By default it binds to `127.0.0.1`, which is safe for local tests.
 
 Terminal 1:
 
 ```bash
 ./build/primechain-sync-server 18889 ./data/sequential-500.dat
+```
+
+For a public-server test, bind to all IPv4 interfaces and ensure the server firewall/security group allows the port:
+
+```bash
+./build/primechain-sync-server 18889 ./data/public-node.dat --bind 0.0.0.0
+```
+
+Peers should connect using the machine's public IP or DNS name:
+
+```bash
+./build/primechain-sync-server 18890 ./data/node-b.dat --peer PUBLIC_IP_OR_DNS 18889 --sync-interval 5
 ```
 
 Terminal 2:
@@ -569,15 +581,15 @@ Completed prototype milestones:
 - same-tip record conflict classification
 - safe same-tip replacement for lower-hash records
 - two active writers converge on the lower same-tip record in local TCP tests
+- bind-address option for public-server tests
 
 Next milestones:
 
-1. Add bind-address support for public-server tests.
-2. Add peer discovery and gossip beyond manually configured peers.
-3. Add stricter propagation timing tests for active writers.
-4. Add strict message, connection, proof-window, and pool-size limits.
-5. Add commit-reveal and contributor authentication.
-6. Later add production hashing, real signatures, and post-quantum signatures.
+1. Add peer discovery and gossip beyond manually configured peers.
+2. Add stricter propagation timing tests for active writers.
+3. Add strict message, connection, proof-window, and pool-size limits.
+4. Add commit-reveal and contributor authentication.
+5. Later add production hashing, real signatures, and post-quantum signatures.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 
