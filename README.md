@@ -262,6 +262,8 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
+When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored; conflicting historical records are rejected. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
+
 Inspect the TCP mempool:
 
 ```bash
@@ -552,12 +554,13 @@ Completed prototype milestones:
 - TCP transaction submission and mempool inspection
 - startup and continuous peer sync
 - development mempool propagation to configured peers
+- development record propagation to configured peers
 
 Next milestones:
 
-1. Add proof/record propagation between configured peers.
-2. Add deterministic conflict handling for competing records at the same integer.
-3. Add multiple active writers in local tests.
+1. Add deterministic conflict handling for competing records at the same integer.
+2. Add multiple active writers in local tests.
+3. Add bind-address support for public-server tests.
 4. Add strict message, connection, proof-window, and pool-size limits.
 5. Add commit-reveal and contributor authentication.
 6. Later add production hashing, real signatures, and post-quantum signatures.

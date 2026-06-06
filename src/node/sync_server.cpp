@@ -273,6 +273,56 @@ std::string recordLine(const primechain::storage::StoredRecord& record) {
     return out.str();
 }
 
+std::string submitRecordLine(const primechain::storage::StoredRecord& record) {
+    std::ostringstream out;
+    out << "SUBMIT_RECORD " << record.integer << " "
+        << record.height << " "
+        << kindName(record.kind) << " "
+        << primechain::crypto::toHex(record.record_hash) << " "
+        << record.payload.size() << " "
+        << bytesToHex(record.payload)
+        << "\n";
+    return out.str();
+}
+
+std::optional<primechain::storage::StoredRecord> parseSubmitRecordLine(const std::string& line) {
+    if (line.rfind("SUBMIT_RECORD ", 0) != 0) {
+        return std::nullopt;
+    }
+    return parseRecordLine("RECORD " + line.substr(std::string("SUBMIT_RECORD ").size()));
+}
+
+bool appendStoredRecord(
+    primechain::node::SequentialNode& node,
+    const primechain::storage::StoredRecord& stored,
+    std::string& error) {
+    if (!node.status().has_genesis) {
+        const auto expected_genesis =
+            primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0());
+        if (stored.height == expected_genesis.height &&
+            stored.integer == expected_genesis.integer &&
+            stored.kind == expected_genesis.kind &&
+            stored.record_hash == expected_genesis.record_hash &&
+            stored.payload == expected_genesis.payload) {
+            return node.initializeGenesis(error);
+        }
+    }
+
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) {
+            return false;
+        }
+        return node.appendComposite(*decoded, error);
+    }
+
+    const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!decoded.has_value()) {
+        return false;
+    }
+    return node.appendPrime(*decoded, error);
+}
+
 class MapProofIndex final : public primechain::math::CompositeProofIndex {
 public:
     void add(const primechain::CompositeProof& proof) {
@@ -510,6 +560,34 @@ bool submitTransactionToPeer(
     return false;
 }
 
+bool submitRecordToPeer(
+    const PeerEndpoint& peer,
+    const primechain::storage::StoredRecord& record,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    if (!writeAll(socket->fd(), submitRecordLine(record))) {
+        error = "could not submit record to peer";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "peer did not return record response";
+        return false;
+    }
+    if (response->rfind("RECORD_ACCEPTED ", 0) == 0 || response->rfind("RECORD_DUPLICATE ", 0) == 0) {
+        return true;
+    }
+    error = "peer rejected record: " + *response;
+    return false;
+}
+
 class SyncServer {
 public:
     SyncServer(std::string store_path, std::vector<PeerEndpoint> peers)
@@ -533,6 +611,10 @@ public:
             }
             if (line->rfind("SUBMIT_TX ", 0) == 0) {
                 submitTx(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_RECORD ", 0) == 0) {
+                submitRecord(fd, *line);
                 continue;
             }
             if (*line == "GET_MEMPOOL") {
@@ -749,6 +831,54 @@ private:
         }
     }
 
+    void submitRecord(int fd, const std::string& line) {
+        const auto submitted = parseSubmitRecordLine(line);
+        if (!submitted.has_value()) {
+            writeAll(fd, "ERROR invalid SUBMIT_RECORD\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+
+        if (submitted->integer <= node.status().frontier_integer) {
+            const auto existing = store_.findByInteger(submitted->integer, error);
+            if (!error.empty()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            if (existing.has_value() && existing->record_hash == submitted->record_hash) {
+                writeAll(fd, "RECORD_DUPLICATE " + primechain::crypto::toHex(submitted->record_hash) + "\n");
+                return;
+            }
+            writeAll(fd, "ERROR conflicting historical record\n");
+            return;
+        }
+
+        error.clear();
+        if (!appendStoredRecord(node, *submitted, error)) {
+            writeAll(fd, "ERROR could not append submitted record: " + error + "\n");
+            return;
+        }
+
+        propagateRecord(*submitted);
+        writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
+    }
+
+    void propagateRecord(const primechain::storage::StoredRecord& record) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitRecordToPeer(peer, record, error)) {
+                std::cerr << "record propagation warning to " << peer.host << ":" << peer.port
+                          << ": " << error << "\n";
+            }
+        }
+    }
+
     void sendMempool(int fd) const {
         std::ostringstream header;
         header << "MEMPOOL " << mempool_.size() << "\n";
@@ -853,12 +983,15 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
+        std::vector<primechain::storage::StoredRecord> appended_records;
         if (!node.status().has_genesis) {
             error.clear();
             if (!node.initializeGenesis(error)) {
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
+            appended_records.push_back(
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
         }
 
         MapProofIndex proofs;
@@ -896,6 +1029,7 @@ private:
                     writeAll(fd, "ERROR could not append prime record for " + std::to_string(n) + ": " + error + "\n");
                     return;
                 }
+                appended_records.push_back(primechain::storage::makeStoredRecord(record));
                 ++appended;
                 continue;
             }
@@ -916,6 +1050,7 @@ private:
                 writeAll(fd, "ERROR could not append composite record for " + std::to_string(n) + ": " + error + "\n");
                 return;
             }
+            appended_records.push_back(primechain::storage::makeStoredRecord(record));
             proofs.add(*proof);
             ++appended;
         }
@@ -932,6 +1067,9 @@ private:
         }
 
         removeMempoolTransactions(included_transactions);
+        for (const auto& record : appended_records) {
+            propagateRecord(record);
+        }
 
         std::ostringstream out;
         out << "ADVANCED " << appended
