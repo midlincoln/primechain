@@ -438,9 +438,12 @@ Validation rules:
 - only the selected provider may finalize the composite record.
 
 This candidate rule is independent of local arrival order, but it is provisional.
-It permits nonce grinding and cannot ensure that all nodes have the same
-candidate set before finalization. Production ordering and reward attribution
-require persistent signed commitments plus a quorum-defined commit boundary.
+Nodes persist unresolved frontier commitments in a separate canonical binary
+snapshot, exchange them with `GET_COMMITMENTS`, and remove them after the
+integer is finalized. Persistence does not itself create consensus ordering.
+The rule still permits nonce grinding and cannot ensure that all nodes have the
+same candidate set before finalization. Production ordering and reward
+attribution require signed commitments plus a quorum-defined commit boundary.
 
 ## 11. Bitcoin Mirror Payload
 

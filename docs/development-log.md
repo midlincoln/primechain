@@ -287,3 +287,16 @@ the same commitments in opposite orders and verifies identical selection.
 This closes arrival-order nondeterminism for an identical candidate set. It is
 not yet a fairness proof: nonce grinding is possible, commitments are not
 persistent, and finalization has no quorum-defined commit-phase boundary.
+
+## 2026-06-07: Persistent Frontier Commitments
+
+Unresolved commitments are now stored in a separate canonical binary sidecar
+`<record-store>.commitments`. The file is atomically replaced, loaded on node
+startup, synchronized from peers with `GET_COMMITMENTS g`, and pruned when the
+corresponding integer is finalized or the frontier advances. Tests cover
+restart recovery, peer import, reveal after recovery, and post-finalization
+cleanup.
+
+These records remain candidate state rather than finalized blockchain history.
+Signatures and a quorum-defined commit/reveal phase are still required for a
+production fairness claim.

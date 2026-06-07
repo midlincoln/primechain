@@ -23,6 +23,7 @@
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
+#include "primechain/storage/commitment_store.hpp"
 #include "primechain/storage/record_store.hpp"
 
 namespace {
@@ -704,6 +705,70 @@ std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port, std
     return peers;
 }
 
+
+std::vector<primechain::storage::StoredCommitment> requestCommitments(
+    const std::string& host,
+    int port,
+    primechain::PrimeValue integer,
+    std::string& error) {
+    std::vector<primechain::storage::StoredCommitment> commitments;
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return {};
+    }
+    if (!writeAll(socket->fd(), "GET_COMMITMENTS " + std::to_string(integer) + "\n")) {
+        error = "could not request peer commitments";
+        return {};
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        error = "peer did not return commitment header";
+        return {};
+    }
+    std::istringstream header_in(*header);
+    std::string tag;
+    primechain::PrimeValue response_integer = 0;
+    std::uint64_t expected_count = 0;
+    header_in >> tag >> response_integer >> expected_count;
+    if (!header_in || tag != "COMMITMENTS" || response_integer != integer ||
+        expected_count > kMaxCompositeCommitments) {
+        error = "invalid peer commitment header";
+        return {};
+    }
+
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_COMMITMENTS") {
+            break;
+        }
+        std::istringstream in(*line);
+        std::string entry_tag;
+        std::string hash_hex;
+        primechain::storage::StoredCommitment commitment;
+        in >> entry_tag >> commitment.integer >> hash_hex >> commitment.provider_address;
+        const auto hash = parseHash(hash_hex);
+        if (!in || entry_tag != "COMMITMENT" || commitment.integer != integer ||
+            !hash.has_value() ||
+            !primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+            error = "invalid peer commitment entry";
+            return {};
+        }
+        commitment.commitment_hash = *hash;
+        commitments.push_back(std::move(commitment));
+        if (commitments.size() > expected_count) {
+            error = "peer commitment count mismatch";
+            return {};
+        }
+    }
+    if (commitments.size() != expected_count) {
+        error = "peer commitment count mismatch";
+        return {};
+    }
+    return commitments;
+}
+
 bool downloadRecordRange(
     const std::string& host,
     int port,
@@ -874,7 +939,8 @@ public:
           advance_enabled_(advance_enabled),
           ack_mempool_enabled_(ack_mempool_enabled),
           factorization_helper_enabled_(factorization_helper_enabled),
-          store_(store_path_) {
+          store_(store_path_),
+          commitment_store_(store_path_ + ".commitments") {
         for (const auto& peer : peers) {
             addPeer(peer);
         }
@@ -930,6 +996,10 @@ public:
             }
             if (line->rfind("SUBMIT_COMMIT ", 0) == 0) {
                 submitCommit(fd, *line);
+                continue;
+            }
+            if (line->rfind("GET_COMMITMENTS ", 0) == 0) {
+                sendCommitments(fd, *line);
                 continue;
             }
             if (line->rfind("GET_COMMIT_WINNER ", 0) == 0) {
@@ -1034,7 +1104,48 @@ public:
         return true;
     }
 
-    bool syncFromKnownPeers(std::string& error) const {
+    bool loadCommitments(std::string& error) {
+        const auto stored = commitment_store_.loadAll(error);
+        if (!error.empty()) {
+            return false;
+        }
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            return false;
+        }
+        const primechain::PrimeValue frontier =
+            node.status().has_genesis ? node.status().frontier_integer : 2;
+        const primechain::PrimeValue target = frontier + 1;
+        commitments_.clear();
+        bool pruned = false;
+        for (const auto& commitment : stored) {
+            if (commitment.integer != target) {
+                pruned = true;
+                continue;
+            }
+            if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+                error = "invalid provider address in commitment store";
+                return false;
+            }
+            const auto key = std::make_pair(commitment.integer, commitment.provider_address);
+            const auto inserted = commitments_.emplace(key, commitment.commitment_hash);
+            if (!inserted.second && inserted.first->second != commitment.commitment_hash) {
+                error = "conflicting provider commitments in commitment store";
+                return false;
+            }
+            if (commitments_.size() > kMaxCompositeCommitments) {
+                error = "commitment store exceeds configured limit";
+                return false;
+            }
+        }
+        if (pruned) {
+            return persistCommitments(error);
+        }
+        return true;
+    }
+
+    bool syncFromKnownPeers(std::string& error) {
         return syncFromPeers(peers_, error);
     }
 
@@ -1042,12 +1153,17 @@ public:
         return !peers_.empty();
     }
 
-    bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) const {
+    bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) {
         bool synced_any = false;
         for (const auto& peer : peers) {
             error.clear();
             if (syncFromPeer(peer.host, peer.port, error)) {
                 synced_any = true;
+                std::string commitment_error;
+                if (!syncCommitmentsFromPeer(peer.host, peer.port, commitment_error)) {
+                    std::cerr << "commitment sync warning from " << peer.host << ":" << peer.port
+                              << ": " << commitment_error << "\n";
+                }
                 continue;
             }
             std::cerr << "peer sync warning from " << peer.host << ":" << peer.port
@@ -1077,6 +1193,87 @@ public:
     }
 
 private:
+    std::vector<primechain::storage::StoredCommitment> commitmentSnapshot() const {
+        std::vector<primechain::storage::StoredCommitment> out;
+        out.reserve(commitments_.size());
+        for (const auto& entry : commitments_) {
+            primechain::storage::StoredCommitment commitment;
+            commitment.integer = entry.first.first;
+            commitment.provider_address = entry.first.second;
+            commitment.commitment_hash = entry.second;
+            out.push_back(std::move(commitment));
+        }
+        return out;
+    }
+
+    bool persistCommitments(std::string& error) const {
+        return commitment_store_.replaceAll(commitmentSnapshot(), error);
+    }
+
+    bool syncCommitmentsFromPeer(const std::string& host, int port, std::string& error) {
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            return false;
+        }
+        const primechain::PrimeValue frontier =
+            node.status().has_genesis ? node.status().frontier_integer : 2;
+        const primechain::PrimeValue target = frontier + 1;
+        bool changed = false;
+        for (auto it = commitments_.begin(); it != commitments_.end();) {
+            if (it->first.first != target) {
+                it = commitments_.erase(it);
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+        if (changed && !persistCommitments(error)) {
+            return false;
+        }
+        changed = false;
+        const auto remote = requestCommitments(host, port, target, error);
+        if (!error.empty()) {
+            return false;
+        }
+
+        for (const auto& commitment : remote) {
+            const auto key = std::make_pair(commitment.integer, commitment.provider_address);
+            const auto existing = commitments_.find(key);
+            if (existing != commitments_.end()) {
+                if (existing->second != commitment.commitment_hash) {
+                    error = "peer supplied conflicting commitment for provider";
+                    return false;
+                }
+                continue;
+            }
+            if (commitments_.size() >= kMaxCompositeCommitments) {
+                error = "commitment pool full during peer sync";
+                return false;
+            }
+            commitments_[key] = commitment.commitment_hash;
+            changed = true;
+        }
+        return !changed || persistCommitments(error);
+    }
+
+    void pruneFinalizedCommitments(primechain::PrimeValue finalized_integer) {
+        bool changed = false;
+        for (auto it = commitments_.begin(); it != commitments_.end();) {
+            if (it->first.first <= finalized_integer) {
+                it = commitments_.erase(it);
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+        if (changed) {
+            std::string error;
+            if (!persistCommitments(error)) {
+                std::cerr << "commitment persistence warning: " << error << "\n";
+            }
+        }
+    }
+
     bool addPeer(const PeerEndpoint& peer) {
         if (!validPeerEndpoint(peer)) {
             return false;
@@ -1491,8 +1688,42 @@ private:
         }
 
         commitments_[key] = *commitment;
+        error.clear();
+        if (!persistCommitments(error)) {
+            commitments_.erase(key);
+            writeAll(fd, "ERROR could not persist commitment: " + error + "\n");
+            return;
+        }
         propagateCommit(g, *commitment, provider_address);
         writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
+    }
+
+    void sendCommitments(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue integer = 0;
+        std::string extra;
+        in >> command >> integer;
+        if (!in || command != "GET_COMMITMENTS" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_COMMITMENTS; expected GET_COMMITMENTS g\n");
+            return;
+        }
+
+        std::size_t count = 0;
+        for (const auto& entry : commitments_) {
+            if (entry.first.first == integer) {
+                ++count;
+            }
+        }
+        writeAll(fd, "COMMITMENTS " + std::to_string(integer) + " " + std::to_string(count) + "\n");
+        for (const auto& entry : commitments_) {
+            if (entry.first.first != integer) {
+                continue;
+            }
+            writeAll(fd, "COMMITMENT " + std::to_string(integer) + " "
+                + primechain::crypto::toHex(entry.second) + " " + entry.first.second + "\n");
+        }
+        writeAll(fd, "END_COMMITMENTS\n");
     }
 
     std::optional<std::pair<std::string, primechain::Hash256>> selectedCommitment(
@@ -1790,7 +2021,8 @@ private:
             + "\n");
     }
 
-    void propagateRecord(const primechain::storage::StoredRecord& record) const {
+    void propagateRecord(const primechain::storage::StoredRecord& record) {
+        pruneFinalizedCommitments(record.integer);
         for (const auto& peer : peers_) {
             std::string error;
             if (!submitRecordToPeer(peer, record, error)) {
@@ -2033,6 +2265,7 @@ private:
     bool ack_mempool_enabled_{false};
     bool factorization_helper_enabled_{false};
     primechain::storage::RecordStore store_;
+    primechain::storage::CommitmentStore commitment_store_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<std::pair<primechain::PrimeValue, std::string>, primechain::Hash256> commitments_;
 };
@@ -2143,6 +2376,13 @@ int main(int argc, char** argv) {
         options.enable_advance,
         options.enable_ack_mempool,
         options.enable_factorization_helper);
+    {
+        std::string error;
+        if (!sync_server.loadCommitments(error)) {
+            std::cerr << "commitment store load failed: " << error << "\n";
+            return 1;
+        }
+    }
     if (!options.peers.empty()) {
         std::string error;
         sync_server.discoverPeersFromKnown();
