@@ -3,6 +3,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <set>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -25,7 +26,9 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/commitment_store.hpp"
+#include "primechain/storage/phase_store.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 
 namespace {
 
@@ -243,6 +246,8 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_TX ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0 ||
            line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
+           line.rfind("CLOSE_COMMIT_PHASE ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
@@ -796,6 +801,66 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
     return commitments;
 }
 
+std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
+    const std::string& host,
+    int port,
+    primechain::PrimeValue integer,
+    std::string& error) {
+    std::vector<primechain::storage::CommitPhaseVote> votes;
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return {};
+    }
+    if (!writeAll(socket->fd(), "GET_PHASE_VOTES " + std::to_string(integer) + "\n")) {
+        error = "could not request peer phase votes";
+        return {};
+    }
+    shutdown(socket->fd(), SHUT_WR);
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        error = "peer did not return phase vote header";
+        return {};
+    }
+    std::istringstream header_in(*header);
+    std::string tag;
+    primechain::PrimeValue response_integer = 0;
+    std::uint64_t expected_count = 0;
+    header_in >> tag >> response_integer >> expected_count;
+    if (!header_in || tag != "PHASE_VOTES" || response_integer != integer ||
+        expected_count > 3) {
+        error = "invalid peer phase vote header";
+        return {};
+    }
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_PHASE_VOTES") break;
+        std::istringstream in(*line);
+        std::string entry_tag, snapshot_hex, public_key_hex, signature_hex, extra;
+        primechain::storage::CommitPhaseVote vote;
+        in >> entry_tag >> vote.integer >> snapshot_hex >> vote.validator_address
+           >> public_key_hex >> signature_hex;
+        const auto snapshot = parseHash(snapshot_hex);
+        if (!in || entry_tag != "PHASE_VOTE" || vote.integer != integer ||
+            !snapshot.has_value() || (in >> extra)) {
+            error = "invalid peer phase vote entry";
+            return {};
+        }
+        vote.snapshot_hash = *snapshot;
+        vote.public_key = hexToBytes(public_key_hex);
+        vote.signature = hexToBytes(signature_hex);
+        votes.push_back(std::move(vote));
+        if (votes.size() > expected_count) {
+            error = "peer phase vote count mismatch";
+            return {};
+        }
+    }
+    if (votes.size() != expected_count) {
+        error = "peer phase vote count mismatch";
+        return {};
+    }
+    return votes;
+}
+
 bool downloadRecordRange(
     const std::string& host,
     int port,
@@ -967,13 +1032,18 @@ public:
         std::vector<PeerEndpoint> peers,
         bool advance_enabled,
         bool ack_mempool_enabled,
-        bool factorization_helper_enabled)
+        bool factorization_helper_enabled,
+        std::vector<primechain::Address> validator_set,
+        std::optional<primechain::wallet::MinerIdentity> validator_identity)
         : store_path_(std::move(store_path)),
           advance_enabled_(advance_enabled),
           ack_mempool_enabled_(ack_mempool_enabled),
           factorization_helper_enabled_(factorization_helper_enabled),
           store_(store_path_),
-          commitment_store_(store_path_ + ".commitments") {
+          commitment_store_(store_path_ + ".commitments"),
+          phase_store_(store_path_ + ".phases"),
+          validator_set_(std::move(validator_set)),
+          validator_identity_(std::move(validator_identity)) {
         for (const auto& peer : peers) {
             addPeer(peer);
         }
@@ -1041,6 +1111,22 @@ public:
             }
             if (line->rfind("GET_COMMIT_WINNER ", 0) == 0) {
                 sendCommitWinner(fd, *line);
+                continue;
+            }
+            if (line->rfind("GET_COMMIT_PHASE ", 0) == 0) {
+                sendCommitPhase(fd, *line);
+                continue;
+            }
+            if (line->rfind("GET_PHASE_VOTES ", 0) == 0) {
+                sendPhaseVotes(fd, *line);
+                continue;
+            }
+            if (line->rfind("CLOSE_COMMIT_PHASE ", 0) == 0) {
+                closeCommitPhase(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_PHASE_VOTE ", 0) == 0) {
+                submitPhaseVote(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
@@ -1222,6 +1308,13 @@ public:
                     std::cerr << "commitment sync warning from " << peer.host << ":" << peer.port
                               << ": " << commitment_error << "\n";
                 }
+                if (quorumEnabled()) {
+                    std::string phase_error;
+                    if (!syncPhaseVotesFromPeer(peer.host, peer.port, phase_error)) {
+                        std::cerr << "phase vote sync warning from " << peer.host << ":" << peer.port
+                                  << ": " << phase_error << "\n";
+                    }
+                }
                 continue;
             }
             std::cerr << "peer sync warning from " << peer.host << ":" << peer.port
@@ -1248,6 +1341,10 @@ public:
                 addPeer(discovered_peer);
             }
         }
+    }
+
+    bool loadPhaseVotes(std::string& error) {
+        return loadPhaseVotesInternal(error);
     }
 
 private:
@@ -1312,6 +1409,19 @@ private:
         return !changed || persistCommitments(error);
     }
 
+    bool syncPhaseVotesFromPeer(const std::string& host, int port, std::string& error) {
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        const primechain::PrimeValue target =
+            (node.status().has_genesis ? node.status().frontier_integer : 2) + 1;
+        const auto remote = requestPhaseVotes(host, port, target, error);
+        if (!error.empty()) return false;
+        for (const auto& vote : remote) {
+            if (!acceptPhaseVote(vote, error, false)) return false;
+        }
+        return true;
+    }
+
     void pruneFinalizedCommitments(primechain::PrimeValue finalized_integer) {
         bool changed = false;
         for (auto it = commitments_.begin(); it != commitments_.end();) {
@@ -1326,6 +1436,21 @@ private:
             std::string error;
             if (!persistCommitments(error)) {
                 std::cerr << "commitment persistence warning: " << error << "\n";
+            }
+        }
+        bool phase_changed = false;
+        for (auto it = phase_votes_.begin(); it != phase_votes_.end();) {
+            if (it->first.first <= finalized_integer) {
+                it = phase_votes_.erase(it);
+                phase_changed = true;
+            } else {
+                ++it;
+            }
+        }
+        if (phase_changed) {
+            std::string error;
+            if (!persistPhaseVotes(error)) {
+                std::cerr << "phase vote persistence warning: " << error << "\n";
             }
         }
     }
@@ -1575,6 +1700,39 @@ private:
         }
     }
 
+    bool validateQuorumCompositeRecord(
+        const primechain::storage::StoredRecord& submitted,
+        std::string& error) const {
+        if (!quorumEnabled() ||
+            submitted.kind != primechain::storage::StoredRecordKind::Composite) {
+            return true;
+        }
+        if (!phaseClosed(submitted.integer)) {
+            error = "composite record commit phase is not closed by validator quorum";
+            return false;
+        }
+        const auto selected = selectedCommitment(submitted.integer);
+        if (!selected.has_value()) {
+            error = "composite record has no selected commitment";
+            return false;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(
+            submitted.payload, error);
+        if (!record.has_value()) return false;
+        if (record->proof.provider_address != selected->provider_address) {
+            error = "composite record provider is not the selected commitment winner";
+            return false;
+        }
+        return primechain::crypto::packedCompositeRevealMatchesCommitment(
+            record->integer,
+            record->proof.d,
+            record->proof.e,
+            record->proof.provider_address,
+            record->proof.signature,
+            selected->commitment_hash,
+            error);
+    }
+
     void submitRecord(int fd, const std::string& line) {
         const auto submitted = parseSubmitRecordLine(line);
         if (!submitted.has_value()) {
@@ -1590,7 +1748,24 @@ private:
         }
 
         if (submitted->integer <= node.status().frontier_integer) {
+            if (quorumEnabled()) {
+                const auto existing = store_.findByInteger(submitted->integer, error);
+                if (!error.empty()) {
+                    writeAll(fd, "ERROR " + error + "\n");
+                    return;
+                }
+                if (!existing.has_value() || existing->record_hash != submitted->record_hash) {
+                    writeAll(fd, "ERROR finalized quorum record is immutable\n");
+                    return;
+                }
+            }
             handleExistingOrConflictingRecord(fd, *submitted, node.status().frontier_integer);
+            return;
+        }
+
+        error.clear();
+        if (!validateQuorumCompositeRecord(*submitted, error)) {
+            writeAll(fd, "ERROR invalid quorum record: " + error + "\n");
             return;
         }
 
@@ -1673,6 +1848,313 @@ private:
         writeAll(fd, "ERROR conflicting historical record\n");
     }
 
+    bool quorumEnabled() const {
+        return validator_set_.size() == 3;
+    }
+
+    std::vector<primechain::storage::CommitPhaseVote> phaseVoteSnapshot() const {
+        std::vector<primechain::storage::CommitPhaseVote> out;
+        out.reserve(phase_votes_.size());
+        for (const auto& entry : phase_votes_) out.push_back(entry.second);
+        return out;
+    }
+
+    bool persistPhaseVotes(std::string& error) const {
+        return phase_store_.replaceAll(phaseVoteSnapshot(), error);
+    }
+
+    primechain::Hash256 commitmentSnapshotHash(primechain::PrimeValue integer) const {
+        std::ostringstream canonical;
+        canonical << "primechain-commit-snapshot-v1\n" << integer << "\n";
+        for (const auto& entry : commitments_) {
+            if (entry.first.first != integer) continue;
+            const auto& commitment = entry.second;
+            canonical << primechain::crypto::toHex(commitment.commitment_hash) << " "
+                      << commitment.provider_address << " "
+                      << bytesToHex(commitment.public_key) << " "
+                      << bytesToHex(commitment.signature) << "\n";
+        }
+        const std::string text = canonical.str();
+        return primechain::crypto::devHash256(
+            std::vector<std::uint8_t>(text.begin(), text.end()));
+    }
+
+    std::size_t phaseVoteCount(primechain::PrimeValue integer) const {
+        std::size_t count = 0;
+        for (const auto& entry : phase_votes_) {
+            if (entry.first.first == integer) ++count;
+        }
+        return count;
+    }
+
+    bool phaseClosed(primechain::PrimeValue integer) const {
+        return phaseVoteCount(integer) >= 2;
+    }
+
+    bool phaseFrozen(primechain::PrimeValue integer) const {
+        return phaseVoteCount(integer) != 0;
+    }
+
+    bool loadPhaseVotesInternal(std::string& error) {
+        phase_votes_.clear();
+        const auto stored = phase_store_.loadAll(error);
+        if (!error.empty()) return false;
+        if (!quorumEnabled()) {
+            if (!stored.empty()) {
+                error = "phase vote store exists but validator quorum is not configured";
+                return false;
+            }
+            return true;
+        }
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        const primechain::PrimeValue target =
+            (node.status().has_genesis ? node.status().frontier_integer : 2) + 1;
+        const auto expected_snapshot = commitmentSnapshotHash(target);
+        for (const auto& vote : stored) {
+            if (vote.integer != target || vote.snapshot_hash != expected_snapshot ||
+                std::find(validator_set_.begin(), validator_set_.end(), vote.validator_address) ==
+                    validator_set_.end() ||
+                vote.validator_address !=
+                    primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+                error = "invalid persisted commit-phase vote";
+                return false;
+            }
+            std::string verify_error;
+            if (!primechain::crypto::ed25519Verify(
+                    vote.public_key,
+                    primechain::crypto::commitPhaseVoteSigningPayload(
+                        vote.integer, vote.snapshot_hash, vote.validator_address),
+                    vote.signature,
+                    verify_error)) {
+                error = "invalid persisted commit-phase vote signature";
+                return false;
+            }
+            const auto key = std::make_pair(vote.integer, vote.validator_address);
+            if (!phase_votes_.emplace(key, vote).second) {
+                error = "duplicate persisted validator vote";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool submitPhaseVoteToPeer(
+        const PeerEndpoint& peer,
+        const primechain::storage::CommitPhaseVote& vote,
+        std::string& error) const {
+        auto socket = connectToServer(peer.host, peer.port);
+        if (!socket.has_value()) {
+            error = "could not connect to peer";
+            return false;
+        }
+        std::ostringstream command;
+        command << "SUBMIT_PHASE_VOTE " << vote.integer << " "
+                << primechain::crypto::toHex(vote.snapshot_hash) << " "
+                << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
+                << bytesToHex(vote.signature) << "\n";
+        if (!writeAll(socket->fd(), command.str())) {
+            error = "could not submit phase vote";
+            return false;
+        }
+        shutdown(socket->fd(), SHUT_WR);
+        const auto response = readLine(socket->fd());
+        if (response.has_value() &&
+            (response->rfind("PHASE_VOTE_ACCEPTED ", 0) == 0 ||
+             response->rfind("PHASE_VOTE_DUPLICATE ", 0) == 0)) return true;
+        error = response.has_value() ? *response : "peer did not return phase vote response";
+        return false;
+    }
+
+    void propagatePhaseVote(const primechain::storage::CommitPhaseVote& vote) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitPhaseVoteToPeer(peer, vote, error)) {
+                std::cerr << "phase vote propagation warning to " << peer.host << ":"
+                          << peer.port << ": " << error << "\n";
+            }
+        }
+    }
+
+    bool acceptPhaseVote(
+        const primechain::storage::CommitPhaseVote& vote,
+        std::string& error,
+        bool propagate) {
+        if (!quorumEnabled()) {
+            error = "validator quorum is not configured";
+            return false;
+        }
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        const primechain::PrimeValue target =
+            (node.status().has_genesis ? node.status().frontier_integer : 2) + 1;
+        if (vote.integer != target) {
+            error = "phase vote must target next integer " + std::to_string(target);
+            return false;
+        }
+        if (commitments_.empty()) {
+            error = "cannot close an empty commit phase";
+            return false;
+        }
+        if (std::find(validator_set_.begin(), validator_set_.end(), vote.validator_address) ==
+            validator_set_.end()) {
+            error = "validator is not in configured set";
+            return false;
+        }
+        if (vote.validator_address !=
+            primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            error = "validator address does not match public key";
+            return false;
+        }
+        const auto snapshot = commitmentSnapshotHash(vote.integer);
+        if (vote.snapshot_hash != snapshot) {
+            error = "phase vote snapshot does not match local commitments";
+            return false;
+        }
+        for (const auto& existing : phase_votes_) {
+            if (existing.first.first == vote.integer &&
+                existing.second.snapshot_hash != vote.snapshot_hash) {
+                error = "commit phase already frozen on a different snapshot";
+                return false;
+            }
+        }
+        std::string verify_error;
+        if (!primechain::crypto::ed25519Verify(
+                vote.public_key,
+                primechain::crypto::commitPhaseVoteSigningPayload(
+                    vote.integer, vote.snapshot_hash, vote.validator_address),
+                vote.signature,
+                verify_error)) {
+            error = "invalid commit-phase validator signature";
+            return false;
+        }
+        const auto key = std::make_pair(vote.integer, vote.validator_address);
+        const auto existing = phase_votes_.find(key);
+        if (existing != phase_votes_.end()) {
+            if (existing->second.snapshot_hash == vote.snapshot_hash &&
+                existing->second.public_key == vote.public_key &&
+                existing->second.signature == vote.signature) return true;
+            error = "validator already voted differently";
+            return false;
+        }
+        phase_votes_[key] = vote;
+        if (!persistPhaseVotes(error)) {
+            phase_votes_.erase(key);
+            return false;
+        }
+        if (propagate) propagatePhaseVote(vote);
+        return true;
+    }
+
+    void closeCommitPhase(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, extra;
+        primechain::PrimeValue integer = 0;
+        in >> command >> integer;
+        if (!in || command != "CLOSE_COMMIT_PHASE" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid CLOSE_COMMIT_PHASE; expected CLOSE_COMMIT_PHASE g\n");
+            return;
+        }
+        if (!validator_identity_.has_value()) {
+            writeAll(fd, "ERROR this node has no validator identity\n");
+            return;
+        }
+        primechain::storage::CommitPhaseVote vote;
+        vote.integer = integer;
+        vote.snapshot_hash = commitmentSnapshotHash(integer);
+        vote.validator_address = validator_identity_->address;
+        vote.public_key = validator_identity_->public_key;
+        std::string error;
+        const auto signature = primechain::crypto::ed25519Sign(
+            validator_identity_->private_key,
+            primechain::crypto::commitPhaseVoteSigningPayload(
+                integer, vote.snapshot_hash, vote.validator_address),
+            error);
+        if (!signature.has_value()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        vote.signature = *signature;
+        const bool duplicate = phase_votes_.find(
+            std::make_pair(integer, vote.validator_address)) != phase_votes_.end();
+        if (!acceptPhaseVote(vote, error, true)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeAll(fd, std::string(duplicate ? "PHASE_VOTE_DUPLICATE " : "PHASE_VOTE_ACCEPTED ")
+            + std::to_string(integer) + " " + primechain::crypto::toHex(vote.snapshot_hash)
+            + " votes=" + std::to_string(phaseVoteCount(integer)) + "\n");
+    }
+
+    void submitPhaseVote(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, snapshot_hex, address, public_key_hex, signature_hex, extra;
+        primechain::PrimeValue integer = 0;
+        in >> command >> integer >> snapshot_hex >> address >> public_key_hex >> signature_hex;
+        const auto snapshot = parseHash(snapshot_hex);
+        if (!in || command != "SUBMIT_PHASE_VOTE" || !snapshot.has_value() ||
+            (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_PHASE_VOTE\n");
+            return;
+        }
+        primechain::storage::CommitPhaseVote vote;
+        vote.integer = integer;
+        vote.snapshot_hash = *snapshot;
+        vote.validator_address = address;
+        vote.public_key = hexToBytes(public_key_hex);
+        vote.signature = hexToBytes(signature_hex);
+        const bool duplicate = phase_votes_.find(std::make_pair(integer, address)) != phase_votes_.end();
+        std::string error;
+        if (!acceptPhaseVote(vote, error, true)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeAll(fd, std::string(duplicate ? "PHASE_VOTE_DUPLICATE " : "PHASE_VOTE_ACCEPTED ")
+            + std::to_string(integer) + " " + snapshot_hex
+            + " votes=" + std::to_string(phaseVoteCount(integer)) + "\n");
+    }
+
+    void sendCommitPhase(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command, extra;
+        primechain::PrimeValue integer = 0;
+        in >> command >> integer;
+        if (!in || command != "GET_COMMIT_PHASE" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_COMMIT_PHASE\n");
+            return;
+        }
+        const auto winner = selectedCommitment(integer);
+        const std::string state = phaseClosed(integer) ? "CLOSED" :
+            (phaseFrozen(integer) ? "CLOSING" : "OPEN");
+        writeAll(fd, "COMMIT_PHASE " + std::to_string(integer) + " " + state + " "
+            + std::to_string(phaseVoteCount(integer)) + " "
+            + primechain::crypto::toHex(commitmentSnapshotHash(integer)) + " "
+            + (winner.has_value() ? winner->provider_address : std::string("-")) + "\n");
+    }
+
+    void sendPhaseVotes(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command, extra;
+        primechain::PrimeValue integer = 0;
+        in >> command >> integer;
+        if (!in || command != "GET_PHASE_VOTES" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_PHASE_VOTES\n");
+            return;
+        }
+        writeAll(fd, "PHASE_VOTES " + std::to_string(integer) + " "
+            + std::to_string(phaseVoteCount(integer)) + "\n");
+        for (const auto& entry : phase_votes_) {
+            if (entry.first.first != integer) continue;
+            const auto& vote = entry.second;
+            writeAll(fd, "PHASE_VOTE " + std::to_string(integer) + " "
+                + primechain::crypto::toHex(vote.snapshot_hash) + " "
+                + vote.validator_address + " " + bytesToHex(vote.public_key) + " "
+                + bytesToHex(vote.signature) + "\n");
+        }
+        writeAll(fd, "END_PHASE_VOTES\n");
+    }
+
     void propagateCommit(const primechain::storage::StoredCommitment& commitment) const {
         for (const auto& peer : peers_) {
             std::string error;
@@ -1728,6 +2210,10 @@ private:
                 + std::to_string(frontier + 1) + "\n");
             return;
         }
+        if (quorumEnabled() && phaseFrozen(g)) {
+            writeAll(fd, "ERROR commit phase is closing or closed\n");
+            return;
+        }
         const auto key = std::make_pair(g, provider_address);
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
@@ -1764,6 +2250,10 @@ private:
     }
 
     void submitCommit(int fd, const std::string& line) {
+        if (quorumEnabled()) {
+            writeAll(fd, "ERROR unsigned commitments disabled in quorum mode\n");
+            return;
+        }
         std::istringstream in(line);
         std::string command;
         primechain::PrimeValue g = 0;
@@ -1792,6 +2282,10 @@ private:
         if (g != frontier + 1) {
             writeAll(fd, "ERROR SUBMIT_COMMIT must target next integer "
                 + std::to_string(frontier + 1) + "\n");
+            return;
+        }
+        if (quorumEnabled() && phaseFrozen(g)) {
+            writeAll(fd, "ERROR commit phase is closing or closed\n");
             return;
         }
 
@@ -1939,6 +2433,10 @@ private:
             writeAll(fd, "ERROR invalid signed reveal signature\n");
             return;
         }
+        if (quorumEnabled() && !phaseClosed(g)) {
+            writeAll(fd, "ERROR commit phase is not closed by validator quorum\n");
+            return;
+        }
 
         const auto key = std::make_pair(g, provider_address);
         const auto existing = commitments_.find(key);
@@ -1970,10 +2468,14 @@ private:
         std::ostringstream submission;
         submission << "SUBMIT_COMPOSITE " << g << " " << d << " " << e << " "
                    << provider_address << " " << bytesToHex(packed_proof);
-        submitComposite(fd, submission.str());
+        submitComposite(fd, submission.str(), true);
     }
 
     void submitCompositeReveal(int fd, const std::string& line) {
+        if (quorumEnabled()) {
+            writeAll(fd, "ERROR unsigned reveals disabled in quorum mode\n");
+            return;
+        }
         std::istringstream in(line);
         std::string command;
         primechain::PrimeValue g = 0;
@@ -1988,6 +2490,10 @@ private:
             !primechain::protocol::isDevelopmentAddress(provider_address) ||
             (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE_REVEAL; expected SUBMIT_COMPOSITE_REVEAL g d e nonce provider_address\n");
+            return;
+        }
+        if (quorumEnabled() && !phaseClosed(g)) {
+            writeAll(fd, "ERROR commit phase is not closed by validator quorum\n");
             return;
         }
 
@@ -2016,10 +2522,14 @@ private:
         std::ostringstream legacy_submission;
         legacy_submission << "SUBMIT_COMPOSITE " << g << " " << d << " " << e << " "
                           << provider_address;
-        submitComposite(fd, legacy_submission.str());
+        submitComposite(fd, legacy_submission.str(), true);
     }
 
-    void submitComposite(int fd, const std::string& line) {
+    void submitComposite(int fd, const std::string& line, bool authorized_by_phase = false) {
+        if (quorumEnabled() && !authorized_by_phase) {
+            writeAll(fd, "ERROR direct SUBMIT_COMPOSITE disabled in quorum mode; use signed commit-reveal\n");
+            return;
+        }
         std::istringstream in(line);
         std::string command;
         primechain::PrimeValue g = 0;
@@ -2489,10 +2999,16 @@ private:
     bool factorization_helper_enabled_{false};
     primechain::storage::RecordStore store_;
     primechain::storage::CommitmentStore commitment_store_;
+    primechain::storage::PhaseStore phase_store_;
+    std::vector<primechain::Address> validator_set_;
+    std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<
         std::pair<primechain::PrimeValue, std::string>,
         primechain::storage::StoredCommitment> commitments_;
+    std::map<
+        std::pair<primechain::PrimeValue, std::string>,
+        primechain::storage::CommitPhaseVote> phase_votes_;
 };
 
 struct Options {
@@ -2504,6 +3020,8 @@ struct Options {
     bool enable_advance{false};
     bool enable_ack_mempool{false};
     bool enable_factorization_helper{false};
+    std::vector<primechain::Address> validator_set;
+    std::string validator_identity_path;
 };
 
 std::optional<Options> parseOptions(int argc, char** argv) {
@@ -2556,6 +3074,17 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.enable_factorization_helper = true;
             continue;
         }
+        if (flag == "--validator-set") {
+            if (index + 2 >= argc) return std::nullopt;
+            options.validator_set = {argv[index], argv[index + 1], argv[index + 2]};
+            index += 3;
+            continue;
+        }
+        if (flag == "--validator-identity") {
+            if (index >= argc) return std::nullopt;
+            options.validator_identity_path = argv[index++];
+            continue;
+        }
         {
             return std::nullopt;
         }
@@ -2564,7 +3093,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--validator-set addr1 addr2 addr3 --validator-identity file]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
@@ -2587,6 +3116,36 @@ int main(int argc, char** argv) {
     }
     const Options options = *parsed;
 
+    std::optional<primechain::wallet::MinerIdentity> validator_identity;
+    if (options.validator_set.empty() != options.validator_identity_path.empty()) {
+        std::cerr << "validator quorum requires both --validator-set and --validator-identity\n";
+        return 1;
+    }
+    if (!options.validator_set.empty()) {
+        const std::set<primechain::Address> unique_validators(
+            options.validator_set.begin(), options.validator_set.end());
+        if (unique_validators.size() != 3 ||
+            !std::all_of(options.validator_set.begin(), options.validator_set.end(),
+                [](const primechain::Address& address) {
+                    return primechain::crypto::isEd25519Address(address);
+                })) {
+            std::cerr << "validator set must contain three distinct pc1_ addresses\n";
+            return 1;
+        }
+        primechain::wallet::MinerIdentity loaded;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(
+                options.validator_identity_path, loaded, error)) {
+            std::cerr << "validator identity load failed: " << error << "\n";
+            return 1;
+        }
+        if (unique_validators.find(loaded.address) == unique_validators.end()) {
+            std::cerr << "local validator identity is not in configured validator set\n";
+            return 1;
+        }
+        validator_identity = std::move(loaded);
+    }
+
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
@@ -2600,11 +3159,18 @@ int main(int argc, char** argv) {
         options.peers,
         options.enable_advance,
         options.enable_ack_mempool,
-        options.enable_factorization_helper);
+        options.enable_factorization_helper,
+        options.validator_set,
+        validator_identity);
     {
         std::string error;
         if (!sync_server.loadCommitments(error)) {
             std::cerr << "commitment store load failed: " << error << "\n";
+            return 1;
+        }
+        error.clear();
+        if (!sync_server.loadPhaseVotes(error)) {
+            std::cerr << "phase store load failed: " << error << "\n";
             return 1;
         }
     }
@@ -2631,6 +3197,10 @@ int main(int argc, char** argv) {
     }
     if (options.enable_factorization_helper) {
         std::cout << "development helper enabled: GET_FACTORIZATION\n";
+    }
+    if (validator_identity.has_value()) {
+        std::cout << "validator quorum enabled: fixed 2-of-3; local validator "
+                  << validator_identity->address << "\n";
     }
 
     auto next_sync = std::chrono::steady_clock::now()

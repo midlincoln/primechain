@@ -167,6 +167,18 @@ Bytes compositeRevealSigningPayload(
     return payload;
 }
 
+Bytes commitPhaseVoteSigningPayload(
+    PrimeValue integer,
+    const Hash256& snapshot_hash,
+    const Address& validator_address) {
+    Bytes payload;
+    appendString(payload, "primechain-commit-phase-vote-v1");
+    appendUint64(payload, integer);
+    appendHash(payload, snapshot_hash);
+    appendString(payload, validator_address);
+    return payload;
+}
+
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,
@@ -205,6 +217,30 @@ bool verifyPackedCompositeRevealProof(
         compositeRevealSigningPayload(integer, d, e, nonce, provider_address),
         signature,
         error);
+}
+
+bool packedCompositeRevealMatchesCommitment(
+    PrimeValue integer,
+    PrimeValue d,
+    PrimeValue e,
+    const Address& provider_address,
+    const Bytes& packed_proof,
+    const Hash256& expected_commitment,
+    std::string& error) {
+    if (!verifyPackedCompositeRevealProof(
+            integer, d, e, provider_address, packed_proof, error)) {
+        return false;
+    }
+    std::uint64_t nonce = 0;
+    for (int i = 0; i < 8; ++i) {
+        nonce |= static_cast<std::uint64_t>(packed_proof[32 + i]) << (i * 8);
+    }
+    if (developmentCompositeCommitment(integer, d, e, nonce, provider_address) !=
+        expected_commitment) {
+        error = "composite reveal does not match selected commitment";
+        return false;
+    }
+    return true;
 }
 
 } // namespace primechain::crypto

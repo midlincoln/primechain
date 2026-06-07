@@ -314,3 +314,24 @@ Tests cover identity creation, valid signed flow, forged signatures, restart,
 peer synchronization, signed frontier mining, and reward replay. Ed25519 is
 classical rather than post-quantum; `devHash256`, prime authentication,
 transaction signatures, and validator finalization remain future migrations.
+
+## 2026-06-07: Signed 2-of-3 Commit-Phase Quorum
+
+Added an opt-in controlled-testnet quorum mode configured with three fixed
+Ed25519 validator addresses and one local validator identity per node. The first
+signed vote freezes the exact canonical commitment snapshot; two distinct valid
+votes close the phase and permit only the deterministic winning commitment to
+reveal. Unsigned commitments/reveals, late commitments, direct composite
+submission, outsider votes, conflicting snapshots, and mismatched peer records
+are rejected.
+
+Votes use domain-separated Ed25519 signatures, persist atomically in
+`<record-store>.phases`, survive restart, synchronize from peers, and propagate
+across a three-node topology. Tests cover the full OPEN/CLOSING/CLOSED flow,
+bypass rejection, unauthorized validators, restart recovery, and end-to-end
+record propagation.
+
+This remains controlled-testnet machinery. Validator membership is manual,
+`devHash256` still hashes snapshots, and the quorum certificate is sidecar state
+rather than part of the permanent arithmetic record. Embedding and replaying the
+certificate from chain history is the next consensus-format step.

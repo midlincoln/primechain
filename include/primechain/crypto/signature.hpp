@@ -39,6 +39,10 @@ Bytes compositeRevealSigningPayload(
     PrimeValue e,
     std::uint64_t nonce,
     const Address& provider_address);
+Bytes commitPhaseVoteSigningPayload(
+    PrimeValue integer,
+    const Hash256& snapshot_hash,
+    const Address& validator_address);
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,
@@ -49,6 +53,14 @@ bool verifyPackedCompositeRevealProof(
     PrimeValue e,
     const Address& provider_address,
     const Bytes& packed_proof,
+    std::string& error);
+bool packedCompositeRevealMatchesCommitment(
+    PrimeValue integer,
+    PrimeValue d,
+    PrimeValue e,
+    const Address& provider_address,
+    const Bytes& packed_proof,
+    const Hash256& expected_commitment,
     std::string& error);
 
 } // namespace primechain::crypto

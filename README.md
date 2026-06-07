@@ -328,8 +328,58 @@ The frontier miner can use the identity directly:
 
 Ed25519 is a real classical signature scheme, but it is not post-quantum. This
 milestone establishes authenticated miner identity before the planned PQ
-replacement. The current commitment hash remains `devHash256`, and validator
-finalization remains the fixed development rule; neither is production-ready.
+replacement. The current commitment and snapshot hashes remain `devHash256`; they are not production-ready.
+
+### Controlled 2-of-3 Commit Phase
+
+Quorum mode is opt-in and intended for a controlled testnet. Create three
+Ed25519 identities and configure every validator with the same ordered set:
+
+```bash
+a=$(./build/primechain-wallet new-miner ./wallets/validator-a.wallet)
+b=$(./build/primechain-wallet new-miner ./wallets/validator-b.wallet)
+c=$(./build/primechain-wallet new-miner ./wallets/validator-c.wallet)
+
+./build/primechain-sync-server 18889 ./data/validator-a.dat \
+  --validator-set $a $b $c \
+  --validator-identity ./wallets/validator-a.wallet
+```
+
+After signed miner commitments have propagated, validators close the phase:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 CLOSE_COMMIT_PHASE 4
+./build/primechain-sync-query 127.0.0.1 18889 GET_COMMIT_PHASE 4
+./build/primechain-sync-query 127.0.0.1 18889 GET_PHASE_VOTES 4
+```
+
+The first valid vote changes the phase from `OPEN` to `CLOSING` and freezes the
+canonical commitment snapshot. A second distinct configured validator signature
+for that exact snapshot changes it to `CLOSED`. Only then may the selected
+commitment reveal. Late commitments, unsigned commitments/reveals, direct
+composite submissions, unconfigured validators, conflicting snapshots, and
+non-winning peer records are rejected in quorum mode.
+
+```text
+CLOSE_COMMIT_PHASE g
+GET_COMMIT_PHASE g
+GET_PHASE_VOTES g
+SUBMIT_PHASE_VOTE g snapshot_hash validator_address public_key signature
+```
+
+Votes are persisted atomically in `<record-store>.phases`, restored after
+restart, synchronized from peers, and propagated between configured nodes.
+The helper can sign a vote for controlled tests:
+
+```bash
+./build/primechain-composite-commitment \
+  sign-phase ./wallets/validator-b.wallet 4 $snapshot_hash
+```
+
+This is not permissionless consensus. Fixed validator membership is manual, and
+the phase certificate is currently transient sidecar state rather than a
+permanent field in the finalized arithmetic record. Embedding the certificate
+in canonical records is required before an adversarial testnet.
 
 Submit a composite proof using the development commit-reveal flow. First,
 the miner chooses a nonce and computes the canonical commitment locally:
@@ -398,10 +448,9 @@ production hash must replace it before an adversarial testnet. This version
 prevents an ordinary peer that first learns the factors at reveal time from
 claiming the same reveal without a prior matching commitment. It does not establish that the selected commitment was globally earliest.
 The current lowest-hash rule gives deterministic convergence once nodes know
-the same candidate set, but miners can vary nonces to grind for a lower hash,
-and a node may finalize before learning a better commitment. A production
-fairness rule still requires a commit phase boundary and signed validator
-quorum.
+the same candidate set, but miners can vary nonces to grind for a lower hash.
+The opt-in controlled quorum mode freezes that candidate set before reveal;
+the production fairness rule and permissionless validator selection remain open.
 
 A correct peer independently validates every finalized composite record. For
 example, `2 * 2 = 5` is rejected and cannot advance an honest node. Competing
@@ -658,7 +707,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Composite contributors may now use Ed25519 `pc1_` identities. Signed commitments and reveals are verified by nodes, propagated with their authentication evidence, persisted across restart, and retained in finalized composite records for replay verification. Prime submissions, transactions, validator votes, post-quantum signatures, and the legacy `pcdev1_` development paths still require further migration.
+Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold. Prime submissions, transactions, permanent in-record quorum certificates, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
 
 Terminal 2:
 

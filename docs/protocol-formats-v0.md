@@ -480,6 +480,38 @@ The rule still permits nonce grinding and cannot ensure that all nodes have the
 same candidate set before finalization. Production ordering and reward
 attribution require signed commitments plus a quorum-defined commit boundary.
 
+### 10.1 Controlled Commit-Phase Quorum
+
+A node started with a fixed three-address validator set uses these phase states:
+
+```text
+OPEN -> CLOSING -> CLOSED
+```
+
+- `OPEN`: signed composite commitments are accepted.
+- `CLOSING`: the first valid validator vote freezes the canonical snapshot.
+- `CLOSED`: two distinct configured validators signed the same snapshot.
+
+The snapshot hash commits to the integer and the canonical ordered list of full
+commitment records, including miner authentication data. Validator signatures
+use the domain `primechain-commit-phase-vote-v1` and bind the integer, snapshot
+hash, and validator address.
+
+```text
+SUBMIT_PHASE_VOTE g snapshot_hash validator_address public_key signature
+```
+
+In quorum mode, only signed commitments are accepted. Reveals are rejected until
+`CLOSED`; late commitments and direct `SUBMIT_COMPOSITE` calls are rejected. A
+peer-submitted current composite record must contain a valid signed reveal that
+reconstructs the selected commitment hash.
+
+Votes are stored in `<record-store>.phases` and exchanged using
+`GET_PHASE_VOTES`. This v0 certificate is operational sidecar state and is not
+yet embedded in the finalized record. Therefore historical replay verifies the
+miner reveal signature and arithmetic record, but does not yet independently
+reconstruct the commit-phase quorum. That permanent certificate is an open item.
+
 ## 11. Bitcoin Mirror Payload
 
 A future optional Bitcoin mirror may attach external-reference payloads to arithmetic records.

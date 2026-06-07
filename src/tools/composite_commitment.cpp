@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -12,7 +13,8 @@ void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " g d e nonce provider_address\n"
               << "  " << argv0 << " sign-commit <miner-identity> g d e nonce\n"
-              << "  " << argv0 << " sign-reveal <miner-identity> g d e nonce\n";
+              << "  " << argv0 << " sign-reveal <miner-identity> g d e nonce\n"
+              << "  " << argv0 << " sign-phase <validator-identity> g snapshot_hash\n";
 }
 
 } // namespace
@@ -27,6 +29,36 @@ int main(int argc, char** argv) {
         std::cout << primechain::crypto::toHex(
             primechain::crypto::developmentCompositeCommitment(g, d, e, nonce, provider))
                   << "\n";
+        return 0;
+    }
+
+    if (argc == 5 && std::string(argv[1]) == "sign-phase") {
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        const auto g = static_cast<primechain::PrimeValue>(std::stoull(argv[3]));
+        const auto snapshot_bytes = primechain::wallet::hexToBytes(argv[4]);
+        if (snapshot_bytes.size() != 32) {
+            std::cerr << "invalid snapshot hash\n";
+            return 1;
+        }
+        primechain::Hash256 snapshot{};
+        std::copy(snapshot_bytes.begin(), snapshot_bytes.end(), snapshot.begin());
+        const auto signature = primechain::crypto::ed25519Sign(
+            identity.private_key,
+            primechain::crypto::commitPhaseVoteSigningPayload(g, snapshot, identity.address),
+            error);
+        if (!signature.has_value()) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << "SUBMIT_PHASE_VOTE " << g << " " << argv[4] << " "
+                  << identity.address << " "
+                  << primechain::wallet::bytesToHex(identity.public_key) << " "
+                  << primechain::wallet::bytesToHex(*signature) << "\n";
         return 0;
     }
 
