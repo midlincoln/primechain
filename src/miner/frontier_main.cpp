@@ -3,6 +3,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -10,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "primechain/crypto/hash.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/types.hpp"
 
@@ -163,6 +165,12 @@ std::optional<Status> getStatus(const std::string& host, int port) {
     return status;
 }
 
+std::uint64_t randomNonce() {
+    std::random_device source;
+    return (static_cast<std::uint64_t>(source()) << 32) ^
+           static_cast<std::uint64_t>(source());
+}
+
 std::string primeSubmission(
     const primechain::math::PrattProof& proof,
     const std::string& provider) {
@@ -178,14 +186,30 @@ std::string primeSubmission(
     return out.str();
 }
 
-std::string compositeSubmission(
+std::string compositeCommitSubmission(
     const primechain::CompositeProof& proof,
+    std::uint64_t nonce,
+    const std::string& provider) {
+    const auto commitment = primechain::crypto::developmentCompositeCommitment(
+        proof.m, proof.d, proof.e, nonce, provider);
+    std::ostringstream out;
+    out << "SUBMIT_COMMIT "
+        << proof.m << " "
+        << primechain::crypto::toHex(commitment) << " "
+        << provider << "\n";
+    return out.str();
+}
+
+std::string compositeRevealSubmission(
+    const primechain::CompositeProof& proof,
+    std::uint64_t nonce,
     const std::string& provider) {
     std::ostringstream out;
-    out << "SUBMIT_COMPOSITE "
+    out << "SUBMIT_COMPOSITE_REVEAL "
         << proof.m << " "
         << proof.d << " "
         << proof.e << " "
+        << nonce << " "
         << provider << "\n";
     return out.str();
 }
@@ -237,6 +261,7 @@ int main(int argc, char** argv) {
 
         const primechain::PrimeValue next = effective_frontier + 1;
         std::string request;
+        std::optional<std::string> commit_request;
         if (primechain::math::isPrime(next)) {
             const auto proof = primechain::math::makePrattProof(next, proofs);
             if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
@@ -252,7 +277,22 @@ int main(int argc, char** argv) {
                 return 1;
             }
             proofs.add(*proof);
-            request = compositeSubmission(*proof, composite_miner);
+            const std::uint64_t nonce = randomNonce();
+            commit_request = compositeCommitSubmission(*proof, nonce, composite_miner);
+            request = compositeRevealSubmission(*proof, nonce, composite_miner);
+        }
+
+        if (commit_request.has_value()) {
+            const auto commit_response = requestLine(host, port, *commit_request);
+            if (!commit_response.has_value()) {
+                std::cerr << "node closed connection while committing " << next << "\n";
+                return 1;
+            }
+            std::cout << *commit_response << "\n";
+            if (commit_response->rfind("COMMIT_ACCEPTED ", 0) != 0 &&
+                commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0) {
+                return 1;
+            }
         }
 
         const auto response = requestLine(host, port, request);

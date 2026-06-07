@@ -32,6 +32,7 @@ constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 constexpr std::size_t kMaxLineBytes = 8192;
 constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
+constexpr std::size_t kMaxCompositeCommitments = 1024;
 constexpr std::size_t kMaxKnownPeers = 32;
 constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 3000;
@@ -238,6 +239,8 @@ std::optional<std::string> readLine(int fd) {
 bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
+           line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
+           line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
@@ -796,6 +799,41 @@ bool submitTransactionToPeer(
     return false;
 }
 
+bool submitCommitToPeer(
+    const PeerEndpoint& peer,
+    primechain::PrimeValue g,
+    const primechain::Hash256& commitment,
+    const std::string& provider_address,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    std::ostringstream command;
+    command << "SUBMIT_COMMIT " << g << " "
+            << primechain::crypto::toHex(commitment) << " "
+            << provider_address << "\n";
+    if (!writeAll(socket->fd(), command.str())) {
+        error = "could not submit commitment to peer";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "peer did not return commitment response";
+        return false;
+    }
+    if (response->rfind("COMMIT_ACCEPTED ", 0) == 0 ||
+        response->rfind("COMMIT_DUPLICATE ", 0) == 0) {
+        return true;
+    }
+    error = "peer rejected commitment: " + *response;
+    return false;
+}
+
 bool submitRecordToPeer(
     const PeerEndpoint& peer,
     const primechain::storage::StoredRecord& record,
@@ -888,6 +926,14 @@ public:
             }
             if (line->rfind("SUBMIT_TX ", 0) == 0) {
                 submitTx(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_COMMIT ", 0) == 0) {
+                submitCommit(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0) {
+                submitCompositeReveal(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_COMPOSITE ", 0) == 0) {
@@ -1370,6 +1416,118 @@ private:
         writeAll(fd, "ERROR conflicting historical record\n");
     }
 
+    void propagateCommit(
+        primechain::PrimeValue g,
+        const primechain::Hash256& commitment,
+        const std::string& provider_address) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitCommitToPeer(peer, g, commitment, provider_address, error)) {
+                std::cerr << "commitment propagation warning to " << peer.host << ":" << peer.port
+                          << ": " << error << "\n";
+            }
+        }
+    }
+
+    void submitCommit(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        std::string commitment_hex;
+        std::string provider_address;
+        in >> command >> g >> commitment_hex >> provider_address;
+        std::string extra;
+        const auto commitment = parseHash(commitment_hex);
+        if (!in ||
+            command != "SUBMIT_COMMIT" ||
+            !commitment.has_value() ||
+            !primechain::protocol::isDevelopmentAddress(provider_address) ||
+            (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_COMMIT; expected SUBMIT_COMMIT g commitment_hash provider_address\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const primechain::PrimeValue frontier =
+            node.status().has_genesis ? node.status().frontier_integer : 2;
+        if (g != frontier + 1) {
+            writeAll(fd, "ERROR SUBMIT_COMMIT must target next integer "
+                + std::to_string(frontier + 1) + "\n");
+            return;
+        }
+
+        for (auto it = commitments_.begin(); it != commitments_.end();) {
+            if (it->first.first < g) {
+                it = commitments_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        const auto key = std::make_pair(g, provider_address);
+        const auto existing = commitments_.find(key);
+        if (existing != commitments_.end()) {
+            if (existing->second == *commitment) {
+                writeAll(fd, "COMMIT_DUPLICATE " + std::to_string(g) + " " + commitment_hex + "\n");
+            } else {
+                writeAll(fd, "ERROR provider already committed a different hash for integer "
+                    + std::to_string(g) + "\n");
+            }
+            return;
+        }
+        if (commitments_.size() >= kMaxCompositeCommitments) {
+            writeAll(fd, "ERROR commitment pool full; max="
+                + std::to_string(kMaxCompositeCommitments) + "\n");
+            return;
+        }
+
+        commitments_[key] = *commitment;
+        propagateCommit(g, *commitment, provider_address);
+        writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
+    }
+
+    void submitCompositeReveal(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        primechain::PrimeValue d = 0;
+        primechain::PrimeValue e = 0;
+        std::uint64_t nonce = 0;
+        std::string provider_address;
+        in >> command >> g >> d >> e >> nonce >> provider_address;
+        std::string extra;
+        if (!in ||
+            command != "SUBMIT_COMPOSITE_REVEAL" ||
+            !primechain::protocol::isDevelopmentAddress(provider_address) ||
+            (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE_REVEAL; expected SUBMIT_COMPOSITE_REVEAL g d e nonce provider_address\n");
+            return;
+        }
+
+        const auto key = std::make_pair(g, provider_address);
+        const auto existing = commitments_.find(key);
+        if (existing == commitments_.end()) {
+            writeAll(fd, "ERROR no prior commitment for reveal\n");
+            return;
+        }
+        const auto revealed = primechain::crypto::developmentCompositeCommitment(
+            g, d, e, nonce, provider_address);
+        if (revealed != existing->second) {
+            writeAll(fd, "ERROR reveal does not match prior commitment\n");
+            return;
+        }
+
+        std::ostringstream legacy_submission;
+        legacy_submission << "SUBMIT_COMPOSITE " << g << " " << d << " " << e << " "
+                          << provider_address;
+        submitComposite(fd, legacy_submission.str());
+    }
+
     void submitComposite(int fd, const std::string& line) {
         std::istringstream in(line);
         std::string command;
@@ -1826,6 +1984,7 @@ private:
     bool factorization_helper_enabled_{false};
     primechain::storage::RecordStore store_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
+    std::map<std::pair<primechain::PrimeValue, std::string>, primechain::Hash256> commitments_;
 };
 
 struct Options {

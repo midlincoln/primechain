@@ -3,8 +3,23 @@
 #include <array>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 
 namespace primechain::crypto {
+namespace {
+
+void appendUint64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+    for (std::size_t i = 0; i < 8; ++i) {
+        out.push_back(static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu));
+    }
+}
+
+void appendString(std::vector<std::uint8_t>& out, std::string_view value) {
+    appendUint64(out, value.size());
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+} // namespace
 
 Hash256 devHash256(const std::vector<std::uint8_t>& bytes) {
     // Development-only deterministic hash. Replace with SHA3-256 before testnet.
@@ -34,6 +49,22 @@ Hash256 devHash256(const std::vector<std::uint8_t>& bytes) {
         }
     }
     return out;
+}
+
+Hash256 developmentCompositeCommitment(
+    PrimeValue g,
+    PrimeValue d,
+    PrimeValue e,
+    std::uint64_t nonce,
+    const Address& provider_address) {
+    std::vector<std::uint8_t> bytes;
+    appendString(bytes, "primechain-composite-commit-v0");
+    appendUint64(bytes, g);
+    appendUint64(bytes, d);
+    appendUint64(bytes, e);
+    appendUint64(bytes, nonce);
+    appendString(bytes, provider_address);
+    return devHash256(bytes);
 }
 
 std::string toHex(const Hash256& hash) {

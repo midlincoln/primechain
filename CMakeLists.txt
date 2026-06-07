@@ -132,6 +132,15 @@ add_executable(primechain-sync-download
     src/tools/sync_download.cpp
 )
 
+add_executable(primechain-composite-commitment
+    src/tools/composite_commitment.cpp
+)
+
+target_link_libraries(primechain-composite-commitment
+    PRIVATE
+        primechain_core
+)
+
 target_link_libraries(primechain-sync-download
     PRIVATE
         primechain_core
@@ -392,6 +401,36 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log; $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet >/dev/null && $<TARGET_FILE:primechain-wallet> new ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet >/dev/null && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.log ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid) && sleep 0.2 && alice=$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/mempool-alice.wallet) && $<TARGET_FILE:primechain-send> submit 127.0.0.1 18994 ${CMAKE_CURRENT_BINARY_DIR}/mempool-miner.wallet $alice 3 250000 1 >/dev/null && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18994 GET_MEMPOOL | grep -q '^MEMPOOL 1' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/mempool-server.pid)"
+)
+add_test(
+    NAME composite_commitment_hash_shape
+    COMMAND
+        /bin/sh -c
+        "$<TARGET_FILE:primechain-composite-commitment> 4 2 2 44 pcdev1_commit_miner | grep -Eq '^[0-9a-f]{64}$'"
+)
+add_test(
+    NAME tcp_composite_commit_reveal_accepts
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.dat ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.log ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.log ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19042 ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.dat > ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.pid) && sleep 0.2 && commitment=$($<TARGET_FILE:primechain-composite-commitment> 4 2 2 44 pcdev1_commit_miner) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19042 SUBMIT_COMMIT 4 $commitment pcdev1_commit_miner | grep -q '^COMMIT_ACCEPTED 4 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19042 SUBMIT_COMPOSITE_REVEAL 4 2 2 44 pcdev1_commit_miner | grep -q '^COMPOSITE_ACCEPTED 4 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19042 GET_STATUS | grep -q 'STATUS 3 2 1 1 2 4' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/commit-reveal.pid)"
+)
+add_test(
+    NAME tcp_composite_reveal_requires_commit
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.dat ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.log ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.log ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19043 ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.dat > ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19043 SUBMIT_COMPOSITE_REVEAL 4 2 2 44 pcdev1_commit_miner | grep -q '^ERROR no prior commitment for reveal$' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/reveal-no-commit.pid)"
+)
+add_test(
+    NAME tcp_composite_reveal_rejects_mismatch
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.dat ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.log ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch-server.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.log ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19044 ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.dat > ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.pid) && sleep 0.2 && commitment=$($<TARGET_FILE:primechain-composite-commitment> 4 2 2 44 pcdev1_commit_miner) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19044 SUBMIT_COMMIT 4 $commitment pcdev1_commit_miner >/dev/null && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19044 SUBMIT_COMPOSITE_REVEAL 4 2 2 45 pcdev1_commit_miner | grep -q '^ERROR reveal does not match prior commitment$' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19044 GET_STATUS | grep -q 'STATUS 2 2 0 1 1 3' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/reveal-mismatch.pid)"
+)
+add_test(
+    NAME tcp_composite_commit_propagates_to_peer
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.dat ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.log ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.log; $<TARGET_FILE:primechain-sequential> 3 ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-base.log ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.dat >/dev/null && ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.dat ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.dat && ($<TARGET_FILE:primechain-sync-server> 19045 ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.dat > ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19046 ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.dat --peer 127.0.0.1 19045 > ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.pid) && sleep 0.3 && commitment=$($<TARGET_FILE:primechain-composite-commitment> 4 2 2 44 pcdev1_commit_miner) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19046 SUBMIT_COMMIT 4 $commitment pcdev1_commit_miner | grep -q '^COMMIT_ACCEPTED 4 ' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19045 SUBMIT_COMPOSITE_REVEAL 4 2 2 44 pcdev1_commit_miner | grep -q '^COMPOSITE_ACCEPTED 4 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/commit-prop-b.pid)"
 )
 add_test(
     NAME tcp_submit_composite_extends_frontier

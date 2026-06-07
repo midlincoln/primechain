@@ -253,3 +253,25 @@ The next code milestone should be an arithmetic-record benchmark mode:
 5. Keep the current prime-block miner working until the sequential record model replaces it cleanly.
 
 This benchmark is more important than wallets or post-quantum signatures right now, because it tests whether the proposed core database can evolve quickly and persist reliably.
+
+## 2026-06-07: Composite Commit-Reveal Prototype
+
+The first TCP commit-reveal path is implemented:
+
+```text
+SUBMIT_COMMIT g commitment_hash provider_address
+SUBMIT_COMPOSITE_REVEAL g d e nonce provider_address
+```
+
+The canonical development commitment binds `g`, `d`, `e`, `nonce`, and the
+provider address under a domain-separated hash. Nodes keep a bounded in-memory
+commitment pool, propagate commitments to known peers, reject unmatched
+reveals, and perform normal composite arithmetic validation before finalizing a
+record. The frontier miner now commits before revealing composite factors.
+
+This milestone provides reveal-time proof-theft resistance, but not global
+commit ordering. Commitments are not yet persistent consensus records, and node
+arrival times are not a globally reliable ordering source. A later protocol
+step must define a commit phase boundary plus quorum/finality rules before the
+project claims that the earliest network commitment deterministically receives
+the composite reward.

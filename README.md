@@ -285,30 +285,72 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
-Submit one miner-produced composite proof to a running TCP node:
+Submit a composite proof using the development commit-reveal flow. First,
+the miner chooses a nonce and computes the canonical commitment locally:
+
+```bash
+commitment=$(./build/primechain-composite-commitment \
+  4 2 2 44 pcdev1_composite_miner)
+```
+
+The committed fields are domain-separated and canonically encoded as:
+
+```text
+H("primechain-composite-commit-v0" || g || d || e || nonce || provider_address)
+```
+
+Submit the commitment without exposing the factors:
 
 ```bash
 ./build/primechain-sync-query 127.0.0.1 18889 \
-  SUBMIT_COMPOSITE 4 2 2 pcdev1_composite_miner
+  SUBMIT_COMMIT 4 $commitment pcdev1_composite_miner
 ```
 
-Format:
+Then reveal the factors and nonce:
 
-```text
-SUBMIT_COMPOSITE g d e provider_address
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 \
+  SUBMIT_COMPOSITE_REVEAL 4 2 2 44 pcdev1_composite_miner
 ```
 
-The node checks that `d * e = g`, that `provider_address` is a development address, and that `g` is exactly the next integer after the local frontier. If the local store is empty, genesis is initialized first. Accepted composite submissions are finalized as normal composite records, stored on disk, and propagated to configured peers with `SUBMIT_RECORD`.
-
-A correct peer independently replays this validation. For example, a corrupted node or miner claiming `SUBMIT_COMPOSITE 5 2 2 pcdev1_bad` is rejected because `2 * 2 != 5`, and the receiving node's frontier does not advance.
-
-If a second valid `SUBMIT_COMPOSITE` arrives for the current tip integer, the node builds the competing canonical record and applies the same lower-hash conflict rule used by `SUBMIT_RECORD`. The lower finalized record hash wins; the worse candidate is rejected as `RECORD_CONFLICT_WORSE`.
-
-Current success response:
+Formats:
 
 ```text
+SUBMIT_COMMIT g commitment_hash provider_address
+SUBMIT_COMPOSITE_REVEAL g d e nonce provider_address
+```
+
+The node requires a prior commitment for the same `(g, provider_address)`,
+recomputes the commitment, verifies `d * e = g`, and requires `g` to extend the
+current frontier. Commitments are bounded in memory, stale earlier-integer
+commitments are pruned, and newly accepted commitments are propagated to known
+peers. A reveal without a commitment, or with different factors, nonce, or
+provider, is rejected.
+
+Current success responses:
+
+```text
+COMMIT_ACCEPTED <g> <commitment_hash>
 COMPOSITE_ACCEPTED <g> <record_hash>
 ```
+
+`SUBMIT_COMPOSITE g d e provider_address` remains as a legacy development path
+for existing tests. It does not provide proof-theft protection and must not be
+treated as the production miner entry point.
+
+Important limitation: commitments are currently transient node messages, not
+finalized consensus records. The current `devHash256` implementation tests the
+protocol flow but is not production cryptography; SHA3-256 or another selected
+production hash must replace it before an adversarial testnet. This version
+prevents an ordinary peer that first learns the factors at reveal time from
+claiming the same reveal without a prior matching commitment. It does not yet establish a globally agreed earliest commitment across
+asynchronous nodes. That requires a commit phase boundary and validator
+quorum, or another consensus ordering rule.
+
+A correct peer independently validates every finalized composite record. For
+example, `2 * 2 = 5` is rejected and cannot advance an honest node. Competing
+valid finalized records for the same current tip still use the existing
+lower-record-hash conflict rule.
 
 Submit one miner-produced Pratt prime proof to a running TCP node:
 
