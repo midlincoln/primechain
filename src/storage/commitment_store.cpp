@@ -8,8 +8,10 @@
 namespace primechain::storage {
 namespace {
 
-constexpr std::uint64_t kCommitmentStoreMagic = 0x3056544d43435055ull;
+constexpr std::uint64_t kCommitmentStoreMagicV0 = 0x3056544d43435055ull;
+constexpr std::uint64_t kCommitmentStoreMagicV1 = 0x3156544d43435055ull;
 constexpr std::uint64_t kMaxAddressBytes = 1024;
+constexpr std::uint64_t kMaxAuthBytes = 1024;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
     value = 0;
@@ -51,10 +53,11 @@ std::vector<StoredCommitment> CommitmentStore::loadAll(std::string& error) const
             error = "truncated commitment store magic";
             return {};
         }
-        if (magic != kCommitmentStoreMagic) {
+        if (magic != kCommitmentStoreMagicV0 && magic != kCommitmentStoreMagicV1) {
             error = "invalid commitment store magic";
             return {};
         }
+        const bool authenticated_format = magic == kCommitmentStoreMagicV1;
 
         StoredCommitment commitment;
         std::uint64_t address_size = 0;
@@ -74,6 +77,25 @@ std::vector<StoredCommitment> CommitmentStore::loadAll(std::string& error) const
                 commitment.commitment_hash.size())) {
             error = "truncated commitment record";
             return {};
+        }
+        if (authenticated_format) {
+            std::uint64_t public_key_size = 0;
+            std::uint64_t signature_size = 0;
+            if (!readUint64(in, public_key_size) || public_key_size > kMaxAuthBytes) {
+                error = "invalid commitment public key size";
+                return {};
+            }
+            commitment.public_key.resize(static_cast<std::size_t>(public_key_size));
+            if (!in.read(reinterpret_cast<char*>(commitment.public_key.data()), commitment.public_key.size()) ||
+                !readUint64(in, signature_size) || signature_size > kMaxAuthBytes) {
+                error = "truncated commitment authentication";
+                return {};
+            }
+            commitment.signature.resize(static_cast<std::size_t>(signature_size));
+            if (!in.read(reinterpret_cast<char*>(commitment.signature.data()), commitment.signature.size())) {
+                error = "truncated commitment signature";
+                return {};
+            }
         }
         commitments.push_back(std::move(commitment));
     }
@@ -98,13 +120,28 @@ bool CommitmentStore::replaceAll(
             std::remove(temp_path.c_str());
             return false;
         }
-        writeUint64(out, kCommitmentStoreMagic);
+        writeUint64(out, kCommitmentStoreMagicV1);
         writeUint64(out, commitment.integer);
         writeUint64(out, commitment.provider_address.size());
         out.write(commitment.provider_address.data(), commitment.provider_address.size());
         out.write(
             reinterpret_cast<const char*>(commitment.commitment_hash.data()),
             commitment.commitment_hash.size());
+        if (commitment.public_key.size() > kMaxAuthBytes ||
+            commitment.signature.size() > kMaxAuthBytes) {
+            error = "commitment authentication data too large";
+            out.close();
+            std::remove(temp_path.c_str());
+            return false;
+        }
+        writeUint64(out, commitment.public_key.size());
+        out.write(
+            reinterpret_cast<const char*>(commitment.public_key.data()),
+            commitment.public_key.size());
+        writeUint64(out, commitment.signature.size());
+        out.write(
+            reinterpret_cast<const char*>(commitment.signature.data()),
+            commitment.signature.size());
         if (!out) {
             error = "failed while writing commitment store";
             out.close();

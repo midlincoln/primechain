@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/crypto/signature.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/types.hpp"
 
@@ -214,6 +216,46 @@ std::string compositeRevealSubmission(
     return out.str();
 }
 
+std::optional<std::string> signedCompositeCommitSubmission(
+    const primechain::CompositeProof& proof,
+    std::uint64_t nonce,
+    const primechain::wallet::MinerIdentity& identity,
+    std::string& error) {
+    const auto commitment = primechain::crypto::developmentCompositeCommitment(
+        proof.m, proof.d, proof.e, nonce, identity.address);
+    const auto signature = primechain::crypto::ed25519Sign(
+        identity.private_key,
+        primechain::crypto::compositeCommitSigningPayload(
+            proof.m, commitment, identity.address),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    std::ostringstream out;
+    out << "SUBMIT_SIGNED_COMMIT " << proof.m << " "
+        << primechain::crypto::toHex(commitment) << " " << identity.address << " "
+        << primechain::wallet::bytesToHex(identity.public_key) << " "
+        << primechain::wallet::bytesToHex(*signature) << "\n";
+    return out.str();
+}
+
+std::optional<std::string> signedCompositeRevealSubmission(
+    const primechain::CompositeProof& proof,
+    std::uint64_t nonce,
+    const primechain::wallet::MinerIdentity& identity,
+    std::string& error) {
+    const auto signature = primechain::crypto::ed25519Sign(
+        identity.private_key,
+        primechain::crypto::compositeRevealSigningPayload(
+            proof.m, proof.d, proof.e, nonce, identity.address),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    std::ostringstream out;
+    out << "SUBMIT_SIGNED_REVEAL " << proof.m << " " << proof.d << " " << proof.e
+        << " " << nonce << " " << identity.address << " "
+        << primechain::wallet::bytesToHex(identity.public_key) << " "
+        << primechain::wallet::bytesToHex(*signature) << "\n";
+    return out.str();
+}
+
 bool accepted(const std::string& response) {
     return response.rfind("PRIME_ACCEPTED ", 0) == 0 ||
            response.rfind("COMPOSITE_ACCEPTED ", 0) == 0 ||
@@ -240,7 +282,22 @@ int main(int argc, char** argv) {
     const int port = argc > 2 ? std::stoi(argv[2]) : kDefaultPort;
     const primechain::PrimeValue limit = argc > 3 ? std::stoull(argv[3]) : kDefaultLimit;
     const std::string prime_miner = argc > 4 ? argv[4] : kDefaultPrimeMiner;
-    const std::string composite_miner = argc > 5 ? argv[5] : kDefaultCompositeMiner;
+    std::string composite_miner = argc > 5 ? argv[5] : kDefaultCompositeMiner;
+    std::optional<primechain::wallet::MinerIdentity> composite_identity;
+    if (argc > 5 && composite_miner == "--composite-identity") {
+        if (argc <= 6) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(argv[6], identity, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        composite_miner = identity.address;
+        composite_identity = std::move(identity);
+    }
 
     MapProofIndex proofs;
     std::size_t submitted = 0;
@@ -278,8 +335,21 @@ int main(int argc, char** argv) {
             }
             proofs.add(*proof);
             const std::uint64_t nonce = randomNonce();
-            commit_request = compositeCommitSubmission(*proof, nonce, composite_miner);
-            request = compositeRevealSubmission(*proof, nonce, composite_miner);
+            if (composite_identity.has_value()) {
+                std::string error;
+                commit_request = signedCompositeCommitSubmission(
+                    *proof, nonce, *composite_identity, error);
+                const auto signed_reveal = signedCompositeRevealSubmission(
+                    *proof, nonce, *composite_identity, error);
+                if (!commit_request.has_value() || !signed_reveal.has_value()) {
+                    std::cerr << "could not sign composite submission: " << error << "\n";
+                    return 1;
+                }
+                request = *signed_reveal;
+            } else {
+                commit_request = compositeCommitSubmission(*proof, nonce, composite_miner);
+                request = compositeRevealSubmission(*proof, nonce, composite_miner);
+            }
         }
 
         if (commit_request.has_value()) {

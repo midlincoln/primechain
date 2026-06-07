@@ -392,6 +392,41 @@ The `finalized_by` field is included in the record hash unless a later version e
 
 For validator voting, validators vote on the candidate record hash with `finalized_by` encoded as an empty vote list. The finalized record hash then commits to the actual vote set.
 
+## 9.1 Ed25519 Composite Contributor Authentication
+
+Authenticated composite mining uses key-derived addresses:
+
+```text
+address = pc1_ || first_20_bytes(Hash(public_key))
+```
+
+The current implementation uses Ed25519 keys and domain-separated canonical
+payloads:
+
+```text
+CommitSignaturePayload = Encode(
+    "primechain-composite-commit-signature-v1",
+    integer,
+    commitment_hash,
+    provider_address
+)
+
+RevealSignaturePayload = Encode(
+    "primechain-composite-reveal-signature-v1",
+    integer,
+    d,
+    e,
+    nonce,
+    provider_address
+)
+```
+
+A finalized `pc1_` composite proof stores the 32-byte public key, 8-byte nonce,
+and 64-byte Ed25519 reveal signature in its proof signature field. Replay must
+verify the address derivation and reveal signature before assigning contributor
+credit. Ed25519 is an interim classical scheme, not the planned post-quantum
+signature layer.
+
 ## 10. Commit-Reveal Candidate Messages
 
 Commit-reveal is not required for local benchmark mode, but the wire format target is:

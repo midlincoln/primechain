@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/crypto/signature.hpp"
 
 namespace primechain::protocol {
 
@@ -314,6 +315,10 @@ bool isDevelopmentAddress(const Address& address) {
     return std::all_of(address.begin(), address.end(), [](unsigned char ch) {
         return ch >= 0x21 && ch <= 0x7e;
     });
+}
+
+bool isProtocolAddress(const Address& address) {
+    return isDevelopmentAddress(address) || crypto::isEd25519Address(address);
 }
 
 Address developmentAddressFromPublicKey(const Bytes& public_key) {

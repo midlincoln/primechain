@@ -285,6 +285,52 @@ Submit a signed development transaction to a running TCP node:
 
 The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
+Create a cryptographic miner identity for signed composite mining:
+
+```bash
+./build/primechain-wallet new-miner ./wallets/composite-miner.wallet
+./build/primechain-wallet miner-address ./wallets/composite-miner.wallet
+```
+
+This creates an Ed25519 keypair and a key-derived `pc1_...` address. The private
+key remains in the local identity file. Generate and submit signed messages:
+
+```bash
+commit=$(./build/primechain-composite-commitment sign-commit \
+  ./wallets/composite-miner.wallet 4 2 2 44)
+reveal=$(./build/primechain-composite-commitment sign-reveal \
+  ./wallets/composite-miner.wallet 4 2 2 44)
+
+./build/primechain-sync-query 127.0.0.1 18889 $commit
+./build/primechain-sync-query 127.0.0.1 18889 $reveal
+```
+
+Wire formats:
+
+```text
+SUBMIT_SIGNED_COMMIT g commitment_hash provider_address public_key signature
+SUBMIT_SIGNED_REVEAL g d e nonce provider_address public_key signature
+```
+
+The node derives the address from the public key and verifies both Ed25519
+signatures before accepting the commitment or reveal. The public key, nonce,
+and reveal signature are retained in the finalized composite record, allowing
+independent verification during chain replay and synchronization. Signed
+commitments retain their authentication evidence in the persistent commitment
+sidecar and during peer propagation.
+
+The frontier miner can use the identity directly:
+
+```bash
+./build/primechain-frontier-miner 127.0.0.1 18889 100 \
+  pcdev1_prime_miner --composite-identity ./wallets/composite-miner.wallet
+```
+
+Ed25519 is a real classical signature scheme, but it is not post-quantum. This
+milestone establishes authenticated miner identity before the planned PQ
+replacement. The current commitment hash remains `devHash256`, and validator
+finalization remains the fixed development rule; neither is production-ready.
+
 Submit a composite proof using the development commit-reveal flow. First,
 the miner chooses a nonce and computes the canonical commitment locally:
 
@@ -612,7 +658,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Real contributor identity is a later protocol layer. The intended path is keypair generation, address derivation from public key, signed transaction submission, signed composite record submission, signed prime record submission, and node-side signature verification before rewards are assigned.
+Composite contributors may now use Ed25519 `pc1_` identities. Signed commitments and reveals are verified by nodes, propagated with their authentication evidence, persisted across restart, and retained in finalized composite records for replay verification. Prime submissions, transactions, validator votes, post-quantum signatures, and the legacy `pcdev1_` development paths still require further migration.
 
 Terminal 2:
 

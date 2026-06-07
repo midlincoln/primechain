@@ -3,6 +3,7 @@
 #include <map>
 #include <utility>
 
+#include "primechain/crypto/signature.hpp"
 #include "primechain/math/number_theory.hpp"
 
 namespace primechain::node {
@@ -57,6 +58,25 @@ CompositeProof toLegacyCompositeProof(const protocol::CompositeProofV0& proof) {
     return out;
 }
 
+bool validateCompositeProviderSignature(
+    const protocol::CompositeProofV0& proof,
+    std::string& error) {
+    if (protocol::isDevelopmentAddress(proof.provider_address)) {
+        return true;
+    }
+    if (!primechain::crypto::isEd25519Address(proof.provider_address)) {
+        error = "unsupported composite provider address";
+        return false;
+    }
+    return primechain::crypto::verifyPackedCompositeRevealProof(
+        proof.g,
+        proof.d,
+        proof.e,
+        proof.provider_address,
+        proof.signature,
+        error);
+}
+
 bool validateStoredCompositePayload(
     const storage::StoredRecord& stored,
     const Hash256& expected_previous_hash,
@@ -77,12 +97,16 @@ bool validateStoredCompositePayload(
         error = "composite payload proof integer mismatch";
         return false;
     }
-    if (!protocol::isDevelopmentAddress(decoded->proof.provider_address)) {
+    if (!protocol::isProtocolAddress(decoded->proof.provider_address)) {
         error = "invalid composite payload provider address";
         return false;
     }
     if (!math::verifyCompositeProof(toLegacyCompositeProof(decoded->proof))) {
         error = "invalid composite payload proof";
+        return false;
+    }
+    if (!validateCompositeProviderSignature(decoded->proof, error)) {
+        error = "invalid composite payload provider signature: " + error;
         return false;
     }
     if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
@@ -114,7 +138,7 @@ bool validateStoredPrimePayload(
         error = "prime payload proof integer mismatch";
         return false;
     }
-    if (!protocol::isDevelopmentAddress(decoded->proof.provider_address)) {
+    if (!protocol::isProtocolAddress(decoded->proof.provider_address)) {
         error = "invalid prime payload provider address";
         return false;
     }
@@ -232,12 +256,16 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         error = "composite proof integer mismatch";
         return false;
     }
-    if (!protocol::isDevelopmentAddress(record.proof.provider_address)) {
+    if (!protocol::isProtocolAddress(record.proof.provider_address)) {
         error = "invalid composite provider address";
         return false;
     }
     if (!math::verifyCompositeProof(toLegacyCompositeProof(record.proof))) {
         error = "invalid composite proof";
+        return false;
+    }
+    if (!validateCompositeProviderSignature(record.proof, error)) {
+        error = "invalid composite provider signature: " + error;
         return false;
     }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
@@ -282,7 +310,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         error = "prime proof integer mismatch";
         return false;
     }
-    if (!protocol::isDevelopmentAddress(record.proof.provider_address)) {
+    if (!protocol::isProtocolAddress(record.proof.provider_address)) {
         error = "invalid prime provider address";
         return false;
     }
@@ -381,7 +409,7 @@ bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0
             debits[input.prime] += *units;
         }
         for (const auto& output : tx.outputs) {
-            if (!protocol::isDevelopmentAddress(output.receiver_address)) {
+            if (!protocol::isProtocolAddress(output.receiver_address)) {
                 error = "invalid receiver address";
                 return false;
             }

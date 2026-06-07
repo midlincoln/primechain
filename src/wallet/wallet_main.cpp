@@ -7,6 +7,7 @@
 
 #include "primechain/crypto/hash.hpp"
 #include "primechain/node/sequential_node.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 #include "primechain/protocol/records.hpp"
 
 namespace {
@@ -143,6 +144,29 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::cout << wallet.address << "\n";
+        return 0;
+    }
+
+    if (command == "new-miner") {
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::createMinerIdentity(identity, error) ||
+            !primechain::wallet::saveMinerIdentity(argv[2], identity, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << identity.address << "\n";
+        return 0;
+    }
+
+    if (command == "miner-address") {
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << identity.address << "\n";
         return 0;
     }
 

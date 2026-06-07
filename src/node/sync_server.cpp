@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/crypto/signature.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
@@ -240,7 +241,9 @@ std::optional<std::string> readLine(int fd) {
 bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0 ||
            line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_PRIME ", 0) == 0 ||
@@ -593,6 +596,7 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord(
     record.proof.d = proof.d;
     record.proof.e = proof.e;
     record.proof.provider_address = composite_miner_address;
+    record.proof.signature = proof.signature;
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
@@ -746,16 +750,39 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
         std::istringstream in(*line);
         std::string entry_tag;
         std::string hash_hex;
+        std::string public_key_hex;
+        std::string signature_hex;
         primechain::storage::StoredCommitment commitment;
-        in >> entry_tag >> commitment.integer >> hash_hex >> commitment.provider_address;
+        in >> entry_tag >> commitment.integer >> hash_hex >> commitment.provider_address
+           >> public_key_hex >> signature_hex;
         const auto hash = parseHash(hash_hex);
         if (!in || entry_tag != "COMMITMENT" || commitment.integer != integer ||
-            !hash.has_value() ||
-            !primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+            !hash.has_value()) {
             error = "invalid peer commitment entry";
             return {};
         }
         commitment.commitment_hash = *hash;
+        if (public_key_hex != "-" || signature_hex != "-") {
+            commitment.public_key = hexToBytes(public_key_hex);
+            commitment.signature = hexToBytes(signature_hex);
+            std::string verification_error;
+            if (commitment.provider_address !=
+                    primechain::crypto::addressFromEd25519PublicKey(commitment.public_key) ||
+                !primechain::crypto::ed25519Verify(
+                    commitment.public_key,
+                    primechain::crypto::compositeCommitSigningPayload(
+                        commitment.integer,
+                        commitment.commitment_hash,
+                        commitment.provider_address),
+                    commitment.signature,
+                    verification_error)) {
+                error = "invalid signed peer commitment";
+                return {};
+            }
+        } else if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+            error = "invalid legacy peer commitment address";
+            return {};
+        }
         commitments.push_back(std::move(commitment));
         if (commitments.size() > expected_count) {
             error = "peer commitment count mismatch";
@@ -866,9 +893,7 @@ bool submitTransactionToPeer(
 
 bool submitCommitToPeer(
     const PeerEndpoint& peer,
-    primechain::PrimeValue g,
-    const primechain::Hash256& commitment,
-    const std::string& provider_address,
+    const primechain::storage::StoredCommitment& commitment,
     std::string& error) {
     auto socket = connectToServer(peer.host, peer.port);
     if (!socket.has_value()) {
@@ -877,9 +902,17 @@ bool submitCommitToPeer(
     }
 
     std::ostringstream command;
-    command << "SUBMIT_COMMIT " << g << " "
-            << primechain::crypto::toHex(commitment) << " "
-            << provider_address << "\n";
+    if (commitment.public_key.empty()) {
+        command << "SUBMIT_COMMIT " << commitment.integer << " "
+                << primechain::crypto::toHex(commitment.commitment_hash) << " "
+                << commitment.provider_address << "\n";
+    } else {
+        command << "SUBMIT_SIGNED_COMMIT " << commitment.integer << " "
+                << primechain::crypto::toHex(commitment.commitment_hash) << " "
+                << commitment.provider_address << " "
+                << bytesToHex(commitment.public_key) << " "
+                << bytesToHex(commitment.signature) << "\n";
+    }
     if (!writeAll(socket->fd(), command.str())) {
         error = "could not submit commitment to peer";
         return false;
@@ -994,6 +1027,10 @@ public:
                 submitTx(fd, *line);
                 continue;
             }
+            if (line->rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0) {
+                submitSignedCommit(fd, *line);
+                continue;
+            }
             if (line->rfind("SUBMIT_COMMIT ", 0) == 0) {
                 submitCommit(fd, *line);
                 continue;
@@ -1004,6 +1041,10 @@ public:
             }
             if (line->rfind("GET_COMMIT_WINNER ", 0) == 0) {
                 sendCommitWinner(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
+                submitSignedCompositeReveal(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0) {
@@ -1124,13 +1165,30 @@ public:
                 pruned = true;
                 continue;
             }
-            if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
-                error = "invalid provider address in commitment store";
-                return false;
+            if (commitment.public_key.empty()) {
+                if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+                    error = "invalid legacy provider address in commitment store";
+                    return false;
+                }
+            } else {
+                std::string verification_error;
+                if (commitment.provider_address !=
+                        primechain::crypto::addressFromEd25519PublicKey(commitment.public_key) ||
+                    !primechain::crypto::ed25519Verify(
+                        commitment.public_key,
+                        primechain::crypto::compositeCommitSigningPayload(
+                            commitment.integer,
+                            commitment.commitment_hash,
+                            commitment.provider_address),
+                        commitment.signature,
+                        verification_error)) {
+                    error = "invalid signed commitment in commitment store";
+                    return false;
+                }
             }
             const auto key = std::make_pair(commitment.integer, commitment.provider_address);
-            const auto inserted = commitments_.emplace(key, commitment.commitment_hash);
-            if (!inserted.second && inserted.first->second != commitment.commitment_hash) {
+            const auto inserted = commitments_.emplace(key, commitment);
+            if (!inserted.second && inserted.first->second.commitment_hash != commitment.commitment_hash) {
                 error = "conflicting provider commitments in commitment store";
                 return false;
             }
@@ -1197,11 +1255,7 @@ private:
         std::vector<primechain::storage::StoredCommitment> out;
         out.reserve(commitments_.size());
         for (const auto& entry : commitments_) {
-            primechain::storage::StoredCommitment commitment;
-            commitment.integer = entry.first.first;
-            commitment.provider_address = entry.first.second;
-            commitment.commitment_hash = entry.second;
-            out.push_back(std::move(commitment));
+            out.push_back(entry.second);
         }
         return out;
     }
@@ -1240,7 +1294,9 @@ private:
             const auto key = std::make_pair(commitment.integer, commitment.provider_address);
             const auto existing = commitments_.find(key);
             if (existing != commitments_.end()) {
-                if (existing->second != commitment.commitment_hash) {
+                if (existing->second.commitment_hash != commitment.commitment_hash ||
+                    existing->second.public_key != commitment.public_key ||
+                    existing->second.signature != commitment.signature) {
                     error = "peer supplied conflicting commitment for provider";
                     return false;
                 }
@@ -1250,7 +1306,7 @@ private:
                 error = "commitment pool full during peer sync";
                 return false;
             }
-            commitments_[key] = commitment.commitment_hash;
+            commitments_[key] = commitment;
             changed = true;
         }
         return !changed || persistCommitments(error);
@@ -1617,17 +1673,94 @@ private:
         writeAll(fd, "ERROR conflicting historical record\n");
     }
 
-    void propagateCommit(
-        primechain::PrimeValue g,
-        const primechain::Hash256& commitment,
-        const std::string& provider_address) const {
+    void propagateCommit(const primechain::storage::StoredCommitment& commitment) const {
         for (const auto& peer : peers_) {
             std::string error;
-            if (!submitCommitToPeer(peer, g, commitment, provider_address, error)) {
+            if (!submitCommitToPeer(peer, commitment, error)) {
                 std::cerr << "commitment propagation warning to " << peer.host << ":" << peer.port
                           << ": " << error << "\n";
             }
         }
+    }
+
+    void submitSignedCommit(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        std::string commitment_hex;
+        std::string provider_address;
+        std::string public_key_hex;
+        std::string signature_hex;
+        std::string extra;
+        in >> command >> g >> commitment_hex >> provider_address >> public_key_hex >> signature_hex;
+        const auto commitment_hash = parseHash(commitment_hex);
+        const auto public_key = hexToBytes(public_key_hex);
+        const auto signature = hexToBytes(signature_hex);
+        if (!in || command != "SUBMIT_SIGNED_COMMIT" || !commitment_hash.has_value() ||
+            public_key.size() != 32 || signature.size() != 64 || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_SIGNED_COMMIT\n");
+            return;
+        }
+        if (provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+            writeAll(fd, "ERROR signed commitment address does not match public key\n");
+            return;
+        }
+        std::string error;
+        if (!primechain::crypto::ed25519Verify(
+                public_key,
+                primechain::crypto::compositeCommitSigningPayload(
+                    g, *commitment_hash, provider_address),
+                signature,
+                error)) {
+            writeAll(fd, "ERROR invalid signed commitment signature\n");
+            return;
+        }
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const primechain::PrimeValue frontier =
+            node.status().has_genesis ? node.status().frontier_integer : 2;
+        if (g != frontier + 1) {
+            writeAll(fd, "ERROR SUBMIT_SIGNED_COMMIT must target next integer "
+                + std::to_string(frontier + 1) + "\n");
+            return;
+        }
+        const auto key = std::make_pair(g, provider_address);
+        const auto existing = commitments_.find(key);
+        if (existing != commitments_.end()) {
+            if (existing->second.commitment_hash == *commitment_hash &&
+                existing->second.public_key == public_key &&
+                existing->second.signature == signature) {
+                writeAll(fd, "COMMIT_DUPLICATE " + std::to_string(g) + " " + commitment_hex + "\n");
+            } else {
+                writeAll(fd, "ERROR provider already committed a different hash for integer "
+                    + std::to_string(g) + "\n");
+            }
+            return;
+        }
+        if (commitments_.size() >= kMaxCompositeCommitments) {
+            writeAll(fd, "ERROR commitment pool full; max="
+                + std::to_string(kMaxCompositeCommitments) + "\n");
+            return;
+        }
+
+        primechain::storage::StoredCommitment stored;
+        stored.integer = g;
+        stored.provider_address = provider_address;
+        stored.commitment_hash = *commitment_hash;
+        stored.public_key = public_key;
+        stored.signature = signature;
+        commitments_[key] = stored;
+        if (!persistCommitments(error)) {
+            commitments_.erase(key);
+            writeAll(fd, "ERROR could not persist commitment: " + error + "\n");
+            return;
+        }
+        propagateCommit(stored);
+        writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
     }
 
     void submitCommit(int fd, const std::string& line) {
@@ -1673,7 +1806,7 @@ private:
         const auto key = std::make_pair(g, provider_address);
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
-            if (existing->second == *commitment) {
+            if (existing->second.commitment_hash == *commitment) {
                 writeAll(fd, "COMMIT_DUPLICATE " + std::to_string(g) + " " + commitment_hex + "\n");
             } else {
                 writeAll(fd, "ERROR provider already committed a different hash for integer "
@@ -1687,14 +1820,18 @@ private:
             return;
         }
 
-        commitments_[key] = *commitment;
+        primechain::storage::StoredCommitment stored_commitment;
+        stored_commitment.integer = g;
+        stored_commitment.provider_address = provider_address;
+        stored_commitment.commitment_hash = *commitment;
+        commitments_[key] = stored_commitment;
         error.clear();
         if (!persistCommitments(error)) {
             commitments_.erase(key);
             writeAll(fd, "ERROR could not persist commitment: " + error + "\n");
             return;
         }
-        propagateCommit(g, *commitment, provider_address);
+        propagateCommit(stored_commitment);
         writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
     }
 
@@ -1720,23 +1857,28 @@ private:
             if (entry.first.first != integer) {
                 continue;
             }
+            const auto& commitment = entry.second;
             writeAll(fd, "COMMITMENT " + std::to_string(integer) + " "
-                + primechain::crypto::toHex(entry.second) + " " + entry.first.second + "\n");
+                + primechain::crypto::toHex(commitment.commitment_hash) + " "
+                + commitment.provider_address + " "
+                + (commitment.public_key.empty() ? "-" : bytesToHex(commitment.public_key)) + " "
+                + (commitment.signature.empty() ? "-" : bytesToHex(commitment.signature)) + "\n");
         }
         writeAll(fd, "END_COMMITMENTS\n");
     }
 
-    std::optional<std::pair<std::string, primechain::Hash256>> selectedCommitment(
+    std::optional<primechain::storage::StoredCommitment> selectedCommitment(
         primechain::PrimeValue g) const {
-        std::optional<std::pair<std::string, primechain::Hash256>> selected;
+        std::optional<primechain::storage::StoredCommitment> selected;
         for (const auto& entry : commitments_) {
             if (entry.first.first != g) {
                 continue;
             }
-            const auto candidate = std::make_pair(entry.first.second, entry.second);
+            const auto& candidate = entry.second;
             if (!selected.has_value() ||
-                candidate.second < selected->second ||
-                (candidate.second == selected->second && candidate.first < selected->first)) {
+                candidate.commitment_hash < selected->commitment_hash ||
+                (candidate.commitment_hash == selected->commitment_hash &&
+                 candidate.provider_address < selected->provider_address)) {
                 selected = candidate;
             }
         }
@@ -1760,7 +1902,75 @@ private:
             return;
         }
         writeAll(fd, "COMMIT_WINNER " + std::to_string(g) + " "
-            + primechain::crypto::toHex(selected->second) + " " + selected->first + "\n");
+            + primechain::crypto::toHex(selected->commitment_hash) + " "
+            + selected->provider_address + "\n");
+    }
+
+    void submitSignedCompositeReveal(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        primechain::PrimeValue d = 0;
+        primechain::PrimeValue e = 0;
+        std::uint64_t nonce = 0;
+        std::string provider_address;
+        std::string public_key_hex;
+        std::string signature_hex;
+        std::string extra;
+        in >> command >> g >> d >> e >> nonce >> provider_address >> public_key_hex >> signature_hex;
+        const auto public_key = hexToBytes(public_key_hex);
+        const auto signature = hexToBytes(signature_hex);
+        if (!in || command != "SUBMIT_SIGNED_REVEAL" ||
+            public_key.size() != 32 || signature.size() != 64 || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_SIGNED_REVEAL\n");
+            return;
+        }
+        if (provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+            writeAll(fd, "ERROR signed reveal address does not match public key\n");
+            return;
+        }
+        std::string error;
+        if (!primechain::crypto::ed25519Verify(
+                public_key,
+                primechain::crypto::compositeRevealSigningPayload(
+                    g, d, e, nonce, provider_address),
+                signature,
+                error)) {
+            writeAll(fd, "ERROR invalid signed reveal signature\n");
+            return;
+        }
+
+        const auto key = std::make_pair(g, provider_address);
+        const auto existing = commitments_.find(key);
+        if (existing == commitments_.end()) {
+            writeAll(fd, "ERROR no prior commitment for reveal\n");
+            return;
+        }
+        if (existing->second.public_key != public_key) {
+            writeAll(fd, "ERROR signed reveal key differs from commitment key\n");
+            return;
+        }
+        const auto revealed = primechain::crypto::developmentCompositeCommitment(
+            g, d, e, nonce, provider_address);
+        if (revealed != existing->second.commitment_hash) {
+            writeAll(fd, "ERROR reveal does not match prior commitment\n");
+            return;
+        }
+        const auto selected = selectedCommitment(g);
+        if (!selected.has_value() ||
+            selected->provider_address != provider_address ||
+            selected->commitment_hash != existing->second.commitment_hash) {
+            writeAll(fd, "ERROR commitment not selected for reveal; winner="
+                + (selected.has_value() ? selected->provider_address : std::string("none")) + "\n");
+            return;
+        }
+
+        const auto packed_proof = primechain::crypto::packCompositeRevealProof(
+            public_key, nonce, signature);
+        std::ostringstream submission;
+        submission << "SUBMIT_COMPOSITE " << g << " " << d << " " << e << " "
+                   << provider_address << " " << bytesToHex(packed_proof);
+        submitComposite(fd, submission.str());
     }
 
     void submitCompositeReveal(int fd, const std::string& line) {
@@ -1789,17 +1999,17 @@ private:
         }
         const auto revealed = primechain::crypto::developmentCompositeCommitment(
             g, d, e, nonce, provider_address);
-        if (revealed != existing->second) {
+        if (revealed != existing->second.commitment_hash) {
             writeAll(fd, "ERROR reveal does not match prior commitment\n");
             return;
         }
 
         const auto selected = selectedCommitment(g);
         if (!selected.has_value() ||
-            selected->first != provider_address ||
-            selected->second != existing->second) {
+            selected->provider_address != provider_address ||
+            selected->commitment_hash != existing->second.commitment_hash) {
             writeAll(fd, "ERROR commitment not selected for reveal; winner="
-                + (selected.has_value() ? selected->first : std::string("none")) + "\n");
+                + (selected.has_value() ? selected->provider_address : std::string("none")) + "\n");
             return;
         }
 
@@ -1816,12 +2026,22 @@ private:
         primechain::PrimeValue d = 0;
         primechain::PrimeValue e = 0;
         std::string provider_address;
+        std::string proof_signature_hex;
         in >> command >> g >> d >> e >> provider_address;
         if (!in ||
             command != "SUBMIT_COMPOSITE" ||
-            !primechain::protocol::isDevelopmentAddress(provider_address)) {
-            writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE; expected SUBMIT_COMPOSITE g d e provider_address\n");
+            !primechain::protocol::isProtocolAddress(provider_address)) {
+            writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE; expected SUBMIT_COMPOSITE g d e provider_address [proof_signature]\n");
             return;
+        }
+        std::string extra;
+        if (in >> proof_signature_hex) {
+            if (in >> extra) {
+                writeAll(fd, "ERROR invalid SUBMIT_COMPOSITE trailing data\n");
+                return;
+            }
+        } else {
+            in.clear();
         }
 
         primechain::CompositeProof proof;
@@ -1829,6 +2049,9 @@ private:
         proof.d = d;
         proof.e = e;
         proof.provider_address = provider_address;
+        if (!proof_signature_hex.empty()) {
+            proof.signature = hexToBytes(proof_signature_hex);
+        }
         if (!primechain::math::verifyCompositeProof(proof)) {
             writeAll(fd, "ERROR invalid composite proof\n");
             return;
@@ -2237,7 +2460,7 @@ private:
         std::string command;
         std::string address;
         in >> command >> address;
-        if (!in || !primechain::protocol::isDevelopmentAddress(address)) {
+        if (!in || !primechain::protocol::isProtocolAddress(address)) {
             writeAll(fd, "ERROR invalid GET_BALANCE\n");
             return;
         }
@@ -2267,7 +2490,9 @@ private:
     primechain::storage::RecordStore store_;
     primechain::storage::CommitmentStore commitment_store_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
-    std::map<std::pair<primechain::PrimeValue, std::string>, primechain::Hash256> commitments_;
+    std::map<
+        std::pair<primechain::PrimeValue, std::string>,
+        primechain::storage::StoredCommitment> commitments_;
 };
 
 struct Options {

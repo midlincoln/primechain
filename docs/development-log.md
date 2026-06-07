@@ -300,3 +300,17 @@ cleanup.
 These records remain candidate state rather than finalized blockchain history.
 Signatures and a quorum-defined commit/reveal phase are still required for a
 production fairness claim.
+
+## 2026-06-07: Signed Composite Miner Identities
+
+Added Ed25519 `pc1_` miner identities, signed commitment and reveal commands,
+and frontier-miner support through `--composite-identity`. Nodes verify address
+derivation and signatures before accepting messages. Commitment persistence
+and peer synchronization retain the public key and commit signature. Finalized
+composite records retain the public key, nonce, and reveal signature, which are
+verified again during blockchain replay before contributor rewards are applied.
+
+Tests cover identity creation, valid signed flow, forged signatures, restart,
+peer synchronization, signed frontier mining, and reward replay. Ed25519 is
+classical rather than post-quantum; `devHash256`, prime authentication,
+transaction signatures, and validator finalization remain future migrations.

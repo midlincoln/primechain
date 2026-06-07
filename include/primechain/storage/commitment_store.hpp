@@ -11,6 +11,8 @@ struct StoredCommitment {
     PrimeValue integer{0};
     Address provider_address;
     Hash256 commitment_hash{};
+    std::vector<std::uint8_t> public_key;
+    std::vector<std::uint8_t> signature;
 };
 
 class CommitmentStore {

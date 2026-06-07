@@ -106,6 +106,7 @@ struct PrimeRecordV0 {
 };
 
 bool isDevelopmentAddress(const Address& address);
+bool isProtocolAddress(const Address& address);
 Address developmentAddressFromPublicKey(const Bytes& public_key);
 
 std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool include_signature);
