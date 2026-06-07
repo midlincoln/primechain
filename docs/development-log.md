@@ -335,3 +335,22 @@ This remains controlled-testnet machinery. Validator membership is manual,
 `devHash256` still hashes snapshots, and the quorum certificate is sidecar state
 rather than part of the permanent arithmetic record. Embedding and replaying the
 certificate from chain history is the next consensus-format step.
+
+## 2026-06-07: Embedded Commit-Phase Certificates
+
+Quorum-mode composite records now use version 1 and permanently embed the
+canonical signed commitment snapshot, the three-address validator set, and the
+2-of-3 signed phase votes. Replay and peer ingestion independently verify miner
+commit signatures, the snapshot hash, validator membership within the embedded
+set, validator signatures, deterministic winner selection, and the winning
+signed reveal.
+
+The three-node integration test now stops all validators, removes the temporary
+`.commitments` and `.phases` sidecars, and restarts a node from the arithmetic
+record store alone. Unit tests reject altered snapshots, validator signatures,
+and reveal signatures.
+
+This removes sidecar dependence from finalized history. It does not yet solve
+validator-set authorization: the controlled testnet still configures three
+validators manually, and production consensus must anchor membership in genesis
+or signed validator-epoch transitions.

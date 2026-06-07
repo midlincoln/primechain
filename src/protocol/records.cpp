@@ -180,6 +180,38 @@ void appendFinalizationProof(
     }
 }
 
+void appendCommitCertificateEntry(
+    std::vector<std::uint8_t>& out,
+    const CommitCertificateEntryV1& entry) {
+    appendHash(out, entry.commitment_hash);
+    appendAddress(out, entry.provider_address);
+    appendBytes(out, entry.public_key);
+    appendBytes(out, entry.signature);
+}
+
+void appendCommitCertificateVote(
+    std::vector<std::uint8_t>& out,
+    const CommitCertificateVoteV1& vote) {
+    appendAddress(out, vote.validator_address);
+    appendBytes(out, vote.public_key);
+    appendBytes(out, vote.signature);
+}
+
+void appendCommitPhaseCertificate(
+    std::vector<std::uint8_t>& out,
+    const CommitPhaseCertificateV1& certificate) {
+    appendUint64(out, certificate.integer);
+    appendHash(out, certificate.snapshot_hash);
+    appendUint64(out, certificate.validator_set.size());
+    for (const auto& validator : certificate.validator_set) appendAddress(out, validator);
+    appendUint64(out, certificate.commitments.size());
+    for (const auto& commitment : certificate.commitments) {
+        appendCommitCertificateEntry(out, commitment);
+    }
+    appendUint64(out, certificate.votes.size());
+    for (const auto& vote : certificate.votes) appendCommitCertificateVote(out, vote);
+}
+
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
@@ -251,6 +283,39 @@ bool readValidatorVote(ByteReader& reader, ValidatorVoteV0& vote) {
            reader.readBytes(vote.signature);
 }
 
+bool readCommitPhaseCertificate(ByteReader& reader, CommitPhaseCertificateV1& certificate) {
+    std::uint64_t validator_count = 0;
+    std::uint64_t commitment_count = 0;
+    std::uint64_t vote_count = 0;
+    if (!reader.readUint64(certificate.integer) ||
+        !reader.readHash(certificate.snapshot_hash) ||
+        !reader.readUint64(validator_count) || validator_count > 16) return false;
+    certificate.validator_set.clear();
+    for (std::uint64_t i = 0; i < validator_count; ++i) {
+        Address validator;
+        if (!reader.readString(validator)) return false;
+        certificate.validator_set.push_back(std::move(validator));
+    }
+    if (!reader.readUint64(commitment_count) || commitment_count > 1024) return false;
+    certificate.commitments.clear();
+    for (std::uint64_t i = 0; i < commitment_count; ++i) {
+        CommitCertificateEntryV1 entry;
+        if (!reader.readHash(entry.commitment_hash) ||
+            !reader.readString(entry.provider_address) ||
+            !reader.readBytes(entry.public_key) || !reader.readBytes(entry.signature)) return false;
+        certificate.commitments.push_back(std::move(entry));
+    }
+    if (!reader.readUint64(vote_count) || vote_count > 16) return false;
+    certificate.votes.clear();
+    for (std::uint64_t i = 0; i < vote_count; ++i) {
+        CommitCertificateVoteV1 vote;
+        if (!reader.readString(vote.validator_address) ||
+            !reader.readBytes(vote.public_key) || !reader.readBytes(vote.signature)) return false;
+        certificate.votes.push_back(std::move(vote));
+    }
+    return true;
+}
+
 bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     std::uint64_t vote_count = 0;
     if (!reader.readString(proof.rule) || !reader.readUint64(vote_count)) {
@@ -281,6 +346,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
+    if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -422,6 +488,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !readTransactionBatch(reader, record.tx_batch) ||
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
+        (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
@@ -501,6 +568,132 @@ Hash256 finalizedRecordHash(const CompositeRecordV0& record) {
 
 Hash256 finalizedRecordHash(const PrimeRecordV0& record) {
     return crypto::devHash256(serializePrimeRecord(record));
+}
+
+Hash256 commitPhaseSnapshotHash(
+    PrimeValue integer,
+    const std::vector<CommitCertificateEntryV1>& commitments) {
+    Bytes payload;
+    appendString(payload, "primechain-commit-snapshot-v1");
+    appendUint64(payload, integer);
+    appendUint64(payload, commitments.size());
+    for (const auto& commitment : commitments) {
+        appendCommitCertificateEntry(payload, commitment);
+    }
+    return crypto::devHash256(payload);
+}
+
+bool verifyCommitPhaseCertificate(
+    const CompositeRecordV0& record,
+    std::string& error) {
+    if (record.version == 0) return true;
+    if (record.version != 1) {
+        error = "unsupported composite record version";
+        return false;
+    }
+    const auto& certificate = record.commit_phase;
+    if (certificate.integer != record.integer) {
+        error = "commit-phase certificate integer mismatch";
+        return false;
+    }
+    if (certificate.validator_set.size() != 3) {
+        error = "commit-phase certificate requires three validators";
+        return false;
+    }
+    if (!std::is_sorted(certificate.validator_set.begin(), certificate.validator_set.end()) ||
+        std::adjacent_find(certificate.validator_set.begin(), certificate.validator_set.end()) !=
+            certificate.validator_set.end()) {
+        error = "commit-phase validator set is not canonical";
+        return false;
+    }
+    for (const auto& validator : certificate.validator_set) {
+        if (!crypto::isEd25519Address(validator)) {
+            error = "invalid commit-phase validator address";
+            return false;
+        }
+    }
+    if (certificate.commitments.empty() || certificate.commitments.size() > 1024) {
+        error = "invalid embedded commitment count";
+        return false;
+    }
+    for (std::size_t i = 0; i < certificate.commitments.size(); ++i) {
+        const auto& commitment = certificate.commitments[i];
+        if (i != 0) {
+            const auto& previous = certificate.commitments[i - 1];
+            if (previous.commitment_hash > commitment.commitment_hash ||
+                (previous.commitment_hash == commitment.commitment_hash &&
+                 previous.provider_address >= commitment.provider_address)) {
+                error = "embedded commitments are not canonical";
+                return false;
+            }
+        }
+        if (commitment.provider_address !=
+            crypto::addressFromEd25519PublicKey(commitment.public_key)) {
+            error = "embedded commitment address mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::ed25519Verify(
+                commitment.public_key,
+                crypto::compositeCommitSigningPayload(
+                    record.integer, commitment.commitment_hash,
+                    commitment.provider_address),
+                commitment.signature,
+                signature_error)) {
+            error = "invalid embedded commitment signature";
+            return false;
+        }
+    }
+    if (certificate.snapshot_hash !=
+        commitPhaseSnapshotHash(record.integer, certificate.commitments)) {
+        error = "commit-phase snapshot hash mismatch";
+        return false;
+    }
+    if (certificate.votes.size() < 2 || certificate.votes.size() > 3) {
+        error = "commit-phase certificate requires two or three votes";
+        return false;
+    }
+    Address previous_vote;
+    for (const auto& vote : certificate.votes) {
+        if (!previous_vote.empty() && previous_vote >= vote.validator_address) {
+            error = "commit-phase votes are not canonical";
+            return false;
+        }
+        previous_vote = vote.validator_address;
+        if (!std::binary_search(
+                certificate.validator_set.begin(), certificate.validator_set.end(),
+                vote.validator_address)) {
+            error = "commit-phase vote is outside validator set";
+            return false;
+        }
+        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            error = "commit-phase vote address mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::ed25519Verify(
+                vote.public_key,
+                crypto::commitPhaseVoteSigningPayload(
+                    record.integer, certificate.snapshot_hash,
+                    vote.validator_address),
+                vote.signature,
+                signature_error)) {
+            error = "invalid embedded commit-phase vote signature";
+            return false;
+        }
+    }
+    const auto& winner = certificate.commitments.front();
+    if (winner.provider_address != record.proof.provider_address) {
+        error = "composite provider is not embedded commitment winner";
+        return false;
+    }
+    if (!crypto::packedCompositeRevealMatchesCommitment(
+            record.integer, record.proof.d, record.proof.e,
+            record.proof.provider_address, record.proof.signature,
+            winner.commitment_hash, error)) {
+        return false;
+    }
+    return true;
 }
 
 Bytes developmentVoteSignature(const Address& validator_address, const Hash256& record_hash, std::uint64_t round) {

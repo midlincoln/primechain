@@ -507,10 +507,24 @@ peer-submitted current composite record must contain a valid signed reveal that
 reconstructs the selected commitment hash.
 
 Votes are stored in `<record-store>.phases` and exchanged using
-`GET_PHASE_VOTES`. This v0 certificate is operational sidecar state and is not
-yet embedded in the finalized record. Therefore historical replay verifies the
-miner reveal signature and arithmetic record, but does not yet independently
-reconstruct the commit-phase quorum. That permanent certificate is an open item.
+`GET_PHASE_VOTES` while an integer is unresolved. A finalized quorum-mode
+composite uses record version 1 and embeds:
+
+- the integer and snapshot hash,
+- the canonical three-address validator set,
+- the complete canonical signed commitment list,
+- two or three signed validator votes.
+
+The candidate record hash commits to this certificate. Historical replay checks
+all miner and validator signatures, recomputes the snapshot, selects the lowest
+`(commitment_hash, provider_address)` entry, and binds the reveal to that winner.
+The `.commitments` and `.phases` files are therefore temporary coordination
+state, not required blockchain history.
+
+The certificate does not yet authorize its own validator set. During live quorum
+operation a node requires the embedded set to match local fixed configuration,
+but a production chain must anchor validator membership in genesis or signed
+epoch-transition records.
 
 ## 11. Bitcoin Mirror Payload
 

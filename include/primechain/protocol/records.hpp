@@ -76,6 +76,27 @@ struct ValidatorVoteV0 {
     Bytes signature;
 };
 
+struct CommitCertificateEntryV1 {
+    Hash256 commitment_hash{};
+    Address provider_address;
+    Bytes public_key;
+    Bytes signature;
+};
+
+struct CommitCertificateVoteV1 {
+    Address validator_address;
+    Bytes public_key;
+    Bytes signature;
+};
+
+struct CommitPhaseCertificateV1 {
+    PrimeValue integer{0};
+    Hash256 snapshot_hash{};
+    std::vector<Address> validator_set;
+    std::vector<CommitCertificateEntryV1> commitments;
+    std::vector<CommitCertificateVoteV1> votes;
+};
+
 struct FinalizationProofV0 {
     std::string rule{"fixed-2-of-3-dev"};
     std::vector<ValidatorVoteV0> votes;
@@ -90,6 +111,7 @@ struct CompositeRecordV0 {
     TransactionBatchV0 tx_batch;
     std::vector<TransactionV0> transactions;
     Hash256 state_root{};
+    CommitPhaseCertificateV1 commit_phase;
     FinalizationProofV0 finalized_by;
 };
 
@@ -132,5 +154,10 @@ bool verifyDevelopmentTransactionSignature(const TransactionV0& tx);
 void applyDevelopmentFinalization(CompositeRecordV0& record);
 void applyDevelopmentFinalization(PrimeRecordV0& record);
 bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error);
+Hash256 commitPhaseSnapshotHash(
+    PrimeValue integer,
+    const std::vector<CommitCertificateEntryV1>& commitments);
+bool verifyCommitPhaseCertificate(
+    const CompositeRecordV0& record, std::string& error);
 
 } // namespace primechain::protocol

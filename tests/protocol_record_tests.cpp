@@ -1,7 +1,11 @@
+#include <algorithm>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/crypto/signature.hpp"
 #include "primechain/protocol/records.hpp"
 
 namespace {
@@ -41,6 +45,89 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord() {
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
+
+std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRecord(
+    std::string& error) {
+    using namespace primechain;
+
+    const auto miner = crypto::generateEd25519KeyPair(error);
+    if (!miner.has_value()) {
+        return std::nullopt;
+    }
+    const Address miner_address = crypto::addressFromEd25519PublicKey(miner->public_key);
+    constexpr PrimeValue integer = 4;
+    constexpr PrimeValue divisor = 2;
+    constexpr std::uint64_t nonce = 77;
+    const Hash256 commitment_hash = crypto::developmentCompositeCommitment(
+        integer, divisor, divisor, nonce, miner_address);
+    const auto commitment_signature = crypto::ed25519Sign(
+        miner->private_key,
+        crypto::compositeCommitSigningPayload(integer, commitment_hash, miner_address),
+        error);
+    if (!commitment_signature.has_value()) {
+        return std::nullopt;
+    }
+    const auto reveal_signature = crypto::ed25519Sign(
+        miner->private_key,
+        crypto::compositeRevealSigningPayload(
+            integer, divisor, divisor, nonce, miner_address),
+        error);
+    if (!reveal_signature.has_value()) {
+        return std::nullopt;
+    }
+
+    struct ValidatorIdentity {
+        Address address;
+        crypto::Ed25519KeyPair keys;
+    };
+    std::vector<ValidatorIdentity> validators;
+    for (int i = 0; i < 3; ++i) {
+        const auto keys = crypto::generateEd25519KeyPair(error);
+        if (!keys.has_value()) {
+            return std::nullopt;
+        }
+        validators.push_back({
+            crypto::addressFromEd25519PublicKey(keys->public_key), *keys});
+    }
+    std::sort(validators.begin(), validators.end(),
+        [](const ValidatorIdentity& left, const ValidatorIdentity& right) {
+            return left.address < right.address;
+        });
+
+    protocol::CompositeRecordV0 record;
+    record.version = 1;
+    record.height = 2;
+    record.integer = integer;
+    record.proof.g = integer;
+    record.proof.d = divisor;
+    record.proof.e = divisor;
+    record.proof.provider_address = miner_address;
+    record.proof.signature = crypto::packCompositeRevealProof(
+        miner->public_key, nonce, *reveal_signature);
+    record.commit_phase.integer = integer;
+    for (const auto& validator : validators) {
+        record.commit_phase.validator_set.push_back(validator.address);
+    }
+    record.commit_phase.commitments.push_back({
+        commitment_hash, miner_address, miner->public_key, *commitment_signature});
+    record.commit_phase.snapshot_hash = protocol::commitPhaseSnapshotHash(
+        integer, record.commit_phase.commitments);
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto signature = crypto::ed25519Sign(
+            validators[i].keys.private_key,
+            crypto::commitPhaseVoteSigningPayload(
+                integer, record.commit_phase.snapshot_hash, validators[i].address),
+            error);
+        if (!signature.has_value()) {
+            return std::nullopt;
+        }
+        record.commit_phase.votes.push_back({
+            validators[i].address, validators[i].keys.public_key, *signature});
+    }
+    protocol::applyDevelopmentFinalization(record);
+    return record;
+}
+
 
 } // namespace
 
@@ -110,6 +197,52 @@ int main() {
     }
 
     auto composite_changed = composite;
+    std::string certificate_error;
+    const auto certified = makeCertifiedCompositeRecord(certificate_error);
+    if (!expect(certified.has_value(), "construct embedded commit-phase certificate")) {
+        std::cerr << certificate_error << "\n";
+        return 1;
+    }
+    if (!expect(verifyCommitPhaseCertificate(*certified, certificate_error),
+                "verify embedded commit-phase certificate")) {
+        std::cerr << certificate_error << "\n";
+        return 1;
+    }
+    decode_error.clear();
+    const auto decoded_certified = deserializeCompositeRecord(
+        serializeCompositeRecord(*certified), decode_error);
+    if (!expect(decoded_certified.has_value(), "embedded certificate round trip")) {
+        std::cerr << decode_error << "\n";
+        return 1;
+    }
+    certificate_error.clear();
+    if (!expect(verifyCommitPhaseCertificate(*decoded_certified, certificate_error),
+                "verify round-tripped embedded certificate")) {
+        std::cerr << certificate_error << "\n";
+        return 1;
+    }
+    auto bad_snapshot = *certified;
+    bad_snapshot.commit_phase.snapshot_hash[0] ^= 0x01;
+    certificate_error.clear();
+    if (!expect(!verifyCommitPhaseCertificate(bad_snapshot, certificate_error),
+                "reject altered commit-phase snapshot")) {
+        return 1;
+    }
+    auto bad_vote = *certified;
+    bad_vote.commit_phase.votes[0].signature[0] ^= 0x01;
+    certificate_error.clear();
+    if (!expect(!verifyCommitPhaseCertificate(bad_vote, certificate_error),
+                "reject altered validator signature")) {
+        return 1;
+    }
+    auto bad_reveal = *certified;
+    bad_reveal.proof.signature[40] ^= 0x01;
+    certificate_error.clear();
+    if (!expect(!verifyCommitPhaseCertificate(bad_reveal, certificate_error),
+                "reject reveal not authorized by winning commitment")) {
+        return 1;
+    }
+
     composite_changed.tx_batch.transaction_count = 11;
     if (!expect(composite_hash_a != candidateRecordHash(composite_changed), "composite hash changes when tx count changes")) {
         return 1;

@@ -112,6 +112,9 @@ bool validateStoredCompositePayload(
     if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
         return false;
     }
+    if (!protocol::verifyCommitPhaseCertificate(*decoded, error)) {
+        return false;
+    }
     if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
         return false;
     }
@@ -269,6 +272,9 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         return false;
     }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
+        return false;
+    }
+    if (!protocol::verifyCommitPhaseCertificate(record, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {

@@ -1707,30 +1707,18 @@ private:
             submitted.kind != primechain::storage::StoredRecordKind::Composite) {
             return true;
         }
-        if (!phaseClosed(submitted.integer)) {
-            error = "composite record commit phase is not closed by validator quorum";
-            return false;
-        }
-        const auto selected = selectedCommitment(submitted.integer);
-        if (!selected.has_value()) {
-            error = "composite record has no selected commitment";
-            return false;
-        }
         const auto record = primechain::protocol::deserializeCompositeRecord(
             submitted.payload, error);
         if (!record.has_value()) return false;
-        if (record->proof.provider_address != selected->provider_address) {
-            error = "composite record provider is not the selected commitment winner";
+        if (record->version != 1) {
+            error = "quorum mode requires composite record version 1";
             return false;
         }
-        return primechain::crypto::packedCompositeRevealMatchesCommitment(
-            record->integer,
-            record->proof.d,
-            record->proof.e,
-            record->proof.provider_address,
-            record->proof.signature,
-            selected->commitment_hash,
-            error);
+        if (record->commit_phase.validator_set != validator_set_) {
+            error = "embedded validator set differs from configured validator set";
+            return false;
+        }
+        return primechain::protocol::verifyCommitPhaseCertificate(*record, error);
     }
 
     void submitRecord(int fd, const std::string& line) {
@@ -1863,20 +1851,54 @@ private:
         return phase_store_.replaceAll(phaseVoteSnapshot(), error);
     }
 
-    primechain::Hash256 commitmentSnapshotHash(primechain::PrimeValue integer) const {
-        std::ostringstream canonical;
-        canonical << "primechain-commit-snapshot-v1\n" << integer << "\n";
-        for (const auto& entry : commitments_) {
-            if (entry.first.first != integer) continue;
-            const auto& commitment = entry.second;
-            canonical << primechain::crypto::toHex(commitment.commitment_hash) << " "
-                      << commitment.provider_address << " "
-                      << bytesToHex(commitment.public_key) << " "
-                      << bytesToHex(commitment.signature) << "\n";
+    std::vector<primechain::protocol::CommitCertificateEntryV1> certificateCommitments(
+        primechain::PrimeValue integer) const {
+        std::vector<primechain::protocol::CommitCertificateEntryV1> entries;
+        for (const auto& item : commitments_) {
+            if (item.first.first != integer) continue;
+            primechain::protocol::CommitCertificateEntryV1 entry;
+            entry.commitment_hash = item.second.commitment_hash;
+            entry.provider_address = item.second.provider_address;
+            entry.public_key = item.second.public_key;
+            entry.signature = item.second.signature;
+            entries.push_back(std::move(entry));
         }
-        const std::string text = canonical.str();
-        return primechain::crypto::devHash256(
-            std::vector<std::uint8_t>(text.begin(), text.end()));
+        std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+            if (left.commitment_hash != right.commitment_hash) {
+                return left.commitment_hash < right.commitment_hash;
+            }
+            return left.provider_address < right.provider_address;
+        });
+        return entries;
+    }
+
+    primechain::Hash256 commitmentSnapshotHash(primechain::PrimeValue integer) const {
+        return primechain::protocol::commitPhaseSnapshotHash(
+            integer, certificateCommitments(integer));
+    }
+
+    primechain::protocol::CommitPhaseCertificateV1 embeddedCommitPhaseCertificate(
+        primechain::PrimeValue integer) const {
+        primechain::protocol::CommitPhaseCertificateV1 certificate;
+        certificate.integer = integer;
+        certificate.validator_set = validator_set_;
+        std::sort(certificate.validator_set.begin(), certificate.validator_set.end());
+        certificate.commitments = certificateCommitments(integer);
+        certificate.snapshot_hash = primechain::protocol::commitPhaseSnapshotHash(
+            integer, certificate.commitments);
+        for (const auto& item : phase_votes_) {
+            if (item.first.first != integer) continue;
+            primechain::protocol::CommitCertificateVoteV1 vote;
+            vote.validator_address = item.second.validator_address;
+            vote.public_key = item.second.public_key;
+            vote.signature = item.second.signature;
+            certificate.votes.push_back(std::move(vote));
+        }
+        std::sort(certificate.votes.begin(), certificate.votes.end(),
+            [](const auto& left, const auto& right) {
+                return left.validator_address < right.validator_address;
+            });
+        return certificate;
     }
 
     std::size_t phaseVoteCount(primechain::PrimeValue integer) const {
@@ -2626,6 +2648,11 @@ private:
         }
 
         auto record = makeCompositeRecord(node.status(), proof, provider_address);
+        if (quorumEnabled()) {
+            record.version = 1;
+            record.commit_phase = embeddedCommitPhaseCertificate(g);
+            primechain::protocol::applyDevelopmentFinalization(record);
+        }
         error.clear();
         if (!node.appendComposite(record, error)) {
             writeAll(fd, "ERROR could not append composite record: " + error + "\n");
@@ -3114,7 +3141,7 @@ int main(int argc, char** argv) {
         printUsage(argv[0]);
         return 1;
     }
-    const Options options = *parsed;
+    Options options = *parsed;
 
     std::optional<primechain::wallet::MinerIdentity> validator_identity;
     if (options.validator_set.empty() != options.validator_identity_path.empty()) {
@@ -3143,6 +3170,7 @@ int main(int argc, char** argv) {
             std::cerr << "local validator identity is not in configured validator set\n";
             return 1;
         }
+        std::sort(options.validator_set.begin(), options.validator_set.end());
         validator_identity = std::move(loaded);
     }
 

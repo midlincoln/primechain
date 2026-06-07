@@ -315,9 +315,10 @@ SUBMIT_SIGNED_REVEAL g d e nonce provider_address public_key signature
 The node derives the address from the public key and verifies both Ed25519
 signatures before accepting the commitment or reveal. The public key, nonce,
 and reveal signature are retained in the finalized composite record, allowing
-independent verification during chain replay and synchronization. Signed
-commitments retain their authentication evidence in the persistent commitment
-sidecar and during peer propagation.
+independent verification during chain replay and synchronization. Signed commitments retain their authentication evidence in the persistent commitment
+sidecar while the phase is open. Once a quorum-authorized reveal is finalized,
+composite record version 1 embeds the complete canonical commitment snapshot,
+validator set, and signed 2-of-3 phase certificate.
 
 The frontier miner can use the identity directly:
 
@@ -369,6 +370,10 @@ SUBMIT_PHASE_VOTE g snapshot_hash validator_address public_key signature
 
 Votes are persisted atomically in `<record-store>.phases`, restored after
 restart, synchronized from peers, and propagated between configured nodes.
+When the winning reveal is accepted, the finalized composite record embeds the
+canonical commitments, validator set, snapshot hash, and signed quorum votes.
+Historical replay therefore verifies the phase certificate without either
+`.commitments` or `.phases` sidecars.
 The helper can sign a vote for controlled tests:
 
 ```bash
@@ -376,10 +381,11 @@ The helper can sign a vote for controlled tests:
   sign-phase ./wallets/validator-b.wallet 4 $snapshot_hash
 ```
 
-This is not permissionless consensus. Fixed validator membership is manual, and
-the phase certificate is currently transient sidecar state rather than a
-permanent field in the finalized arithmetic record. Embedding the certificate
-in canonical records is required before an adversarial testnet.
+This is not permissionless consensus. Fixed validator membership is manual.
+The embedded certificate proves that two keys from its listed three-validator
+set authorized the snapshot, but chain-level authorization of that validator
+set is not yet anchored in genesis or validator-epoch records. That membership
+rule is required before an adversarial testnet.
 
 Submit a composite proof using the development commit-reveal flow. First,
 the miner chooses a nonce and computes the canonical commitment locally:
@@ -707,7 +713,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold. Prime submissions, transactions, permanent in-record quorum certificates, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
+Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold, and version 1 composite records permanently embed that certificate. Prime submissions, transactions, validator-set authorization, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
 
 Terminal 2:
 
@@ -922,11 +928,11 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Add proof-index bootstrap so miners can resume from an existing node store.
-2. Add sync rejection tests for corrupt prime proofs.
-3. Add stricter propagation timing tests for active writers.
-4. Add commit-reveal and contributor authentication.
-5. Later add production hashing, real signatures, and post-quantum signatures.
+1. Anchor validator membership in genesis or signed validator-epoch records.
+2. Replace development finalization and hashes with production consensus primitives.
+3. Authenticate prime submissions and production transaction signatures.
+4. Harden persistence, indexing, resource limits, and adversarial network tests.
+5. Add the planned post-quantum signature migration after consensus stabilizes.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 
@@ -937,5 +943,5 @@ The staged implementation backlog is documented in [docs/production-roadmap-v0.m
 Current production-track priority:
 
 ```text
-canonical disk records -> sequential node -> peer sync -> controlled validator finalization
+canonical records -> embedded quorum evidence -> validator-set authorization -> production cryptography
 ```
