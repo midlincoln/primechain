@@ -38,6 +38,7 @@ public:
     std::vector<std::pair<PrimeValue, std::uint64_t>> holdingsForAddress(const Address& address) const;
     std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
     const std::vector<Address>& validatorSet() const { return validator_set_; }
+    std::uint64_t validatorEpoch() const { return validator_epoch_; }
 
 private:
     bool validateCommon(
@@ -57,6 +58,7 @@ private:
     std::map<PrimeValue, std::uint64_t> total_supply_;
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
+    std::uint64_t validator_epoch_{0};
 };
 
 protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set = {});

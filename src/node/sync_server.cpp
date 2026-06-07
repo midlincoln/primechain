@@ -1047,6 +1047,7 @@ public:
           store_(store_path_),
           commitment_store_(store_path_ + ".commitments"),
           phase_store_(store_path_ + ".phases"),
+          genesis_validator_set_(validator_set),
           validator_set_(std::move(validator_set)),
           validator_identity_(std::move(validator_identity)) {
         for (const auto& peer : peers) {
@@ -1054,19 +1055,42 @@ public:
         }
     }
 
+    bool loadGenesisValidatorSet(
+        const std::string& path,
+        std::vector<primechain::Address>& validators,
+        std::string& error) const {
+        primechain::storage::RecordStore source(path);
+        const auto records = source.loadAll(error);
+        if (!error.empty() || records.empty()) return error.empty();
+        if (records.front().kind != primechain::storage::StoredRecordKind::Prime) {
+            error = "genesis record must be prime";
+            return false;
+        }
+        const auto genesis = primechain::protocol::deserializePrimeRecord(
+            records.front().payload, error);
+        if (!genesis.has_value() || !primechain::protocol::verifyGenesisConfig(*genesis, error)) {
+            return false;
+        }
+        validators = genesis->genesis_config.validator_set;
+        return true;
+    }
+
     bool ensureValidatorAnchor(std::string& error) {
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) return false;
         if (!quorumEnabled()) return true;
         if (!node.status().has_genesis) {
-            return node.initializeGenesis(validator_set_, error);
+            return node.initializeGenesis(genesis_validator_set_, error);
         }
-        if (node.validatorSet() != validator_set_) {
-            error = node.validatorSet().empty()
+        std::vector<primechain::Address> anchored;
+        if (!loadGenesisValidatorSet(store_path_, anchored, error)) return false;
+        if (anchored != genesis_validator_set_) {
+            error = anchored.empty()
                 ? "quorum mode requires validator set anchored in genesis"
                 : "configured validator set differs from genesis anchor";
             return false;
         }
+        validator_set_ = node.validatorSet();
         return true;
     }
 
@@ -1202,7 +1226,7 @@ public:
         }
     }
 
-    bool syncFromPeer(const std::string& host, int port, std::string& error) const {
+    bool syncFromPeer(const std::string& host, int port, std::string& error) {
         primechain::node::SequentialNode local(store_path_);
         if (!local.load(error)) {
             return false;
@@ -1247,10 +1271,14 @@ public:
             std::remove(temp_path.c_str());
             return false;
         }
-        if (quorumEnabled() && reloaded.validatorSet() != validator_set_) {
-            error = "peer genesis validator set differs from configured validator set";
-            std::remove(temp_path.c_str());
-            return false;
+        if (quorumEnabled()) {
+            std::vector<primechain::Address> anchored;
+            if (!loadGenesisValidatorSet(temp_path, anchored, error) ||
+                anchored != genesis_validator_set_) {
+                if (error.empty()) error = "peer genesis validator set differs from configured validator set";
+                std::remove(temp_path.c_str());
+                return false;
+            }
         }
 
 
@@ -1258,6 +1286,7 @@ public:
             std::remove(temp_path.c_str());
             return false;
         }
+        validator_set_ = reloaded.validatorSet();
         std::remove(temp_path.c_str());
         return true;
     }
@@ -1755,8 +1784,8 @@ private:
         const auto record = primechain::protocol::deserializeCompositeRecord(
             submitted.payload, error);
         if (!record.has_value()) return false;
-        if (record->version != 1) {
-            error = "quorum mode requires composite record version 1";
+        if (record->version != 1 && record->version != 2) {
+            error = "quorum mode requires composite record version 1 or 2";
             return false;
         }
         if (record->commit_phase.validator_set != validator_set_) {
@@ -1807,6 +1836,7 @@ private:
             writeAll(fd, "ERROR could not append submitted record: " + error + "\n");
             return;
         }
+        validator_set_ = node.validatorSet();
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
@@ -1862,6 +1892,12 @@ private:
                     writeAll(fd, "ERROR could not replace tip: " + error + "\n");
                     return;
                 }
+                primechain::node::SequentialNode reloaded(store_path_);
+                if (!reloaded.load(error)) {
+                    writeAll(fd, "ERROR could not replay replaced tip: " + error + "\n");
+                    return;
+                }
+                validator_set_ = reloaded.validatorSet();
                 propagateRecord(*validated);
                 writeAll(fd, "RECORD_REPLACED "
                     + primechain::crypto::toHex(validated->record_hash)
@@ -3072,6 +3108,7 @@ private:
     primechain::storage::RecordStore store_;
     primechain::storage::CommitmentStore commitment_store_;
     primechain::storage::PhaseStore phase_store_;
+    std::vector<primechain::Address> genesis_validator_set_;
     std::vector<primechain::Address> validator_set_;
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     std::vector<primechain::protocol::TransactionV0> mempool_;

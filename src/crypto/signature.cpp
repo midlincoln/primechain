@@ -179,6 +179,25 @@ Bytes commitPhaseVoteSigningPayload(
     return payload;
 }
 
+Bytes validatorEpochVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::uint64_t epoch,
+    PrimeValue activation_integer,
+    const std::vector<Address>& next_validator_set,
+    const Address& validator_address) {
+    Bytes payload;
+    appendString(payload, "primechain-validator-epoch-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, record_integer);
+    appendUint64(payload, epoch);
+    appendUint64(payload, activation_integer);
+    appendUint64(payload, next_validator_set.size());
+    for (const auto& validator : next_validator_set) appendString(payload, validator);
+    appendString(payload, validator_address);
+    return payload;
+}
+
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,

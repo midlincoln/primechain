@@ -374,3 +374,20 @@ Peer sync validates the downloaded genesis in a temporary store and rejects a
 mismatched validator anchor before replacing local chain data.
 This anchors initial controlled-testnet membership; signed validator epochs and
 permissionless validator selection remain open.
+
+## 2026-06-07: Signed Validator Epoch Transitions
+
+Prime and composite record version 2 can now embed a signed validator epoch
+transition. Two or three members of the currently active Ed25519 validator set
+must sign the next sequential epoch, the next-integer activation point, and the
+canonical replacement three-validator set. The old set authorizes the containing
+record; the replacement set becomes active for the following integer.
+
+`SequentialNode` enforces transitions during append and historical replay and
+reconstructs the active epoch after restart. The TCP server now separates the
+immutable genesis validator anchor from the replay-derived active set, preserving
+the original trust root across rotation and peer synchronization.
+
+Tests accept a valid 2-of-3 rotation and reject insufficient quorum and altered
+signatures. Low-level `SUBMIT_RECORD` ingestion supports version-2 records; a
+user-facing proposal and vote command is the next operational step.

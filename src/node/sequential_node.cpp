@@ -33,6 +33,27 @@ bool validateTransactionBatch(
     return true;
 }
 
+bool hasValidatorEpochTransition(const protocol::ValidatorEpochTransitionV1& transition) {
+    return transition.epoch != 0 ||
+           transition.activation_integer != 0 ||
+           !transition.next_validator_set.empty() ||
+           !transition.votes.empty();
+}
+
+bool validateValidatorEpochRecordVersion(
+    std::uint64_t version,
+    const protocol::ValidatorEpochTransitionV1& transition,
+    std::string& error) {
+    const bool has_transition = hasValidatorEpochTransition(transition);
+    if ((version == 2) != has_transition) {
+        error = version == 2
+            ? "version 2 record requires a validator epoch transition"
+            : "validator epoch transition requires record version 2";
+        return false;
+    }
+    return true;
+}
+
 math::Factorization toMathFactorization(const std::vector<protocol::PrimePowerV0>& factors) {
     math::Factorization out;
     for (const auto& factor : factors) {
@@ -182,6 +203,7 @@ bool SequentialNode::load(std::string& error) {
     total_supply_.clear();
     pending_composite_providers_.clear();
     validator_set_.clear();
+    validator_epoch_ = 0;
     if (records.empty()) {
         return true;
     }
@@ -210,14 +232,26 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 (decoded->version != 1 || decoded->commit_phase.validator_set != validator_set_))) {
+                 ((decoded->version != 1 && decoded->version != 2) ||
+                  decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
+                return false;
+            }
+            if (!decoded.has_value() ||
+                !validateValidatorEpochRecordVersion(decoded->version, decoded->validator_epoch, error) ||
+                !protocol::verifyValidatorEpochTransition(
+                    decoded->validator_epoch, validator_set_, validator_epoch_,
+                    decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
             if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, error) ||
                 !applyCompositeLedger(*decoded, error)) {
                 return false;
+            }
+            if (hasValidatorEpochTransition(decoded->validator_epoch)) {
+                validator_set_ = decoded->validator_epoch.next_validator_set;
+                validator_epoch_ = decoded->validator_epoch.epoch;
             }
         } else {
             if (!validateStoredPrimePayload(record, expected_previous_hash, error)) {
@@ -228,9 +262,20 @@ bool SequentialNode::load(std::string& error) {
                 validator_set_ = decoded->genesis_config.validator_set;
             }
             if (!decoded.has_value() ||
+                !validateValidatorEpochRecordVersion(decoded->version, decoded->validator_epoch, error) ||
+                !protocol::verifyValidatorEpochTransition(
+                    decoded->validator_epoch, validator_set_, validator_epoch_,
+                    decoded->previous_record_hash, decoded->integer, error)) {
+                return false;
+            }
+            if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, error) ||
                 !applyPrimeLedger(*decoded, error)) {
                 return false;
+            }
+            if (hasValidatorEpochTransition(decoded->validator_epoch)) {
+                validator_set_ = decoded->validator_epoch.next_validator_set;
+                validator_epoch_ = decoded->validator_epoch.epoch;
             }
         }
 
@@ -267,6 +312,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     status_.frontier_integer = 2;
     status_.latest_record_hash = stored.record_hash;
     validator_set_ = record.genesis_config.validator_set;
+    validator_epoch_ = 0;
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -300,8 +346,15 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         return false;
     }
     if (validator_set_.empty() ? record.version != 0 :
-        (record.version != 1 || record.commit_phase.validator_set != validator_set_)) {
+        ((record.version != 1 && record.version != 2) ||
+         record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
+        return false;
+    }
+    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
+        !protocol::verifyValidatorEpochTransition(
+            record.validator_epoch, validator_set_, validator_epoch_,
+            record.previous_record_hash, record.integer, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
@@ -332,6 +385,10 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
+    if (hasValidatorEpochTransition(record.validator_epoch)) {
+        validator_set_ = record.validator_epoch.next_validator_set;
+        validator_epoch_ = record.validator_epoch.epoch;
+    }
     return true;
 }
 
@@ -355,6 +412,12 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         return false;
     }
     if (!protocol::verifyGenesisConfig(record, error)) {
+        return false;
+    }
+    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
+        !protocol::verifyValidatorEpochTransition(
+            record.validator_epoch, validator_set_, validator_epoch_,
+            record.previous_record_hash, record.integer, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
@@ -389,6 +452,10 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
+    if (hasValidatorEpochTransition(record.validator_epoch)) {
+        validator_set_ = record.validator_epoch.next_validator_set;
+        validator_epoch_ = record.validator_epoch.epoch;
+    }
     return true;
 }
 

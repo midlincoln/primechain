@@ -243,6 +243,15 @@ target_link_libraries(primechain-sequential-node-tests
         primechain_core
 )
 
+add_executable(primechain-validator-epoch-tests
+    tests/validator_epoch_tests.cpp
+)
+
+target_link_libraries(primechain-validator-epoch-tests
+    PRIVATE
+        primechain_core
+)
+
 enable_testing()
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
@@ -643,6 +652,12 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sequential-node-test.dat && $<TARGET_FILE:primechain-sequential-node-tests> ${CMAKE_CURRENT_BINARY_DIR}/sequential-node-test.dat"
+)
+add_test(
+    NAME validator_epoch_rotation
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/validator-epoch-test.dat* && $<TARGET_FILE:primechain-validator-epoch-tests> ${CMAKE_CURRENT_BINARY_DIR}/validator-epoch-test.dat"
 )
 
 

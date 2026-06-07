@@ -538,8 +538,37 @@ GET_VALIDATORS
 VALIDATORS 3 validator_a validator_b validator_c
 ```
 
-This anchors the initial controlled-testnet membership. Validator rotation,
-epoch transitions, and permissionless validator selection remain future work.
+This anchors the initial controlled-testnet membership.
+
+### 10.3 Signed Validator Epoch Transitions
+
+A non-genesis prime or composite record may use version 2 and embed one
+`ValidatorEpochTransitionV1`:
+
+```text
+epoch
+activation_integer
+next_validator_set[3]
+votes[2..3] { validator_address, public_key, signature }
+```
+
+The active validator set signs a domain-separated payload containing the prior
+record hash, containing-record integer, next sequential epoch number, activation
+integer, canonical next set, and voter address. The transition is valid only when:
+
+- the epoch is exactly the current epoch plus one;
+- activation is exactly the containing record integer plus one;
+- the next set contains three distinct sorted Ed25519 `pc1_` addresses;
+- two or three distinct members of the current set provide valid signatures.
+
+The containing record is authorized by the old set. The new set becomes active
+only after that record is accepted, so it authorizes the following integer. Replay
+derives the same active set and epoch from genesis plus all accepted transitions.
+The genesis set remains the immutable peer-sync trust anchor.
+
+`SUBMIT_RECORD` can ingest a fully constructed version-2 record. A dedicated
+proposal/vote CLI and TCP workflow remains to be added before operator testing.
+Permissionless validator selection remains future work.
 
 ## 11. Bitcoin Mirror Payload
 

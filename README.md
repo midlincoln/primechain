@@ -931,10 +931,13 @@ Completed prototype milestones:
 - first miner-submitted composite flow with `SUBMIT_COMPOSITE`
 - first miner-submitted Pratt prime flow with `SUBMIT_PRIME`
 - first frontier miner loop using `SUBMIT_COMPOSITE` and `SUBMIT_PRIME`
+- genesis-anchored 2-of-3 validator quorum
+- signed validator epoch transitions embedded in version-2 arithmetic records
+- replay-derived active validator set with next-integer activation
 
 Next milestones:
 
-1. Add signed validator-epoch records for controlled validator rotation.
+1. Add a user-facing TCP/CLI workflow for proposing and signing validator epochs.
 2. Replace development finalization and hashes with production consensus primitives.
 3. Authenticate prime submissions and production transaction signatures.
 4. Harden persistence, indexing, resource limits, and adversarial network tests.

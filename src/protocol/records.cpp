@@ -219,6 +219,21 @@ void appendGenesisConfig(
     for (const auto& validator : config.validator_set) appendAddress(out, validator);
 }
 
+void appendValidatorEpochTransition(
+    std::vector<std::uint8_t>& out,
+    const ValidatorEpochTransitionV1& transition) {
+    appendUint64(out, transition.epoch);
+    appendUint64(out, transition.activation_integer);
+    appendUint64(out, transition.next_validator_set.size());
+    for (const auto& validator : transition.next_validator_set) appendAddress(out, validator);
+    appendUint64(out, transition.votes.size());
+    for (const auto& vote : transition.votes) {
+        appendAddress(out, vote.validator_address);
+        appendBytes(out, vote.public_key);
+        appendBytes(out, vote.signature);
+    }
+}
+
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
@@ -335,6 +350,32 @@ bool readGenesisConfig(ByteReader& reader, GenesisConfigV1& config) {
     return true;
 }
 
+bool readValidatorEpochTransition(
+    ByteReader& reader,
+    ValidatorEpochTransitionV1& transition) {
+    std::uint64_t validator_count = 0;
+    std::uint64_t vote_count = 0;
+    if (!reader.readUint64(transition.epoch) ||
+        !reader.readUint64(transition.activation_integer) ||
+        !reader.readUint64(validator_count) || validator_count > 16) return false;
+    transition.next_validator_set.clear();
+    for (std::uint64_t i = 0; i < validator_count; ++i) {
+        Address validator;
+        if (!reader.readString(validator)) return false;
+        transition.next_validator_set.push_back(std::move(validator));
+    }
+    if (!reader.readUint64(vote_count) || vote_count > 16) return false;
+    transition.votes.clear();
+    for (std::uint64_t i = 0; i < vote_count; ++i) {
+        ValidatorEpochVoteV1 vote;
+        if (!reader.readString(vote.validator_address) ||
+            !reader.readBytes(vote.public_key) ||
+            !reader.readBytes(vote.signature)) return false;
+        transition.votes.push_back(std::move(vote));
+    }
+    return true;
+}
+
 bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     std::uint64_t vote_count = 0;
     if (!reader.readString(proof.rule) || !reader.readUint64(vote_count)) {
@@ -366,6 +407,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -384,6 +426,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.version >= 1) appendGenesisConfig(out, record.genesis_config);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -509,6 +552,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
+        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
@@ -537,6 +581,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && !readGenesisConfig(reader, record.genesis_config)) ||
+        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated prime record payload";
         return std::nullopt;
@@ -608,7 +653,7 @@ bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record,
     std::string& error) {
     if (record.version == 0) return true;
-    if (record.version != 1) {
+    if (record.version != 1 && record.version != 2) {
         error = "unsupported composite record version";
         return false;
     }
@@ -719,7 +764,8 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if (record.version != 0 || !record.genesis_config.validator_set.empty()) {
+        if ((record.version != 0 && record.version != 2) ||
+            !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
         }
@@ -746,6 +792,76 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     for (const auto& validator : validators) {
         if (!crypto::isEd25519Address(validator)) {
             error = "invalid genesis validator address";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyValidatorEpochTransition(
+    const ValidatorEpochTransitionV1& transition,
+    const std::vector<Address>& current_validator_set,
+    std::uint64_t current_epoch,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error) {
+    const bool absent = transition.epoch == 0 && transition.activation_integer == 0 &&
+        transition.next_validator_set.empty() && transition.votes.empty();
+    if (absent) return true;
+    if (current_validator_set.size() != 3) {
+        error = "validator epoch requires an active three-validator set";
+        return false;
+    }
+    if (transition.epoch != current_epoch + 1) {
+        error = "validator epoch number is not sequential";
+        return false;
+    }
+    if (transition.activation_integer != record_integer + 1) {
+        error = "validator epoch must activate at the next integer";
+        return false;
+    }
+    if (transition.next_validator_set.size() != 3 ||
+        !std::is_sorted(transition.next_validator_set.begin(), transition.next_validator_set.end()) ||
+        std::adjacent_find(transition.next_validator_set.begin(), transition.next_validator_set.end()) !=
+            transition.next_validator_set.end()) {
+        error = "next validator set must contain three canonical addresses";
+        return false;
+    }
+    for (const auto& validator : transition.next_validator_set) {
+        if (!crypto::isEd25519Address(validator)) {
+            error = "invalid next validator address";
+            return false;
+        }
+    }
+    if (transition.votes.size() < 2 || transition.votes.size() > 3) {
+        error = "validator epoch requires two or three votes";
+        return false;
+    }
+    Address previous_vote;
+    for (const auto& vote : transition.votes) {
+        if (!previous_vote.empty() && previous_vote >= vote.validator_address) {
+            error = "validator epoch votes are not canonical";
+            return false;
+        }
+        previous_vote = vote.validator_address;
+        if (!std::binary_search(current_validator_set.begin(), current_validator_set.end(),
+                                vote.validator_address)) {
+            error = "validator epoch vote is outside current set";
+            return false;
+        }
+        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            error = "validator epoch vote address mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::ed25519Verify(
+                vote.public_key,
+                crypto::validatorEpochVoteSigningPayload(
+                    previous_record_hash, record_integer, transition.epoch,
+                    transition.activation_integer, transition.next_validator_set,
+                    vote.validator_address),
+                vote.signature, signature_error)) {
+            error = "invalid validator epoch vote signature";
             return false;
         }
     }

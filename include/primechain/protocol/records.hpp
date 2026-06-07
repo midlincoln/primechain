@@ -106,6 +106,19 @@ struct GenesisConfigV1 {
     std::vector<Address> validator_set;
 };
 
+struct ValidatorEpochVoteV1 {
+    Address validator_address;
+    Bytes public_key;
+    Bytes signature;
+};
+
+struct ValidatorEpochTransitionV1 {
+    std::uint64_t epoch{0};
+    PrimeValue activation_integer{0};
+    std::vector<Address> next_validator_set;
+    std::vector<ValidatorEpochVoteV1> votes;
+};
+
 struct CompositeRecordV0 {
     std::uint64_t version{0};
     std::uint64_t height{0};
@@ -116,6 +129,7 @@ struct CompositeRecordV0 {
     std::vector<TransactionV0> transactions;
     Hash256 state_root{};
     CommitPhaseCertificateV1 commit_phase;
+    ValidatorEpochTransitionV1 validator_epoch;
     FinalizationProofV0 finalized_by;
 };
 
@@ -129,6 +143,7 @@ struct PrimeRecordV0 {
     std::vector<TransactionV0> transactions;
     Hash256 state_root{};
     GenesisConfigV1 genesis_config;
+    ValidatorEpochTransitionV1 validator_epoch;
     FinalizationProofV0 finalized_by;
 };
 
@@ -165,5 +180,12 @@ Hash256 commitPhaseSnapshotHash(
 bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record, std::string& error);
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error);
+bool verifyValidatorEpochTransition(
+    const ValidatorEpochTransitionV1& transition,
+    const std::vector<Address>& current_validator_set,
+    std::uint64_t current_epoch,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error);
 
 } // namespace primechain::protocol

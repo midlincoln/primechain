@@ -43,6 +43,13 @@ Bytes commitPhaseVoteSigningPayload(
     PrimeValue integer,
     const Hash256& snapshot_hash,
     const Address& validator_address);
+Bytes validatorEpochVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::uint64_t epoch,
+    PrimeValue activation_integer,
+    const std::vector<Address>& next_validator_set,
+    const Address& validator_address);
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,
