@@ -1,5 +1,6 @@
 #include "primechain/node/sequential_node.hpp"
 
+#include <algorithm>
 #include <map>
 #include <utility>
 
@@ -115,6 +116,10 @@ bool validateStoredCompositePayload(
     if (!protocol::verifyCommitPhaseCertificate(*decoded, error)) {
         return false;
     }
+    if (decoded->version == 1 && decoded->commit_phase.validator_set.empty()) {
+        error = "embedded commit-phase certificate has no validator set";
+        return false;
+    }
     if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
         return false;
     }
@@ -152,6 +157,9 @@ bool validateStoredPrimePayload(
     if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
         return false;
     }
+    if (!protocol::verifyGenesisConfig(*decoded, error)) {
+        return false;
+    }
     if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
         return false;
     }
@@ -173,6 +181,7 @@ bool SequentialNode::load(std::string& error) {
     balances_.clear();
     total_supply_.clear();
     pending_composite_providers_.clear();
+    validator_set_.clear();
     if (records.empty()) {
         return true;
     }
@@ -199,6 +208,12 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
+            if (decoded.has_value() &&
+                (validator_set_.empty() ? decoded->version != 0 :
+                 (decoded->version != 1 || decoded->commit_phase.validator_set != validator_set_))) {
+                error = "stored composite certificate validator set is not authorized by genesis";
+                return false;
+            }
             if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, error) ||
                 !applyCompositeLedger(*decoded, error)) {
@@ -209,6 +224,9 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             const auto decoded = protocol::deserializePrimeRecord(record.payload, error);
+            if (decoded.has_value() && record.height == 0) {
+                validator_set_ = decoded->genesis_config.validator_set;
+            }
             if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, error) ||
                 !applyPrimeLedger(*decoded, error)) {
@@ -229,13 +247,16 @@ bool SequentialNode::load(std::string& error) {
     return true;
 }
 
-bool SequentialNode::initializeGenesis(std::string& error) {
+bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set, std::string& error) {
     if (status_.has_genesis) {
         error = "genesis already initialized";
         return false;
     }
 
-    const auto record = makeGenesisPrimeRecordV0();
+    const auto record = makeGenesisPrimeRecordV0(validator_set);
+    if (!protocol::verifyGenesisConfig(record, error)) {
+        return false;
+    }
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
         return false;
@@ -245,6 +266,7 @@ bool SequentialNode::initializeGenesis(std::string& error) {
     status_.height = 0;
     status_.frontier_integer = 2;
     status_.latest_record_hash = stored.record_hash;
+    validator_set_ = record.genesis_config.validator_set;
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -275,6 +297,11 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         return false;
     }
     if (!protocol::verifyCommitPhaseCertificate(record, error)) {
+        return false;
+    }
+    if (validator_set_.empty() ? record.version != 0 :
+        (record.version != 1 || record.commit_phase.validator_set != validator_set_)) {
+        error = "composite certificate validator set is not authorized by genesis";
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
@@ -325,6 +352,9 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         return false;
     }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
+        return false;
+    }
+    if (!protocol::verifyGenesisConfig(record, error)) {
         return false;
     }
     if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
@@ -518,15 +548,17 @@ bool SequentialNode::validateCommon(
     return true;
 }
 
-protocol::PrimeRecordV0 makeGenesisPrimeRecordV0() {
+protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set) {
     protocol::PrimeRecordV0 record;
-    record.version = 0;
+    record.version = validator_set.empty() ? 0 : 1;
     record.height = 0;
     record.previous_record_hash = {};
     record.integer = 2;
     record.proof.p = 2;
     record.proof.witness = 0;
     record.proof.provider_address = "pcdev1_genesis";
+    record.genesis_config.validator_set = validator_set;
+    std::sort(record.genesis_config.validator_set.begin(), record.genesis_config.validator_set.end());
     protocol::applyDevelopmentFinalization(record);
     return record;
 }

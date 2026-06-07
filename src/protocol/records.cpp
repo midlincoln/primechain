@@ -212,6 +212,13 @@ void appendCommitPhaseCertificate(
     for (const auto& vote : certificate.votes) appendCommitCertificateVote(out, vote);
 }
 
+void appendGenesisConfig(
+    std::vector<std::uint8_t>& out,
+    const GenesisConfigV1& config) {
+    appendUint64(out, config.validator_set.size());
+    for (const auto& validator : config.validator_set) appendAddress(out, validator);
+}
+
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
@@ -316,6 +323,18 @@ bool readCommitPhaseCertificate(ByteReader& reader, CommitPhaseCertificateV1& ce
     return true;
 }
 
+bool readGenesisConfig(ByteReader& reader, GenesisConfigV1& config) {
+    std::uint64_t validator_count = 0;
+    if (!reader.readUint64(validator_count) || validator_count > 16) return false;
+    config.validator_set.clear();
+    for (std::uint64_t i = 0; i < validator_count; ++i) {
+        Address validator;
+        if (!reader.readString(validator)) return false;
+        config.validator_set.push_back(std::move(validator));
+    }
+    return true;
+}
+
 bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     std::uint64_t vote_count = 0;
     if (!reader.readString(proof.rule) || !reader.readUint64(vote_count)) {
@@ -364,6 +383,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
+    if (record.version >= 1) appendGenesisConfig(out, record.genesis_config);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -516,6 +536,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !readTransactionBatch(reader, record.tx_batch) ||
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
+        (record.version >= 1 && !readGenesisConfig(reader, record.genesis_config)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated prime record payload";
         return std::nullopt;
@@ -692,6 +713,41 @@ bool verifyCommitPhaseCertificate(
             record.proof.provider_address, record.proof.signature,
             winner.commitment_hash, error)) {
         return false;
+    }
+    return true;
+}
+
+bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
+    if (record.height != 0) {
+        if (record.version != 0 || !record.genesis_config.validator_set.empty()) {
+            error = "genesis configuration is only valid at height zero";
+            return false;
+        }
+        return true;
+    }
+    if (record.version == 0) {
+        if (!record.genesis_config.validator_set.empty()) {
+            error = "legacy genesis cannot contain validator configuration";
+            return false;
+        }
+        return true;
+    }
+    if (record.version != 1) {
+        error = "unsupported genesis record version";
+        return false;
+    }
+    const auto& validators = record.genesis_config.validator_set;
+    if (validators.size() != 3 ||
+        !std::is_sorted(validators.begin(), validators.end()) ||
+        std::adjacent_find(validators.begin(), validators.end()) != validators.end()) {
+        error = "genesis validator set must contain three canonical addresses";
+        return false;
+    }
+    for (const auto& validator : validators) {
+        if (!crypto::isEd25519Address(validator)) {
+            error = "invalid genesis validator address";
+            return false;
+        }
     }
     return true;
 }

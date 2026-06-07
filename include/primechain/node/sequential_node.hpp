@@ -27,7 +27,8 @@ public:
     explicit SequentialNode(std::string record_store_path);
 
     bool load(std::string& error);
-    bool initializeGenesis(std::string& error);
+    bool initializeGenesis(const std::vector<Address>& validator_set, std::string& error);
+    bool initializeGenesis(std::string& error) { return initializeGenesis({}, error); }
 
     bool appendComposite(const protocol::CompositeRecordV0& record, std::string& error);
     bool appendPrime(const protocol::PrimeRecordV0& record, std::string& error);
@@ -36,6 +37,7 @@ public:
     std::uint64_t balanceMicroUnits(const Address& address, PrimeValue prime) const;
     std::vector<std::pair<PrimeValue, std::uint64_t>> holdingsForAddress(const Address& address) const;
     std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
+    const std::vector<Address>& validatorSet() const { return validator_set_; }
 
 private:
     bool validateCommon(
@@ -54,8 +56,9 @@ private:
     std::map<std::pair<Address, PrimeValue>, std::uint64_t> balances_;
     std::map<PrimeValue, std::uint64_t> total_supply_;
     std::vector<Address> pending_composite_providers_;
+    std::vector<Address> validator_set_;
 };
 
-protocol::PrimeRecordV0 makeGenesisPrimeRecordV0();
+protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set = {});
 
 } // namespace primechain::node

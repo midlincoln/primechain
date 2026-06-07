@@ -416,16 +416,21 @@ bool appendStoredRecord(
     primechain::node::SequentialNode& node,
     const primechain::storage::StoredRecord& stored,
     std::string& error) {
-    if (!node.status().has_genesis) {
-        const auto expected_genesis =
-            primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0());
-        if (stored.height == expected_genesis.height &&
-            stored.integer == expected_genesis.integer &&
-            stored.kind == expected_genesis.kind &&
-            stored.record_hash == expected_genesis.record_hash &&
-            stored.payload == expected_genesis.payload) {
-            return node.initializeGenesis(error);
+    if (!node.status().has_genesis && stored.height == 0 && stored.integer == 2 &&
+        stored.kind == primechain::storage::StoredRecordKind::Prime) {
+        const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!decoded.has_value() || !primechain::protocol::verifyGenesisConfig(*decoded, error)) {
+            return false;
         }
+        const auto expected_genesis = primechain::storage::makeStoredRecord(
+            primechain::node::makeGenesisPrimeRecordV0(
+                decoded->genesis_config.validator_set));
+        if (stored.record_hash != expected_genesis.record_hash ||
+            stored.payload != expected_genesis.payload) {
+            error = "incoming genesis record is not canonical";
+            return false;
+        }
+        return node.initializeGenesis(decoded->genesis_config.validator_set, error);
     }
 
     if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
@@ -1049,6 +1054,22 @@ public:
         }
     }
 
+    bool ensureValidatorAnchor(std::string& error) {
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        if (!quorumEnabled()) return true;
+        if (!node.status().has_genesis) {
+            return node.initializeGenesis(validator_set_, error);
+        }
+        if (node.validatorSet() != validator_set_) {
+            error = node.validatorSet().empty()
+                ? "quorum mode requires validator set anchored in genesis"
+                : "configured validator set differs from genesis anchor";
+            return false;
+        }
+        return true;
+    }
+
     void handleClient(int fd) {
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
@@ -1067,6 +1088,10 @@ public:
             }
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
+                continue;
+            }
+            if (*line == "GET_VALIDATORS") {
+                sendValidators(fd);
                 continue;
             }
             if (line->rfind("GET_RECORD ", 0) == 0) {
@@ -1222,6 +1247,12 @@ public:
             std::remove(temp_path.c_str());
             return false;
         }
+        if (quorumEnabled() && reloaded.validatorSet() != validator_set_) {
+            error = "peer genesis validator set differs from configured validator set";
+            std::remove(temp_path.c_str());
+            return false;
+        }
+
 
         if (!copyFile(temp_path, store_path_, error)) {
             std::remove(temp_path.c_str());
@@ -1540,6 +1571,20 @@ private:
             << status.height << " "
             << status.frontier_integer << " "
             << primechain::crypto::toHex(status.latest_record_hash) << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void sendValidators(int fd) const {
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        std::ostringstream out;
+        out << "VALIDATORS " << node.validatorSet().size();
+        for (const auto& validator : node.validatorSet()) out << " " << validator;
+        out << "\n";
         writeAll(fd, out.str());
     }
 
@@ -2597,12 +2642,12 @@ private:
         }
         if (!node.status().has_genesis) {
             error.clear();
-            if (!node.initializeGenesis(error)) {
+            if (!node.initializeGenesis(validator_set_, error)) {
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
             propagateRecord(
-                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0(validator_set_)));
         }
         if (g == node.status().frontier_integer && node.status().frontier_integer > 2) {
             const auto existing = store_.findByInteger(g, error);
@@ -2712,12 +2757,12 @@ private:
         }
         if (!node.status().has_genesis) {
             error.clear();
-            if (!node.initializeGenesis(error)) {
+            if (!node.initializeGenesis(validator_set_, error)) {
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
             propagateRecord(
-                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0(validator_set_)));
         }
 
         if (proof.p == node.status().frontier_integer && node.status().frontier_integer > 2) {
@@ -2899,12 +2944,12 @@ private:
         std::vector<primechain::storage::StoredRecord> appended_records;
         if (!node.status().has_genesis) {
             error.clear();
-            if (!node.initializeGenesis(error)) {
+            if (!node.initializeGenesis(validator_set_, error)) {
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
             appended_records.push_back(
-                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0()));
+                primechain::storage::makeStoredRecord(primechain::node::makeGenesisPrimeRecordV0(validator_set_)));
         }
 
         MapProofIndex proofs;
@@ -3210,6 +3255,13 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::cout << "peer sync complete from " << options.peers.size() << " configured peer(s)\n";
+    }
+    {
+        std::string error;
+        if (!sync_server.ensureValidatorAnchor(error)) {
+            std::cerr << "validator genesis anchor failed: " << error << "\n";
+            return 1;
+        }
     }
 
     std::cout << "Primechain sync server listening on " << options.bind_address << ":" << options.port << "\n";

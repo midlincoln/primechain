@@ -521,10 +521,25 @@ all miner and validator signatures, recomputes the snapshot, selects the lowest
 The `.commitments` and `.phases` files are therefore temporary coordination
 state, not required blockchain history.
 
-The certificate does not yet authorize its own validator set. During live quorum
-operation a node requires the embedded set to match local fixed configuration,
-but a production chain must anchor validator membership in genesis or signed
-epoch-transition records.
+### 10.2 Genesis Validator Anchor
+
+A controlled quorum chain uses prime record version 1 at height 0. Its
+`GenesisConfigV1` contains exactly three distinct, lexicographically sorted
+Ed25519 `pc1_` validator addresses. The genesis record hash commits to this set.
+
+During append, peer synchronization, and replay, every version-1 composite
+certificate must contain exactly the validator set authorized by genesis. A
+quorum server also requires its configured local set to match the replayed
+genesis set before it begins serving requests. Version-0 genesis remains valid
+for legacy non-quorum test chains, but quorum mode refuses it.
+
+```text
+GET_VALIDATORS
+VALIDATORS 3 validator_a validator_b validator_c
+```
+
+This anchors the initial controlled-testnet membership. Validator rotation,
+epoch transitions, and permissionless validator selection remain future work.
 
 ## 11. Bitcoin Mirror Payload
 

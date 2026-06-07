@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,6 +16,7 @@
 #include <unistd.h>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/crypto/signature.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
@@ -32,6 +35,7 @@ struct Options {
     std::string record_store_path{kDefaultRecordStorePath};
     std::string prime_miner_address{kDefaultPrimeMinerAddress};
     std::string composite_miner_address{kDefaultCompositeMinerAddress};
+    std::vector<primechain::Address> validator_set;
     bool has_transfer{false};
     std::string transfer_sender_wallet;
     std::string transfer_receiver_address;
@@ -343,7 +347,7 @@ bool acknowledgeMempool(
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [limit] [text_log_path] [record_store_path] [--prime-miner address] [--composite-miner address]\n"
               << "       [--transfer sender.wallet receiver_address prime amount target_integer]\n"
-              << "       [--mempool host port target_integer]\n"
+              << "       [--mempool host port target_integer] [--validator-set addr1 addr2 addr3]\n"
               << "example:\n"
               << "  " << argv0 << " 500 ./data/sequential-500.log ./data/sequential-500.dat --prime-miner pcdev1_...\n";
 }
@@ -362,6 +366,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
     }
     while (index < argc) {
         const std::string flag = argv[index++];
+        if (flag == "--validator-set") {
+            if (index + 2 >= argc) return std::nullopt;
+            options.validator_set = {argv[index], argv[index + 1], argv[index + 2]};
+            index += 3;
+            continue;
+        }
         if (index >= argc) {
             return std::nullopt;
         }
@@ -464,6 +474,12 @@ int main(int argc, char** argv) {
     }
     const Options options = *parsed;
     if (options.limit < 2 ||
+        (!options.validator_set.empty() &&
+            (options.validator_set.size() != 3 ||
+             !std::all_of(options.validator_set.begin(), options.validator_set.end(),
+                 [](const primechain::Address& address) {
+                     return primechain::crypto::isEd25519Address(address);
+                 }))) ||
         !primechain::protocol::isDevelopmentAddress(options.prime_miner_address) ||
         !primechain::protocol::isDevelopmentAddress(options.composite_miner_address) ||
         (options.has_transfer &&
@@ -478,6 +494,14 @@ int main(int argc, char** argv) {
              options.mempool_target_integer > options.limit))) {
         printUsage(argv[0]);
         return 1;
+    }
+    if (!options.validator_set.empty()) {
+        std::set<primechain::Address> unique(
+            options.validator_set.begin(), options.validator_set.end());
+        if (unique.size() != 3) {
+            printUsage(argv[0]);
+            return 1;
+        }
     }
     DevWallet transfer_sender;
     if (options.has_transfer && !loadDevWallet(options.transfer_sender_wallet, transfer_sender)) {
@@ -514,7 +538,7 @@ int main(int argc, char** argv) {
         std::cerr << "record store already contains records; use a fresh store path for this generator\n";
         return 1;
     }
-    if (!node.initializeGenesis(error)) {
+    if (!node.initializeGenesis(options.validator_set, error)) {
         std::cerr << "could not initialize genesis: " << error << "\n";
         return 1;
     }

@@ -334,7 +334,8 @@ replacement. The current commitment and snapshot hashes remain `devHash256`; the
 ### Controlled 2-of-3 Commit Phase
 
 Quorum mode is opt-in and intended for a controlled testnet. Create three
-Ed25519 identities and configure every validator with the same ordered set:
+Ed25519 identities and configure every validator with the same set. The node
+sorts the addresses canonically and commits them into version-1 genesis:
 
 ```bash
 a=$(./build/primechain-wallet new-miner ./wallets/validator-a.wallet)
@@ -352,6 +353,7 @@ After signed miner commitments have propagated, validators close the phase:
 ./build/primechain-sync-query 127.0.0.1 18889 CLOSE_COMMIT_PHASE 4
 ./build/primechain-sync-query 127.0.0.1 18889 GET_COMMIT_PHASE 4
 ./build/primechain-sync-query 127.0.0.1 18889 GET_PHASE_VOTES 4
+./build/primechain-sync-query 127.0.0.1 18889 GET_VALIDATORS
 ```
 
 The first valid vote changes the phase from `OPEN` to `CLOSING` and freezes the
@@ -381,11 +383,15 @@ The helper can sign a vote for controlled tests:
   sign-phase ./wallets/validator-b.wallet 4 $snapshot_hash
 ```
 
-This is not permissionless consensus. Fixed validator membership is manual.
-The embedded certificate proves that two keys from its listed three-validator
-set authorized the snapshot, but chain-level authorization of that validator
-set is not yet anchored in genesis or validator-epoch records. That membership
-rule is required before an adversarial testnet.
+The genesis record permanently authorizes the initial three-validator set.
+Every version-1 composite certificate must match that set during append, peer
+sync, and historical replay. A quorum node refuses legacy unanchored genesis or
+a command-line validator set that differs from chain history. Use a fresh record
+store when creating a quorum testnet; an existing version-0 test chain is not
+automatically upgraded.
+
+This is still not permissionless consensus. Validator selection is manual and
+validator rotation is not implemented.
 
 Submit a composite proof using the development commit-reveal flow. First,
 the miner chooses a nonce and computes the canonical commitment locally:
@@ -713,7 +719,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold, and version 1 composite records permanently embed that certificate. Prime submissions, transactions, validator-set authorization, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
+Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold, and version 1 composite records permanently embed that certificate. Prime submissions, transactions, validator rotation, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
 
 Terminal 2:
 
@@ -928,7 +934,7 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Anchor validator membership in genesis or signed validator-epoch records.
+1. Add signed validator-epoch records for controlled validator rotation.
 2. Replace development finalization and hashes with production consensus primitives.
 3. Authenticate prime submissions and production transaction signatures.
 4. Harden persistence, indexing, resource limits, and adversarial network tests.
@@ -943,5 +949,5 @@ The staged implementation backlog is documented in [docs/production-roadmap-v0.m
 Current production-track priority:
 
 ```text
-canonical records -> embedded quorum evidence -> validator-set authorization -> production cryptography
+canonical records -> genesis validator anchor -> validator epochs -> production cryptography
 ```

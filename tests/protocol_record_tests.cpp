@@ -6,6 +6,7 @@
 
 #include "primechain/crypto/hash.hpp"
 #include "primechain/crypto/signature.hpp"
+#include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 
 namespace {
@@ -287,6 +288,45 @@ int main() {
                     decoded_prime->proof.witness == prime.proof.witness &&
                     decoded_prime->proof.factors_of_p_minus_1.size() == prime.proof.factors_of_p_minus_1.size(),
                 "prime record round trip")) {
+        return 1;
+    }
+
+    std::vector<primechain::Address> genesis_validators;
+    for (int i = 0; i < 3; ++i) {
+        certificate_error.clear();
+        const auto keys = primechain::crypto::generateEd25519KeyPair(certificate_error);
+        if (!expect(keys.has_value(), "generate genesis validator identity")) {
+            std::cerr << certificate_error << "\n";
+            return 1;
+        }
+        genesis_validators.push_back(
+            primechain::crypto::addressFromEd25519PublicKey(keys->public_key));
+    }
+    const auto anchored_genesis = primechain::node::makeGenesisPrimeRecordV0(
+        genesis_validators);
+    std::string genesis_error;
+    if (!expect(verifyGenesisConfig(anchored_genesis, genesis_error),
+                "verify anchored genesis validator set")) {
+        std::cerr << genesis_error << "\n";
+        return 1;
+    }
+    const auto decoded_genesis = deserializePrimeRecord(
+        serializePrimeRecord(anchored_genesis), genesis_error);
+    if (!expect(decoded_genesis.has_value() &&
+                    decoded_genesis->genesis_config.validator_set ==
+                        anchored_genesis.genesis_config.validator_set,
+                "anchored genesis round trip")) {
+        std::cerr << genesis_error << "\n";
+        return 1;
+    }
+    auto duplicate_genesis = anchored_genesis;
+    duplicate_genesis.genesis_config.validator_set[1] =
+        duplicate_genesis.genesis_config.validator_set[0];
+    std::sort(duplicate_genesis.genesis_config.validator_set.begin(),
+              duplicate_genesis.genesis_config.validator_set.end());
+    genesis_error.clear();
+    if (!expect(!verifyGenesisConfig(duplicate_genesis, genesis_error),
+                "reject duplicate genesis validator")) {
         return 1;
     }
 

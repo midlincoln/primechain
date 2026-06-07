@@ -102,6 +102,10 @@ struct FinalizationProofV0 {
     std::vector<ValidatorVoteV0> votes;
 };
 
+struct GenesisConfigV1 {
+    std::vector<Address> validator_set;
+};
+
 struct CompositeRecordV0 {
     std::uint64_t version{0};
     std::uint64_t height{0};
@@ -124,6 +128,7 @@ struct PrimeRecordV0 {
     TransactionBatchV0 tx_batch;
     std::vector<TransactionV0> transactions;
     Hash256 state_root{};
+    GenesisConfigV1 genesis_config;
     FinalizationProofV0 finalized_by;
 };
 
@@ -159,5 +164,6 @@ Hash256 commitPhaseSnapshotHash(
     const std::vector<CommitCertificateEntryV1>& commitments);
 bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record, std::string& error);
+bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error);
 
 } // namespace primechain::protocol

@@ -354,3 +354,23 @@ This removes sidecar dependence from finalized history. It does not yet solve
 validator-set authorization: the controlled testnet still configures three
 validators manually, and production consensus must anchor membership in genesis
 or signed validator-epoch transitions.
+
+## 2026-06-07: Genesis-Anchored Validator Set
+
+Prime record version 1 now supports `GenesisConfigV1`, which commits the
+canonical three-address Ed25519 validator set into the height-zero record.
+`SequentialNode` derives authorization from genesis and rejects composite
+certificates whose embedded validator set differs, including during standalone
+historical replay without quorum server configuration.
+
+Empty quorum nodes create anchored genesis immediately. Peer bootstrap accepts
+and reproduces that exact genesis record. Quorum startup rejects legacy
+version-0 genesis and any configured replacement validator set. `GET_VALIDATORS`
+reports the validator set derived from chain state.
+
+Tests cover serialization and duplicate-address rejection, fresh peer bootstrap,
+legacy-genesis refusal, and an attempted A/B/C to A/B/X validator replacement.
+Peer sync validates the downloaded genesis in a temporary store and rejects a
+mismatched validator anchor before replacing local chain data.
+This anchors initial controlled-testnet membership; signed validator epochs and
+permissionless validator selection remain open.
