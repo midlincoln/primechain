@@ -432,9 +432,15 @@ Validation rules:
 - reveal must match a prior commit,
 - proof must independently verify,
 - provider address must match,
-- candidate must target the current frontier integer.
+- candidate must target the current frontier integer,
+- among the commitments currently known for an integer, select the
+  lexicographically smallest `(commitment_hash, provider_address)` pair,
+- only the selected provider may finalize the composite record.
 
-Ordering and reward attribution remain consensus-policy questions.
+This candidate rule is independent of local arrival order, but it is provisional.
+It permits nonce grinding and cannot ensure that all nodes have the same
+candidate set before finalization. Production ordering and reward attribution
+require persistent signed commitments plus a quorum-defined commit boundary.
 
 ## 11. Bitcoin Mirror Payload
 

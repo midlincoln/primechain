@@ -932,6 +932,10 @@ public:
                 submitCommit(fd, *line);
                 continue;
             }
+            if (line->rfind("GET_COMMIT_WINNER ", 0) == 0) {
+                sendCommitWinner(fd, *line);
+                continue;
+            }
             if (line->rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0) {
                 submitCompositeReveal(fd, *line);
                 continue;
@@ -1491,6 +1495,43 @@ private:
         writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
     }
 
+    std::optional<std::pair<std::string, primechain::Hash256>> selectedCommitment(
+        primechain::PrimeValue g) const {
+        std::optional<std::pair<std::string, primechain::Hash256>> selected;
+        for (const auto& entry : commitments_) {
+            if (entry.first.first != g) {
+                continue;
+            }
+            const auto candidate = std::make_pair(entry.first.second, entry.second);
+            if (!selected.has_value() ||
+                candidate.second < selected->second ||
+                (candidate.second == selected->second && candidate.first < selected->first)) {
+                selected = candidate;
+            }
+        }
+        return selected;
+    }
+
+    void sendCommitWinner(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue g = 0;
+        std::string extra;
+        in >> command >> g;
+        if (!in || command != "GET_COMMIT_WINNER" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_COMMIT_WINNER; expected GET_COMMIT_WINNER g\n");
+            return;
+        }
+
+        const auto selected = selectedCommitment(g);
+        if (!selected.has_value()) {
+            writeAll(fd, "COMMIT_WINNER_NONE " + std::to_string(g) + "\n");
+            return;
+        }
+        writeAll(fd, "COMMIT_WINNER " + std::to_string(g) + " "
+            + primechain::crypto::toHex(selected->second) + " " + selected->first + "\n");
+    }
+
     void submitCompositeReveal(int fd, const std::string& line) {
         std::istringstream in(line);
         std::string command;
@@ -1519,6 +1560,15 @@ private:
             g, d, e, nonce, provider_address);
         if (revealed != existing->second) {
             writeAll(fd, "ERROR reveal does not match prior commitment\n");
+            return;
+        }
+
+        const auto selected = selectedCommitment(g);
+        if (!selected.has_value() ||
+            selected->first != provider_address ||
+            selected->second != existing->second) {
+            writeAll(fd, "ERROR commitment not selected for reveal; winner="
+                + (selected.has_value() ? selected->first : std::string("none")) + "\n");
             return;
         }
 

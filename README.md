@@ -317,6 +317,7 @@ Formats:
 
 ```text
 SUBMIT_COMMIT g commitment_hash provider_address
+GET_COMMIT_WINNER g
 SUBMIT_COMPOSITE_REVEAL g d e nonce provider_address
 ```
 
@@ -324,8 +325,12 @@ The node requires a prior commitment for the same `(g, provider_address)`,
 recomputes the commitment, verifies `d * e = g`, and requires `g` to extend the
 current frontier. Commitments are bounded in memory, stale earlier-integer
 commitments are pruned, and newly accepted commitments are propagated to known
-peers. A reveal without a commitment, or with different factors, nonce, or
-provider, is rejected.
+peers. For all commitments currently known for `g`, the selected candidate is
+the lexicographically smallest `(commitment_hash, provider_address)` pair. This
+selection is independent of message arrival order. A reveal without a
+commitment, with different factors, nonce, or provider, or from a non-selected
+commitment is rejected. `GET_COMMIT_WINNER g` reports the currently selected
+candidate.
 
 Current success responses:
 
@@ -343,9 +348,12 @@ finalized consensus records. The current `devHash256` implementation tests the
 protocol flow but is not production cryptography; SHA3-256 or another selected
 production hash must replace it before an adversarial testnet. This version
 prevents an ordinary peer that first learns the factors at reveal time from
-claiming the same reveal without a prior matching commitment. It does not yet establish a globally agreed earliest commitment across
-asynchronous nodes. That requires a commit phase boundary and validator
-quorum, or another consensus ordering rule.
+claiming the same reveal without a prior matching commitment. It does not establish that the selected commitment was globally earliest.
+The current lowest-hash rule gives deterministic convergence once nodes know
+the same candidate set, but miners can vary nonces to grind for a lower hash,
+and a node may finalize before learning a better commitment. A production
+fairness rule still requires a commit phase boundary, signed validator quorum,
+and persistent commitment records.
 
 A correct peer independently validates every finalized composite record. For
 example, `2 * 2 = 5` is rejected and cannot advance an honest node. Competing

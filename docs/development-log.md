@@ -275,3 +275,15 @@ arrival times are not a globally reliable ordering source. A later protocol
 step must define a commit phase boundary plus quorum/finality rules before the
 project claims that the earliest network commitment deterministically receives
 the composite reward.
+
+## 2026-06-07: Deterministic Composite Candidate Selection
+
+Nodes now select the lexicographically smallest
+`(commitment_hash, provider_address)` pair among commitments known for the
+frontier integer. `GET_COMMIT_WINNER g` exposes that selection. Composite
+reveals from other commitments are rejected. A two-node integration test sends
+the same commitments in opposite orders and verifies identical selection.
+
+This closes arrival-order nondeterminism for an identical candidate set. It is
+not yet a fairness proof: nonce grinding is possible, commitments are not
+persistent, and finalization has no quorum-defined commit-phase boundary.
