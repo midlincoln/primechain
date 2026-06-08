@@ -12,6 +12,39 @@ namespace primechain::crypto {
 
 using Bytes = std::vector<std::uint8_t>;
 
+enum class SignatureAlgorithm : std::uint8_t {
+    Ed25519 = 1,
+    MlDsa65 = 2,
+};
+
+struct SignatureKeyPair {
+    SignatureAlgorithm algorithm{SignatureAlgorithm::Ed25519};
+    Bytes private_key;
+    Bytes public_key;
+};
+
+std::string signatureAlgorithmName(SignatureAlgorithm algorithm);
+std::optional<SignatureAlgorithm> parseSignatureAlgorithm(const std::string& name);
+std::size_t signaturePublicKeySize(SignatureAlgorithm algorithm);
+std::size_t signaturePrivateKeySize(SignatureAlgorithm algorithm);
+std::size_t signatureSize(SignatureAlgorithm algorithm);
+std::optional<SignatureKeyPair> generateSignatureKeyPair(
+    SignatureAlgorithm algorithm,
+    std::string& error);
+std::optional<Bytes> signMessage(
+    SignatureAlgorithm algorithm,
+    const Bytes& private_key,
+    const Bytes& message,
+    std::string& error);
+bool verifyMessageSignature(
+    SignatureAlgorithm algorithm,
+    const Bytes& public_key,
+    const Bytes& message,
+    const Bytes& signature,
+    std::string& error);
+Address addressFromPublicKey(SignatureAlgorithm algorithm, const Bytes& public_key);
+bool isAddressForAlgorithm(SignatureAlgorithm algorithm, const Address& address);
+
 struct Ed25519KeyPair {
     Bytes private_key;
     Bytes public_key;

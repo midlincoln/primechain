@@ -5,6 +5,11 @@
 #include <string_view>
 
 #include <openssl/evp.h>
+#include <openssl/rand.h>
+
+extern "C" {
+#include "mldsa_native.h"
+}
 
 #include "primechain/crypto/hash.hpp"
 
@@ -35,6 +40,115 @@ std::string opensslError(const std::string& operation) {
 }
 
 } // namespace
+
+extern "C" int randombytes(std::uint8_t* out, std::size_t outlen) {
+    return RAND_bytes(out, static_cast<int>(outlen)) == 1 ? 0 : -1;
+}
+
+std::string signatureAlgorithmName(SignatureAlgorithm algorithm) {
+    switch (algorithm) {
+        case SignatureAlgorithm::Ed25519: return "ed25519";
+        case SignatureAlgorithm::MlDsa65: return "ml-dsa-65";
+    }
+    return "unknown";
+}
+
+std::optional<SignatureAlgorithm> parseSignatureAlgorithm(const std::string& name) {
+    if (name == "ed25519") return SignatureAlgorithm::Ed25519;
+    if (name == "ml-dsa-65") return SignatureAlgorithm::MlDsa65;
+    return std::nullopt;
+}
+
+std::size_t signaturePublicKeySize(SignatureAlgorithm algorithm) {
+    return algorithm == SignatureAlgorithm::Ed25519 ? 32 : MLDSA65_PUBLICKEYBYTES;
+}
+
+std::size_t signaturePrivateKeySize(SignatureAlgorithm algorithm) {
+    return algorithm == SignatureAlgorithm::Ed25519 ? 32 : MLDSA65_SECRETKEYBYTES;
+}
+
+std::size_t signatureSize(SignatureAlgorithm algorithm) {
+    return algorithm == SignatureAlgorithm::Ed25519 ? 64 : MLDSA65_BYTES;
+}
+
+std::optional<SignatureKeyPair> generateSignatureKeyPair(
+    SignatureAlgorithm algorithm,
+    std::string& error) {
+    if (algorithm == SignatureAlgorithm::Ed25519) {
+        const auto pair = generateEd25519KeyPair(error);
+        if (!pair.has_value()) return std::nullopt;
+        return SignatureKeyPair{algorithm, pair->private_key, pair->public_key};
+    }
+    SignatureKeyPair pair;
+    pair.algorithm = algorithm;
+    pair.private_key.resize(MLDSA65_SECRETKEYBYTES);
+    pair.public_key.resize(MLDSA65_PUBLICKEYBYTES);
+    if (MLD_API_NAMESPACE(keypair)(pair.public_key.data(), pair.private_key.data()) != 0) {
+        error = "ML-DSA-65 key generation failed";
+        return std::nullopt;
+    }
+    return pair;
+}
+
+std::optional<Bytes> signMessage(
+    SignatureAlgorithm algorithm,
+    const Bytes& private_key,
+    const Bytes& message,
+    std::string& error) {
+    if (algorithm == SignatureAlgorithm::Ed25519) {
+        return ed25519Sign(private_key, message, error);
+    }
+    if (private_key.size() != MLDSA65_SECRETKEYBYTES) {
+        error = "invalid ML-DSA-65 private key size";
+        return std::nullopt;
+    }
+    Bytes signature(MLDSA65_BYTES);
+    std::size_t signature_size = 0;
+    if (MLD_API_NAMESPACE(signature)(signature.data(), &signature_size,
+            message.data(), message.size(), nullptr, 0, private_key.data()) != 0) {
+        error = "ML-DSA-65 signing failed";
+        return std::nullopt;
+    }
+    signature.resize(signature_size);
+    return signature;
+}
+
+bool verifyMessageSignature(
+    SignatureAlgorithm algorithm,
+    const Bytes& public_key,
+    const Bytes& message,
+    const Bytes& signature,
+    std::string& error) {
+    if (algorithm == SignatureAlgorithm::Ed25519) {
+        return ed25519Verify(public_key, message, signature, error);
+    }
+    if (public_key.size() != MLDSA65_PUBLICKEYBYTES || signature.size() != MLDSA65_BYTES) {
+        error = "invalid ML-DSA-65 public key or signature size";
+        return false;
+    }
+    if (MLD_API_NAMESPACE(verify)(signature.data(), signature.size(),
+            message.data(), message.size(), nullptr, 0, public_key.data()) != 0) {
+        error = "invalid ML-DSA-65 signature";
+        return false;
+    }
+    return true;
+}
+
+Address addressFromPublicKey(SignatureAlgorithm algorithm, const Bytes& public_key) {
+    const Hash256 hash = sha3_256(public_key);
+    const std::string prefix = algorithm == SignatureAlgorithm::Ed25519 ? "pc1_" : "pcpq1_";
+    return prefix + toHex(hash).substr(0, 40);
+}
+
+bool isAddressForAlgorithm(SignatureAlgorithm algorithm, const Address& address) {
+    const std::string_view prefix = algorithm == SignatureAlgorithm::Ed25519 ? "pc1_" : "pcpq1_";
+    if (address.size() != prefix.size() + 40 ||
+        address.compare(0, prefix.size(), prefix.data(), prefix.size()) != 0) {
+        return false;
+    }
+    return std::all_of(address.begin() + static_cast<std::ptrdiff_t>(prefix.size()), address.end(),
+        [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); });
+}
 
 std::optional<Ed25519KeyPair> generateEd25519KeyPair(std::string& error) {
     PkeyCtxPtr context(EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr), EVP_PKEY_CTX_free);
@@ -124,19 +238,11 @@ bool ed25519Verify(
 }
 
 Address addressFromEd25519PublicKey(const Bytes& public_key) {
-    const Hash256 hash = sha3_256(public_key);
-    return "pc1_" + toHex(hash).substr(0, 40);
+    return addressFromPublicKey(SignatureAlgorithm::Ed25519, public_key);
 }
 
 bool isEd25519Address(const Address& address) {
-    constexpr std::string_view prefix = "pc1_";
-    if (address.size() != prefix.size() + 40 ||
-        address.compare(0, prefix.size(), prefix.data(), prefix.size()) != 0) {
-        return false;
-    }
-    return std::all_of(address.begin() + static_cast<std::ptrdiff_t>(prefix.size()), address.end(), [](char ch) {
-        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-    });
+    return isAddressForAlgorithm(SignatureAlgorithm::Ed25519, address);
 }
 
 Bytes compositeCommitSigningPayload(

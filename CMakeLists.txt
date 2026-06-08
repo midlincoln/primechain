@@ -2,10 +2,22 @@ cmake_minimum_required(VERSION 3.10)
 
 project(primechain
     VERSION 0.1.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
 )
 
 find_package(OpenSSL REQUIRED)
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mldsa-native/mldsa/mldsa_native.c")
+    message(FATAL_ERROR "missing mldsa-native submodule; run git submodule update --init")
+endif()
+
+add_library(primechain_mldsa65 STATIC
+    third_party/mldsa-native/mldsa/mldsa_native.c
+)
+target_compile_definitions(primechain_mldsa65 PRIVATE MLD_CONFIG_PARAMETER_SET=65)
+target_include_directories(primechain_mldsa65 PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mldsa-native/mldsa
+)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +39,8 @@ add_library(primechain_core
     src/wallet/miner_identity.cpp
 )
 
-target_link_libraries(primechain_core PUBLIC OpenSSL::Crypto)
+target_compile_definitions(primechain_core PRIVATE MLD_CONFIG_PARAMETER_SET=65)
+target_link_libraries(primechain_core PUBLIC OpenSSL::Crypto primechain_mldsa65)
 
 target_include_directories(primechain_core
     PUBLIC
@@ -266,6 +279,15 @@ target_link_libraries(primechain-finalization-store-tests
 
 add_executable(primechain-round-change-tests
     tests/round_change_tests.cpp
+)
+
+add_executable(primechain-signature-tests
+    tests/signature_tests.cpp
+)
+
+target_link_libraries(primechain-signature-tests
+    PRIVATE
+        primechain_core
 )
 
 target_link_libraries(primechain-round-change-tests
@@ -686,6 +708,11 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-change-test.dat* && $<TARGET_FILE:primechain-round-change-tests> ${CMAKE_CURRENT_BINARY_DIR}/round-change-test.dat"
+)
+
+add_test(
+    NAME signatures
+    COMMAND primechain-signature-tests
 )
 
 add_test(
