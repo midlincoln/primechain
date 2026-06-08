@@ -16,6 +16,7 @@ namespace {
 constexpr std::uint64_t kCompositeRecordTag = 1;
 constexpr std::uint64_t kPrimeRecordTag = 2;
 constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
+constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-ed25519-v1";
 constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
 
 class ByteReader {
@@ -159,6 +160,7 @@ void appendPrattProof(std::vector<std::uint8_t>& out, const PrattPrimeProofV0& p
 
 void appendValidatorVote(std::vector<std::uint8_t>& out, const ValidatorVoteV0& vote) {
     appendAddress(out, vote.validator_address);
+    appendBytes(out, vote.public_key);
     appendHash(out, vote.record_hash);
     appendUint64(out, vote.round);
     appendBytes(out, vote.signature);
@@ -300,6 +302,7 @@ bool readPrattProof(ByteReader& reader, PrattPrimeProofV0& proof) {
 
 bool readValidatorVote(ByteReader& reader, ValidatorVoteV0& vote) {
     return reader.readString(vote.validator_address) &&
+           reader.readBytes(vote.public_key) &&
            reader.readHash(vote.record_hash) &&
            reader.readUint64(vote.round) &&
            reader.readBytes(vote.signature);
@@ -764,7 +767,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 2) ||
+        if ((record.version != 0 && record.version != 1 && record.version != 2) ||
             !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
@@ -951,6 +954,75 @@ bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash2
         }
     }
 
+    return true;
+}
+
+ValidatorVoteV0 makeSignedValidatorVote(
+    const Address& validator_address,
+    const Bytes& public_key,
+    const Bytes& private_key,
+    const Hash256& record_hash,
+    std::uint64_t round,
+    std::string& error) {
+    ValidatorVoteV0 vote;
+    vote.validator_address = validator_address;
+    vote.public_key = public_key;
+    vote.record_hash = record_hash;
+    vote.round = round;
+    const auto signature = crypto::ed25519Sign(
+        private_key,
+        crypto::recordFinalizationVoteSigningPayload(record_hash, round, validator_address),
+        error);
+    if (signature.has_value()) vote.signature = *signature;
+    return vote;
+}
+
+bool verifyRecordFinalization(
+    const FinalizationProofV0& proof,
+    const Hash256& candidate_hash,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    if (validator_set.empty()) {
+        return verifyDevelopmentFinalization(proof, candidate_hash, error);
+    }
+    if (proof.rule != kSignedFinalizationRule) {
+        error = "quorum records require Ed25519 finalization";
+        return false;
+    }
+    if (validator_set.size() != 3 || proof.votes.size() < 2 || proof.votes.size() > 3) {
+        error = "signed finalization requires two or three votes from a three-validator set";
+        return false;
+    }
+    Address previous;
+    for (const auto& vote : proof.votes) {
+        if (!previous.empty() && previous >= vote.validator_address) {
+            error = "finalization votes are not canonical";
+            return false;
+        }
+        previous = vote.validator_address;
+        if (!std::binary_search(validator_set.begin(), validator_set.end(), vote.validator_address)) {
+            error = "finalization vote is outside active validator set";
+            return false;
+        }
+        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            error = "finalization vote address mismatch";
+            return false;
+        }
+        if (vote.record_hash != candidate_hash || vote.round != 1) {
+            error = "finalization vote target mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::ed25519Verify(
+                vote.public_key,
+                crypto::recordFinalizationVoteSigningPayload(
+                    vote.record_hash, vote.round, vote.validator_address),
+                vote.signature,
+                signature_error)) {
+            error = "invalid finalization vote signature";
+            return false;
+        }
+    }
     return true;
 }
 

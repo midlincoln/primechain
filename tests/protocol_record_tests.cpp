@@ -277,6 +277,47 @@ int main() {
         std::cerr << vote_error << "\n";
         return 1;
     }
+    auto signed_record = composite;
+    signed_record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    signed_record.finalized_by.votes.clear();
+    std::vector<primechain::crypto::Ed25519KeyPair> validator_keys;
+    std::vector<primechain::Address> validator_set;
+    for (int i = 0; i < 3; ++i) {
+        std::string key_error;
+        const auto key = primechain::crypto::generateEd25519KeyPair(key_error);
+        if (!expect(key.has_value(), "generate finalization validator key")) return 1;
+        validator_set.push_back(primechain::crypto::addressFromEd25519PublicKey(key->public_key));
+        validator_keys.push_back(*key);
+    }
+    std::vector<std::size_t> order{0, 1, 2};
+    std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+        return validator_set[left] < validator_set[right];
+    });
+    std::vector<primechain::Address> sorted_validators;
+    for (const auto index : order) sorted_validators.push_back(validator_set[index]);
+    const auto signed_hash = candidateRecordHash(signed_record);
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto index = order[i];
+        auto signed_vote = makeSignedValidatorVote(
+            validator_set[index], validator_keys[index].public_key,
+            validator_keys[index].private_key, signed_hash, 1, vote_error);
+        signed_record.finalized_by.votes.push_back(std::move(signed_vote));
+    }
+    if (!expect(
+            verifyRecordFinalization(
+                signed_record.finalized_by, signed_hash, sorted_validators, vote_error),
+            "valid signed two-of-three finalization")) {
+        std::cerr << vote_error << "\n";
+        return 1;
+    }
+    auto tampered_finalization = signed_record.finalized_by;
+    tampered_finalization.votes[0].signature[0] ^= 0x01;
+    vote_error.clear();
+    if (!expect(
+            !verifyRecordFinalization(
+                tampered_finalization, signed_hash, sorted_validators, vote_error),
+            "reject tampered finalization signature")) return 1;
+
     auto duplicate_vote = composite;
     duplicate_vote.finalized_by.votes[1].validator_address = duplicate_vote.finalized_by.votes[0].validator_address;
     duplicate_vote.finalized_by.votes[1].signature = developmentVoteSignature(

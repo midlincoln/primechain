@@ -424,3 +424,24 @@ This is an intentional pre-testnet format break: existing `.dat`, `.commitments`
 the former hash must be regenerated. The remaining cryptographic milestone is
 replacing synthetic development finalization votes with validator signatures over
 the complete candidate record hash.
+
+
+## 2026-06-08: Authenticated Record Finalization
+
+Replaced synthetic quorum-record finalization with canonical Ed25519 2-of-3
+signatures over the complete candidate record hash. Validator peers receive the
+full candidate plus the proposing active validator's signature, independently run
+non-mutating consensus and ledger validation, and sign only if it extends their
+current tip. Prime and composite records are
+appended only after two valid active-epoch signatures are collected.
+
+Added the domain-separated `primechain-record-finalization-v1` signing payload,
+public keys in validator votes, replay verification, and the internal
+`SIGN_RECORD_CANDIDATE` validator command. Pending signed choices are atomically
+stored in `<record-store>.finalization`; this prevents restart-based equivocation
+and is cleared when the finalized record is appended or synchronized.
+
+The current protocol deliberately favors safety over liveness: a validator will
+not sign a second candidate for the same integer. An explicit timeout and
+round-change protocol remains future work. Ed25519 remains the controlled-testnet
+algorithm and can later be replaced behind the signature interface by ML-DSA.

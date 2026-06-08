@@ -198,6 +198,18 @@ Bytes validatorEpochVoteSigningPayload(
     return payload;
 }
 
+Bytes recordFinalizationVoteSigningPayload(
+    const Hash256& candidate_hash,
+    std::uint64_t round,
+    const Address& validator_address) {
+    Bytes payload;
+    appendString(payload, "primechain-record-finalization-v1");
+    appendHash(payload, candidate_hash);
+    appendUint64(payload, round);
+    appendString(payload, validator_address);
+    return payload;
+}
+
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,

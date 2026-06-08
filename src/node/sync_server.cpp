@@ -10,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/commitment_store.hpp"
+#include "primechain/storage/finalization_store.hpp"
 #include "primechain/storage/phase_store.hpp"
 #include "primechain/storage/record_store.hpp"
 #include "primechain/storage/validator_epoch_store.hpp"
@@ -251,6 +253,7 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SIGN_RECORD_CANDIDATE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
@@ -869,6 +872,40 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
     return votes;
 }
 
+std::optional<primechain::protocol::ValidatorVoteV0> requestRecordFinalizationVote(
+    const PeerEndpoint& peer,
+    primechain::storage::StoredRecordKind kind,
+    const std::vector<std::uint8_t>& candidate_payload,
+    const primechain::protocol::ValidatorVoteV0& proposer_vote,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) { error = "could not connect to validator peer"; return std::nullopt; }
+    std::ostringstream command;
+    command << "SIGN_RECORD_CANDIDATE " << kindName(kind) << " "
+            << bytesToHex(candidate_payload) << " "
+            << proposer_vote.validator_address << " "
+            << bytesToHex(proposer_vote.public_key) << " "
+            << primechain::crypto::toHex(proposer_vote.record_hash) << " "
+            << proposer_vote.round << " " << bytesToHex(proposer_vote.signature) << "\n";
+    if (!writeAll(socket->fd(), command.str())) { error = "could not submit candidate to validator"; return std::nullopt; }
+    shutdown(socket->fd(), SHUT_WR);
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) { error = "validator did not return finalization vote"; return std::nullopt; }
+    std::istringstream in(*response);
+    std::string tag, hash_hex, public_hex, signature_hex, extra;
+    primechain::protocol::ValidatorVoteV0 vote;
+    in >> tag >> vote.validator_address >> public_hex >> hash_hex >> vote.round >> signature_hex;
+    const auto hash = parseHash(hash_hex);
+    if (!in || tag != "FINALIZATION_VOTE" || !hash.has_value() || (in >> extra)) {
+        error = *response;
+        return std::nullopt;
+    }
+    vote.public_key = hexToBytes(public_hex);
+    vote.record_hash = *hash;
+    vote.signature = hexToBytes(signature_hex);
+    return vote;
+}
+
 bool downloadRecordRange(
     const std::string& host,
     int port,
@@ -1051,6 +1088,7 @@ public:
           commitment_store_(store_path_ + ".commitments"),
           phase_store_(store_path_ + ".phases"),
           epoch_store_(store_path_ + ".epochs"),
+          finalization_store_(store_path_ + ".finalization"),
           genesis_validator_set_(validator_set),
           validator_set_(std::move(validator_set)),
           validator_identity_(std::move(validator_identity)) {
@@ -1203,6 +1241,10 @@ public:
             }
             if (line->rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0) {
                 submitEpochVote(fd, *line, false);
+                continue;
+            }
+            if (line->rfind("SIGN_RECORD_CANDIDATE ", 0) == 0) {
+                signRecordCandidate(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
@@ -1437,6 +1479,10 @@ public:
 
     bool loadEpochVotes(std::string& error) {
         return loadEpochVotesInternal(error);
+    }
+
+    bool loadFinalizationVotes(std::string& error) {
+        return loadFinalizationVotesInternal(error);
     }
 
 private:
@@ -1883,6 +1929,7 @@ private:
             return;
         }
         validator_set_ = node.validatorSet();
+        clearSignedCandidate(submitted->integer);
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
@@ -1962,6 +2009,252 @@ private:
             return;
         }
         writeAll(fd, "ERROR conflicting historical record\n");
+    }
+
+    std::vector<primechain::storage::SignedCandidateRecord> signedCandidateSnapshot() const {
+        std::vector<primechain::storage::SignedCandidateRecord> out;
+        for (const auto& entry : signed_candidates_) out.push_back({entry.first, entry.second});
+        return out;
+    }
+
+    bool persistSignedCandidates(std::string& error) const {
+        return finalization_store_.replaceAll(signedCandidateSnapshot(), error);
+    }
+
+    bool loadFinalizationVotesInternal(std::string& error) {
+        signed_candidates_.clear();
+        const auto stored = finalization_store_.loadAll(error);
+        if (!error.empty()) return false;
+        if (!quorumEnabled()) {
+            if (!stored.empty()) { error = "finalization store exists but validator quorum is not configured"; return false; }
+            return true;
+        }
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        const auto target = node.status().frontier_integer + 1;
+        bool pruned = false;
+        for (const auto& record : stored) {
+            if (record.integer < target) { pruned = true; continue; }
+            const auto& vote = record.vote;
+            if (record.integer != target || vote.round != 1 ||
+                vote.validator_address != validator_identity_->address ||
+                vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+                error = "invalid persisted finalization vote";
+                return false;
+            }
+            std::string verify_error;
+            if (!primechain::crypto::ed25519Verify(
+                    vote.public_key,
+                    primechain::crypto::recordFinalizationVoteSigningPayload(
+                        vote.record_hash, vote.round, vote.validator_address),
+                    vote.signature,
+                    verify_error)) {
+                error = "invalid persisted finalization signature";
+                return false;
+            }
+            if (!signed_candidates_.emplace(record.integer, vote).second) {
+                error = "duplicate persisted finalization vote";
+                return false;
+            }
+        }
+        if (pruned && !persistSignedCandidates(error)) return false;
+        return true;
+    }
+
+    void clearSignedCandidate(primechain::PrimeValue integer) {
+        if (signed_candidates_.erase(integer) == 0) return;
+        std::string error;
+        if (!persistSignedCandidates(error)) {
+            std::cerr << "finalization vote cleanup warning: " << error << "\n";
+        }
+    }
+
+    bool makeLocalFinalizationVote(
+        primechain::storage::StoredRecordKind kind,
+        const std::vector<std::uint8_t>& candidate_payload,
+        const primechain::protocol::ValidatorVoteV0* proposer_vote,
+        primechain::protocol::ValidatorVoteV0& vote,
+        std::string& error) {
+        if (!quorumEnabled() || !validator_identity_.has_value()) {
+            error = "validator quorum identity is not configured";
+            return false;
+        }
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+
+        primechain::PrimeValue integer = 0;
+        primechain::Hash256 candidate_hash{};
+        if (kind == primechain::storage::StoredRecordKind::Composite) {
+            auto record = primechain::protocol::deserializeCompositeRecord(candidate_payload, error);
+            if (!record.has_value()) return false;
+            if (record->finalized_by.rule != "fixed-2-of-3-ed25519-v1" ||
+                !record->finalized_by.votes.empty()) {
+                error = "candidate must contain an empty signed-finalization proof";
+                return false;
+            }
+            if (!node.validateCompositeCandidate(*record, error)) return false;
+            integer = record->integer;
+            candidate_hash = primechain::protocol::candidateRecordHash(*record);
+        } else {
+            auto record = primechain::protocol::deserializePrimeRecord(candidate_payload, error);
+            if (!record.has_value()) return false;
+            if (record->height == 0) { error = "genesis is not signed through candidate voting"; return false; }
+            if (record->finalized_by.rule != "fixed-2-of-3-ed25519-v1" ||
+                !record->finalized_by.votes.empty()) {
+                error = "candidate must contain an empty signed-finalization proof";
+                return false;
+            }
+            if (!node.validatePrimeCandidate(*record, error)) return false;
+            integer = record->integer;
+            candidate_hash = primechain::protocol::candidateRecordHash(*record);
+        }
+
+        if (proposer_vote != nullptr) {
+            if (proposer_vote->record_hash != candidate_hash || proposer_vote->round != 1 ||
+                !std::binary_search(
+                    validator_set_.begin(), validator_set_.end(), proposer_vote->validator_address) ||
+                proposer_vote->validator_address !=
+                    primechain::crypto::addressFromEd25519PublicKey(proposer_vote->public_key)) {
+                error = "candidate request is not authorized by an active validator";
+                return false;
+            }
+            std::string authorization_error;
+            if (!primechain::crypto::ed25519Verify(
+                    proposer_vote->public_key,
+                    primechain::crypto::recordFinalizationVoteSigningPayload(
+                        proposer_vote->record_hash, proposer_vote->round,
+                        proposer_vote->validator_address),
+                    proposer_vote->signature,
+                    authorization_error)) {
+                error = "invalid candidate proposer signature";
+                return false;
+            }
+        }
+
+        const auto existing = signed_candidates_.find(integer);
+        if (existing != signed_candidates_.end()) {
+            if (existing->second.record_hash != candidate_hash) {
+                error = "validator already signed a different candidate for this integer";
+                return false;
+            }
+            vote = existing->second;
+            return true;
+        }
+        vote = primechain::protocol::makeSignedValidatorVote(
+            validator_identity_->address,
+            validator_identity_->public_key,
+            validator_identity_->private_key,
+            candidate_hash,
+            1,
+            error);
+        if (vote.signature.empty()) return false;
+        signed_candidates_[integer] = vote;
+        if (!persistSignedCandidates(error)) {
+            signed_candidates_.erase(integer);
+            return false;
+        }
+        return true;
+    }
+
+    void signRecordCandidate(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, kind_text, payload_hex, proposer_public_hex;
+        std::string proposer_hash_hex, proposer_signature_hex, extra;
+        primechain::protocol::ValidatorVoteV0 proposer_vote;
+        in >> command >> kind_text >> payload_hex >> proposer_vote.validator_address
+           >> proposer_public_hex >> proposer_hash_hex >> proposer_vote.round
+           >> proposer_signature_hex;
+        const auto kind = parseKind(kind_text);
+        const auto payload = hexToBytes(payload_hex);
+        const auto proposer_hash = parseHash(proposer_hash_hex);
+        if (!in || command != "SIGN_RECORD_CANDIDATE" || !kind.has_value() ||
+            payload.empty() || !proposer_hash.has_value() || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SIGN_RECORD_CANDIDATE\n");
+            return;
+        }
+        proposer_vote.public_key = hexToBytes(proposer_public_hex);
+        proposer_vote.record_hash = *proposer_hash;
+        proposer_vote.signature = hexToBytes(proposer_signature_hex);
+        primechain::protocol::ValidatorVoteV0 vote;
+        std::string error;
+        if (!makeLocalFinalizationVote(*kind, payload, &proposer_vote, vote, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeAll(fd, "FINALIZATION_VOTE " + vote.validator_address + " "
+            + bytesToHex(vote.public_key) + " "
+            + primechain::crypto::toHex(vote.record_hash) + " "
+            + std::to_string(vote.round) + " " + bytesToHex(vote.signature) + "\n");
+    }
+
+    bool acceptFinalizationVote(
+        const primechain::protocol::ValidatorVoteV0& vote,
+        const primechain::Hash256& candidate_hash,
+        std::vector<primechain::protocol::ValidatorVoteV0>& votes,
+        std::string& error) const {
+        if (vote.record_hash != candidate_hash || vote.round != 1 ||
+            !std::binary_search(validator_set_.begin(), validator_set_.end(), vote.validator_address) ||
+            vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            error = "invalid validator finalization vote target";
+            return false;
+        }
+        for (const auto& existing : votes) {
+            if (existing.validator_address == vote.validator_address) return true;
+        }
+        std::string signature_error;
+        if (!primechain::crypto::ed25519Verify(
+                vote.public_key,
+                primechain::crypto::recordFinalizationVoteSigningPayload(
+                    vote.record_hash, vote.round, vote.validator_address),
+                vote.signature,
+                signature_error)) {
+            error = "invalid validator finalization signature";
+            return false;
+        }
+        votes.push_back(vote);
+        return true;
+    }
+
+    template <typename Record>
+    bool finalizeRecordCandidate(
+        Record& record,
+        primechain::storage::StoredRecordKind kind,
+        std::string& error) {
+        record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+        record.finalized_by.votes.clear();
+        const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
+        std::vector<std::uint8_t> payload;
+        if constexpr (std::is_same_v<Record, primechain::protocol::CompositeRecordV0>) {
+            payload = primechain::protocol::serializeCompositeRecord(record);
+        } else {
+            payload = primechain::protocol::serializePrimeRecord(record);
+        }
+
+        primechain::protocol::ValidatorVoteV0 local_vote;
+        if (!makeLocalFinalizationVote(kind, payload, nullptr, local_vote, error) ||
+            !acceptFinalizationVote(local_vote, candidate_hash, record.finalized_by.votes, error)) {
+            return false;
+        }
+        for (const auto& peer : peers_) {
+            if (record.finalized_by.votes.size() >= 2) break;
+            std::string peer_error;
+            const auto vote = requestRecordFinalizationVote(
+                peer, kind, payload, local_vote, peer_error);
+            if (!vote.has_value()) continue;
+            if (!acceptFinalizationVote(*vote, candidate_hash, record.finalized_by.votes, peer_error)) continue;
+        }
+        std::sort(record.finalized_by.votes.begin(), record.finalized_by.votes.end(),
+            [](const auto& left, const auto& right) {
+                return left.validator_address < right.validator_address;
+            });
+        if (!primechain::protocol::verifyRecordFinalization(
+                record.finalized_by, candidate_hash, validator_set_, error)) {
+            if (record.finalized_by.votes.size() < 2) {
+                error = "could not collect two validator finalization signatures";
+            }
+            return false;
+        }
+        return true;
     }
 
     bool quorumEnabled() const {
@@ -2992,7 +3285,12 @@ private:
                 record.version = 2;
                 record.validator_epoch = embeddedValidatorEpoch();
             }
-            primechain::protocol::applyDevelopmentFinalization(record);
+            primechain::protocol::updateTransactionBatch(record);
+            if (!finalizeRecordCandidate(
+                    record, primechain::storage::StoredRecordKind::Composite, error)) {
+                writeAll(fd, "ERROR could not finalize composite record: " + error + "\n");
+                return;
+            }
         }
         error.clear();
         if (!node.appendComposite(record, error)) {
@@ -3003,6 +3301,7 @@ private:
         clearEpochVotesAfterRecord();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
+        clearSignedCandidate(record.integer);
         propagateRecord(stored);
         writeAll(fd, "COMPOSITE_ACCEPTED "
             + std::to_string(g)
@@ -3109,10 +3408,18 @@ private:
         }
 
         auto record = makePrimeRecord(node.status(), proof.p, proof, provider_address);
+        if (quorumEnabled()) record.version = 1;
         if (epochProposalReady()) {
             record.version = 2;
             record.validator_epoch = embeddedValidatorEpoch();
-            primechain::protocol::applyDevelopmentFinalization(record);
+        }
+        if (quorumEnabled()) {
+            primechain::protocol::updateTransactionBatch(record);
+            if (!finalizeRecordCandidate(
+                    record, primechain::storage::StoredRecordKind::Prime, error)) {
+                writeAll(fd, "ERROR could not finalize prime record: " + error + "\n");
+                return;
+            }
         }
         error.clear();
         if (!node.appendPrime(record, error)) {
@@ -3123,6 +3430,7 @@ private:
         clearEpochVotesAfterRecord();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
+        clearSignedCandidate(record.integer);
         propagateRecord(stored);
         writeAll(fd, "PRIME_ACCEPTED "
             + std::to_string(proof.p)
@@ -3378,6 +3686,7 @@ private:
     primechain::storage::CommitmentStore commitment_store_;
     primechain::storage::PhaseStore phase_store_;
     primechain::storage::ValidatorEpochStore epoch_store_;
+    primechain::storage::FinalizationStore finalization_store_;
     std::vector<primechain::Address> genesis_validator_set_;
     std::vector<primechain::Address> validator_set_;
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
@@ -3389,6 +3698,7 @@ private:
         std::pair<primechain::PrimeValue, std::string>,
         primechain::storage::CommitPhaseVote> phase_votes_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
+    std::map<primechain::PrimeValue, primechain::protocol::ValidatorVoteV0> signed_candidates_;
 };
 
 struct Options {
@@ -3567,6 +3877,11 @@ int main(int argc, char** argv) {
         error.clear();
         if (!sync_server.loadEpochVotes(error)) {
             std::cerr << "validator epoch store load failed: " << error << "\n";
+            return 1;
+        }
+        error.clear();
+        if (!sync_server.loadFinalizationVotes(error)) {
+            std::cerr << "finalization store load failed: " << error << "\n";
             return 1;
         }
     }

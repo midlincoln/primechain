@@ -73,7 +73,23 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     }
     std::sort(record.validator_epoch.votes.begin(), record.validator_epoch.votes.end(),
         [](const auto& lhs, const auto& rhs) { return lhs.validator_address < rhs.validator_address; });
-    primechain::protocol::applyDevelopmentFinalization(record);
+    primechain::protocol::updateTransactionBatch(record);
+    record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    record.finalized_by.votes.clear();
+    const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
+    for (std::size_t i = 0; i < 2; ++i) {
+        auto vote = primechain::protocol::makeSignedValidatorVote(
+            current[i].address,
+            current[i].keys.public_key,
+            current[i].keys.private_key,
+            candidate_hash,
+            1,
+            error);
+        if (vote.signature.empty()) return {};
+        record.finalized_by.votes.push_back(std::move(vote));
+    }
+    std::sort(record.finalized_by.votes.begin(), record.finalized_by.votes.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.validator_address < rhs.validator_address; });
     return record;
 }
 

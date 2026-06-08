@@ -30,6 +30,8 @@ public:
     bool initializeGenesis(const std::vector<Address>& validator_set, std::string& error);
     bool initializeGenesis(std::string& error) { return initializeGenesis({}, error); }
 
+    bool validateCompositeCandidate(const protocol::CompositeRecordV0& record, std::string& error);
+    bool validatePrimeCandidate(const protocol::PrimeRecordV0& record, std::string& error);
     bool appendComposite(const protocol::CompositeRecordV0& record, std::string& error);
     bool appendPrime(const protocol::PrimeRecordV0& record, std::string& error);
 

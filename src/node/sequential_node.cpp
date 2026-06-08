@@ -102,6 +102,7 @@ bool validateCompositeProviderSignature(
 bool validateStoredCompositePayload(
     const storage::StoredRecord& stored,
     const Hash256& expected_previous_hash,
+    const std::vector<Address>& validator_set,
     std::string& error) {
     const auto decoded = protocol::deserializeCompositeRecord(stored.payload, error);
     if (!decoded.has_value()) {
@@ -141,7 +142,8 @@ bool validateStoredCompositePayload(
         error = "embedded commit-phase certificate has no validator set";
         return false;
     }
-    if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
+    if (!protocol::verifyRecordFinalization(
+            decoded->finalized_by, protocol::candidateRecordHash(*decoded), validator_set, error)) {
         return false;
     }
     return true;
@@ -150,6 +152,7 @@ bool validateStoredCompositePayload(
 bool validateStoredPrimePayload(
     const storage::StoredRecord& stored,
     const Hash256& expected_previous_hash,
+    const std::vector<Address>& validator_set,
     std::string& error) {
     const auto decoded = protocol::deserializePrimeRecord(stored.payload, error);
     if (!decoded.has_value()) {
@@ -181,7 +184,8 @@ bool validateStoredPrimePayload(
     if (!protocol::verifyGenesisConfig(*decoded, error)) {
         return false;
     }
-    if (!protocol::verifyDevelopmentFinalization(decoded->finalized_by, protocol::candidateRecordHash(*decoded), error)) {
+    if (!protocol::verifyRecordFinalization(
+            decoded->finalized_by, protocol::candidateRecordHash(*decoded), validator_set, error)) {
         return false;
     }
     return true;
@@ -226,7 +230,7 @@ bool SequentialNode::load(std::string& error) {
             return false;
         }
         if (record.kind == storage::StoredRecordKind::Composite) {
-            if (!validateStoredCompositePayload(record, expected_previous_hash, error)) {
+            if (!validateStoredCompositePayload(record, expected_previous_hash, validator_set_, error)) {
                 return false;
             }
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
@@ -254,7 +258,7 @@ bool SequentialNode::load(std::string& error) {
                 validator_epoch_ = decoded->validator_epoch.epoch;
             }
         } else {
-            if (!validateStoredPrimePayload(record, expected_previous_hash, error)) {
+            if (!validateStoredPrimePayload(record, expected_previous_hash, validator_set_, error)) {
                 return false;
             }
             const auto decoded = protocol::deserializePrimeRecord(record.payload, error);
@@ -319,61 +323,75 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     return true;
 }
 
-bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, std::string& error) {
-    if (!validateCommon(record.height, record.integer, record.previous_record_hash, error)) {
-        return false;
-    }
-    if (record.proof.g != record.integer) {
-        error = "composite proof integer mismatch";
-        return false;
-    }
-    if (!protocol::isProtocolAddress(record.proof.provider_address)) {
-        error = "invalid composite provider address";
-        return false;
-    }
-    if (!math::verifyCompositeProof(toLegacyCompositeProof(record.proof))) {
-        error = "invalid composite proof";
-        return false;
-    }
-    if (!validateCompositeProviderSignature(record.proof, error)) {
-        error = "invalid composite provider signature: " + error;
-        return false;
-    }
-    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
-        return false;
-    }
-    if (!protocol::verifyCommitPhaseCertificate(record, error)) {
-        return false;
-    }
+bool SequentialNode::validateCompositeCandidate(
+    const protocol::CompositeRecordV0& record,
+    std::string& error) {
+    if (!validateCommon(record.height, record.integer, record.previous_record_hash, error)) return false;
+    if (record.proof.g != record.integer) { error = "composite proof integer mismatch"; return false; }
+    if (!protocol::isProtocolAddress(record.proof.provider_address)) { error = "invalid composite provider address"; return false; }
+    if (!math::verifyCompositeProof(toLegacyCompositeProof(record.proof))) { error = "invalid composite proof"; return false; }
+    if (!validateCompositeProviderSignature(record.proof, error)) { error = "invalid composite provider signature: " + error; return false; }
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
+    if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2) ||
-         record.commit_phase.validator_set != validator_set_)) {
+        ((record.version != 1 && record.version != 2) || record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }
     if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
-            record.previous_record_hash, record.integer, error)) {
-        return false;
-    }
-    if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
-        return false;
-    }
+            record.previous_record_hash, record.integer, error)) return false;
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
     const auto pending_before = pending_composite_providers_;
-    if (!applyTransactions(record.transactions, error)) {
-        return false;
-    }
-    if (!applyCompositeLedger(record, error)) {
+    const bool valid = applyTransactions(record.transactions, error) && applyCompositeLedger(record, error);
+    balances_ = balances_before;
+    total_supply_ = total_supply_before;
+    pending_composite_providers_ = pending_before;
+    return valid;
+}
+
+bool SequentialNode::validatePrimeCandidate(
+    const protocol::PrimeRecordV0& record,
+    std::string& error) {
+    if (!validateCommon(record.height, record.integer, record.previous_record_hash, error)) return false;
+    if (record.proof.p != record.integer) { error = "prime proof integer mismatch"; return false; }
+    if (!protocol::isProtocolAddress(record.proof.provider_address)) { error = "invalid prime provider address"; return false; }
+    if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
+    if (!protocol::verifyGenesisConfig(record, error)) return false;
+    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
+        !protocol::verifyValidatorEpochTransition(
+            record.validator_epoch, validator_set_, validator_epoch_,
+            record.previous_record_hash, record.integer, error)) return false;
+    if (totalSupplyMicroUnits(record.integer) != 0) { error = "prime asset already minted"; return false; }
+
+    const auto balances_before = balances_;
+    const auto total_supply_before = total_supply_;
+    const auto pending_before = pending_composite_providers_;
+    const bool valid = applyTransactions(record.transactions, error) && applyPrimeLedger(record, error);
+    balances_ = balances_before;
+    total_supply_ = total_supply_before;
+    pending_composite_providers_ = pending_before;
+    return valid;
+}
+
+bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, std::string& error) {
+    if (!validateCompositeCandidate(record, error)) return false;
+    if (!protocol::verifyRecordFinalization(
+            record.finalized_by, protocol::candidateRecordHash(record), validator_set_, error)) return false;
+
+    const auto balances_before = balances_;
+    const auto total_supply_before = total_supply_;
+    const auto pending_before = pending_composite_providers_;
+    if (!applyTransactions(record.transactions, error) || !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
-
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
         balances_ = balances_before;
@@ -381,7 +399,6 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         pending_composite_providers_ = pending_before;
         return false;
     }
-
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
@@ -393,54 +410,19 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
 }
 
 bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::string& error) {
-    if (!validateCommon(record.height, record.integer, record.previous_record_hash, error)) {
-        return false;
-    }
-    if (record.proof.p != record.integer) {
-        error = "prime proof integer mismatch";
-        return false;
-    }
-    if (!protocol::isProtocolAddress(record.proof.provider_address)) {
-        error = "invalid prime provider address";
-        return false;
-    }
-    if (!math::verifyPrattProof(toMathPrattProof(record.proof))) {
-        error = "invalid Pratt proof";
-        return false;
-    }
-    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) {
-        return false;
-    }
-    if (!protocol::verifyGenesisConfig(record, error)) {
-        return false;
-    }
-    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
-        !protocol::verifyValidatorEpochTransition(
-            record.validator_epoch, validator_set_, validator_epoch_,
-            record.previous_record_hash, record.integer, error)) {
-        return false;
-    }
-    if (!protocol::verifyDevelopmentFinalization(record.finalized_by, protocol::candidateRecordHash(record), error)) {
-        return false;
-    }
-    if (totalSupplyMicroUnits(record.integer) != 0) {
-        error = "prime asset already minted";
-        return false;
-    }
+    if (!validatePrimeCandidate(record, error)) return false;
+    if (!protocol::verifyRecordFinalization(
+            record.finalized_by, protocol::candidateRecordHash(record), validator_set_, error)) return false;
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
     const auto pending_before = pending_composite_providers_;
-    if (!applyTransactions(record.transactions, error)) {
-        return false;
-    }
-    if (!applyPrimeLedger(record, error)) {
+    if (!applyTransactions(record.transactions, error) || !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
-
     const auto stored = storage::makeStoredRecord(record);
     if (!store_.append(stored, error)) {
         balances_ = balances_before;
@@ -448,7 +430,6 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         pending_composite_providers_ = pending_before;
         return false;
     }
-
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;

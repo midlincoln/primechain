@@ -21,9 +21,10 @@ The v0 chain is intentionally small-number and development-focused:
 
 - integers use unsigned 64-bit values,
 - all consensus-critical hashing uses SHA3-256,
-- signatures are placeholder fields until a real signature layer is added,
+- composite contributors and controlled-testnet validators use Ed25519 signatures,
+- transaction and prime-provider authentication remain development-only,
 - Pratt certificates are the target prime-proof format for test-sized integers,
-- validator voting is specified structurally but not yet a production consensus mechanism.
+- validator voting is authenticated but remains a controlled 2-of-3 mechanism, not permissionless consensus.
 
 ## 2. Primitive Types
 
@@ -337,7 +338,7 @@ previous_record_hash = Hash256{0}
 
 ## 8. Finalization Proof
 
-v0 controlled testnet finalization uses a fixed validator set and 2-of-3 voting.
+Controlled-testnet finalization uses a genesis-anchored validator set and 2-of-3 voting.
 
 ```text
 FinalizationProof {
@@ -346,31 +347,48 @@ FinalizationProof {
 }
 ```
 
-v0 rule string:
+Rules:
 
 ```text
 fixed-2-of-3-dev
+fixed-2-of-3-ed25519-v1
 ```
 
-Validator vote:
+`fixed-2-of-3-dev` is restricted to unanchored single-node development records and deterministic genesis construction. Validator-anchored records use `fixed-2-of-3-ed25519-v1`.
 
 ```text
 ValidatorVote {
     validator_address: Address,
+    public_key: Bytes,
     record_hash: Hash256,
     round: UInt64,
     signature: Bytes
 }
 ```
 
+The signed payload is:
+
+```text
+Encode(
+    "primechain-record-finalization-v1",
+    candidate_record_hash,
+    round,
+    validator_address
+)
+```
+
 Validation rules:
 
-- validator addresses must belong to the configured validator set,
-- at least two distinct validators must vote for the same `record_hash`,
-- signatures are placeholder fields in v0,
-- later versions must replace placeholder signatures with real cryptographic validation.
+- the active validator set contains exactly three canonical `pc1_` addresses,
+- two or three distinct active validators sign the identical candidate hash,
+- the public key derives the claimed validator address,
+- votes are sorted by validator address,
+- the current protocol round is `1`,
+- validators persist one signed candidate per frontier integer to prevent equivocation across restart.
 
-This finalization model is for controlled synchronization tests only. It is not permissionless consensus.
+The proposing validator signs first and sends the complete candidate record, an empty vote list, and its authorization vote to validator peers. A peer rejects requests not authorized by an active validator, then independently validates arithmetic, certificates, transactions, rewards, epoch changes, and tip linkage before signing. The finalized record includes the collected votes and has a different finalized record hash.
+
+This remains controlled-testnet consensus. A timeout and round-change protocol is still required for robust liveness.
 
 ## 9. Record Hashing
 

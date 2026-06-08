@@ -21,6 +21,7 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/types.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 
 namespace {
 
@@ -36,6 +37,7 @@ struct Options {
     std::string prime_miner_address{kDefaultPrimeMinerAddress};
     std::string composite_miner_address{kDefaultCompositeMinerAddress};
     std::vector<primechain::Address> validator_set;
+    std::vector<std::string> validator_identity_paths;
     bool has_transfer{false};
     std::string transfer_sender_wallet;
     std::string transfer_receiver_address;
@@ -348,6 +350,7 @@ void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [limit] [text_log_path] [record_store_path] [--prime-miner address] [--composite-miner address]\n"
               << "       [--transfer sender.wallet receiver_address prime amount target_integer]\n"
               << "       [--mempool host port target_integer] [--validator-set addr1 addr2 addr3]\n"
+              << "       [--validator-identities validator1.wallet validator2.wallet]\n"
               << "example:\n"
               << "  " << argv0 << " 500 ./data/sequential-500.log ./data/sequential-500.dat --prime-miner pcdev1_...\n";
 }
@@ -370,6 +373,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             if (index + 2 >= argc) return std::nullopt;
             options.validator_set = {argv[index], argv[index + 1], argv[index + 2]};
             index += 3;
+            continue;
+        }
+        if (flag == "--validator-identities") {
+            if (index + 1 >= argc) return std::nullopt;
+            options.validator_identity_paths = {argv[index], argv[index + 1]};
+            index += 2;
             continue;
         }
         if (index >= argc) {
@@ -459,6 +468,29 @@ primechain::protocol::CompositeRecordV0 makeCompositeRecord(
     return record;
 }
 
+template <typename Record>
+bool applySignedFinalization(
+    Record& record,
+    const std::vector<primechain::wallet::MinerIdentity>& validators,
+    std::string& error) {
+    primechain::protocol::updateTransactionBatch(record);
+    record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    record.finalized_by.votes.clear();
+    const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
+    for (const auto& validator : validators) {
+        auto vote = primechain::protocol::makeSignedValidatorVote(
+            validator.address, validator.public_key, validator.private_key,
+            candidate_hash, 1, error);
+        if (vote.signature.empty()) return false;
+        record.finalized_by.votes.push_back(std::move(vote));
+    }
+    std::sort(record.finalized_by.votes.begin(), record.finalized_by.votes.end(),
+        [](const auto& left, const auto& right) {
+            return left.validator_address < right.validator_address;
+        });
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -495,6 +527,14 @@ int main(int argc, char** argv) {
         printUsage(argv[0]);
         return 1;
     }
+    if (options.validator_set.empty() != options.validator_identity_paths.empty()) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    if (!options.validator_set.empty() && options.validator_identity_paths.size() != 2) {
+        printUsage(argv[0]);
+        return 1;
+    }
     if (!options.validator_set.empty()) {
         std::set<primechain::Address> unique(
             options.validator_set.begin(), options.validator_set.end());
@@ -502,6 +542,18 @@ int main(int argc, char** argv) {
             printUsage(argv[0]);
             return 1;
         }
+    }
+    std::vector<primechain::wallet::MinerIdentity> finalization_validators;
+    for (const auto& path : options.validator_identity_paths) {
+        primechain::wallet::MinerIdentity identity;
+        std::string identity_error;
+        if (!primechain::wallet::loadMinerIdentity(path, identity, identity_error) ||
+            std::find(options.validator_set.begin(), options.validator_set.end(), identity.address) ==
+                options.validator_set.end()) {
+            std::cerr << "could not load configured validator identity: " << identity_error << "\n";
+            return 1;
+        }
+        finalization_validators.push_back(std::move(identity));
     }
     DevWallet transfer_sender;
     if (options.has_transfer && !loadDevWallet(options.transfer_sender_wallet, transfer_sender)) {
@@ -571,6 +623,11 @@ int main(int argc, char** argv) {
                         mempool_transactions.end());
                     primechain::protocol::applyDevelopmentFinalization(record);
                 }
+                if (!finalization_validators.empty() &&
+                    !applySignedFinalization(record, finalization_validators, error)) {
+                    std::cerr << "could not finalize prime record for " << n << ": " << error << "\n";
+                    return 1;
+                }
                 error.clear();
                 if (!node.appendPrime(record, error)) {
                     std::cerr << "could not append prime record for " << n << ": " << error << "\n";
@@ -605,6 +662,11 @@ int main(int argc, char** argv) {
                 mempool_transactions.begin(),
                 mempool_transactions.end());
             primechain::protocol::applyDevelopmentFinalization(record);
+        }
+        if (!finalization_validators.empty() &&
+            !applySignedFinalization(record, finalization_validators, error)) {
+            std::cerr << "could not finalize composite record for " << n << ": " << error << "\n";
+            return 1;
         }
         error.clear();
         if (!node.appendComposite(record, error)) {

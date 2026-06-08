@@ -71,6 +71,7 @@ struct PrattPrimeProofV0 {
 
 struct ValidatorVoteV0 {
     Address validator_address;
+    Bytes public_key;
     Hash256 record_hash{};
     std::uint64_t round{0};
     Bytes signature;
@@ -174,6 +175,18 @@ bool verifyDevelopmentTransactionSignature(const TransactionV0& tx);
 void applyDevelopmentFinalization(CompositeRecordV0& record);
 void applyDevelopmentFinalization(PrimeRecordV0& record);
 bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error);
+ValidatorVoteV0 makeSignedValidatorVote(
+    const Address& validator_address,
+    const Bytes& public_key,
+    const Bytes& private_key,
+    const Hash256& record_hash,
+    std::uint64_t round,
+    std::string& error);
+bool verifyRecordFinalization(
+    const FinalizationProofV0& proof,
+    const Hash256& candidate_hash,
+    const std::vector<Address>& validator_set,
+    std::string& error);
 Hash256 commitPhaseSnapshotHash(
     PrimeValue integer,
     const std::vector<CommitCertificateEntryV1>& commitments);

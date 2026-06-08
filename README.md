@@ -845,13 +845,16 @@ During replay, `SequentialNode` currently verifies:
 - development transaction signatures match the deterministic dev signature rule
 - transaction debits and credits balance per prime asset
 - record payloads link to the previous record hash
-- development validator votes point to the candidate record hash
-- development validator signatures match the deterministic dev signature rule
+- single-node development records satisfy the deterministic development finalization rule
+- quorum records contain two or three canonical Ed25519 validator signatures over the candidate record hash
+- every quorum signer belongs to the replay-derived active validator epoch
 - mining rewards reconstruct into the in-memory ledger state
 
 Startup and continuous peer sync use a temporary store before replacing the local store. If a hostile peer serves records whose payload hashes are correct but whose arithmetic is invalid, the temporary replay fails and the real local store is left unchanged. This prevents partial poisoning of the local chain during sync.
 
-The current finalization rule is development-only: `fixed-2-of-3-dev`. If this format changes, regenerate old local `.dat` stores with `primechain-sequential`.
+Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-ed25519-v1`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer. The sidecar is cleared after the finalized record arrives.
+
+This is controlled-testnet finalization, not permissionless Sybil resistance. There is not yet a round-change protocol: a validator that signs a candidate remains locked to it until that record finalizes. Existing pre-migration quorum stores must be regenerated.
 
 Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half.
 
@@ -971,11 +974,13 @@ Completed prototype milestones:
 - genesis-anchored 2-of-3 validator quorum
 - signed validator epoch transitions embedded in version-2 arithmetic records
 - replay-derived active validator set with next-integer activation
+- Ed25519 2-of-3 signatures over complete prime and composite candidate records
+- persistent validator anti-equivocation state in `.finalization` sidecars
 
 Next milestones:
 
-1. Replace development finalization votes with authenticated validator signatures.
-2. Authenticate prime submissions and production transaction signatures.
+1. Authenticate prime submissions and production transaction signatures.
+2. Add an explicit finalization round-change and timeout protocol.
 3. Harden persistence, indexing, resource limits, and adversarial network tests.
 4. Add the planned post-quantum signature migration after consensus stabilizes.
 

@@ -50,6 +50,10 @@ Bytes validatorEpochVoteSigningPayload(
     PrimeValue activation_integer,
     const std::vector<Address>& next_validator_set,
     const Address& validator_address);
+Bytes recordFinalizationVoteSigningPayload(
+    const Hash256& candidate_hash,
+    std::uint64_t round,
+    const Address& validator_address);
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,
