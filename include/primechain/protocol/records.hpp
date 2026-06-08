@@ -172,6 +172,7 @@ Bytes developmentVoteSignature(const Address& validator_address, const Hash256& 
 ValidatorVoteV0 makeDevelopmentVote(const Address& validator_address, const Hash256& record_hash, std::uint64_t round);
 Bytes developmentTransactionSignature(const TransactionV0& tx);
 bool verifyDevelopmentTransactionSignature(const TransactionV0& tx);
+bool verifyAuthenticatedTransactionSignature(const TransactionV0& tx, std::string& error);
 void applyDevelopmentFinalization(CompositeRecordV0& record);
 void applyDevelopmentFinalization(PrimeRecordV0& record);
 bool verifyDevelopmentFinalization(const FinalizationProofV0& proof, const Hash256& candidate_hash, std::string& error);

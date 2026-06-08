@@ -906,6 +906,22 @@ bool verifyDevelopmentTransactionSignature(const TransactionV0& tx) {
            tx.signature == developmentTransactionSignature(tx);
 }
 
+bool verifyAuthenticatedTransactionSignature(const TransactionV0& tx, std::string& error) {
+    if (!crypto::isEd25519Address(tx.sender_address)) {
+        error = "transaction sender is not an Ed25519 address";
+        return false;
+    }
+    if (tx.sender_address != crypto::addressFromEd25519PublicKey(tx.sender_public_key)) {
+        error = "transaction sender address does not match public key";
+        return false;
+    }
+    return crypto::ed25519Verify(
+        tx.sender_public_key,
+        crypto::transactionSigningPayload(serializeTransaction(tx, false)),
+        tx.signature,
+        error);
+}
+
 void applyDevelopmentFinalization(CompositeRecordV0& record) {
     updateTransactionBatch(record);
     record.finalized_by.rule = std::string(kDevelopmentFinalizationRule);

@@ -15,6 +15,8 @@
 #include "primechain/crypto/signature.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 #include "primechain/math/number_theory.hpp"
+#include "primechain/node/sequential_node.hpp"
+#include "primechain/storage/record_store.hpp"
 #include "primechain/types.hpp"
 
 namespace {
@@ -173,6 +175,24 @@ std::uint64_t randomNonce() {
            static_cast<std::uint64_t>(source());
 }
 
+std::optional<primechain::Hash256> hashFromHex(const std::string& hex) {
+    if (hex.size() != 64) return std::nullopt;
+    primechain::Hash256 hash{};
+    auto digit = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return 10 + ch - 'a';
+        if (ch >= 'A' && ch <= 'F') return 10 + ch - 'A';
+        return -1;
+    };
+    for (std::size_t i = 0; i < hash.size(); ++i) {
+        const int high = digit(hex[i * 2]);
+        const int low = digit(hex[i * 2 + 1]);
+        if (high < 0 || low < 0) return std::nullopt;
+        hash[i] = static_cast<std::uint8_t>((high << 4) | low);
+    }
+    return hash;
+}
+
 std::string primeSubmission(
     const primechain::math::PrattProof& proof,
     const std::string& provider) {
@@ -185,6 +205,33 @@ std::string primeSubmission(
         out << " " << factor.prime << " " << factor.exponent;
     }
     out << " " << provider << "\n";
+    return out.str();
+}
+
+std::optional<std::string> signedPrimeSubmission(
+    const primechain::math::PrattProof& proof,
+    const primechain::Hash256& previous_record_hash,
+    const primechain::wallet::MinerIdentity& identity,
+    std::string& error) {
+    std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors;
+    for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+        factors.push_back({factor.prime, factor.exponent});
+    }
+    const auto signature = primechain::crypto::ed25519Sign(
+        identity.private_key,
+        primechain::crypto::primeProofSigningPayload(
+            previous_record_hash, proof.p, proof.witness, factors, identity.address),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    std::ostringstream out;
+    out << "SUBMIT_SIGNED_PRIME " << proof.p << " " << proof.witness << " "
+        << proof.factors_of_p_minus_1.factors.size();
+    for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+        out << " " << factor.prime << " " << factor.exponent;
+    }
+    out << " " << identity.address << " "
+        << primechain::wallet::bytesToHex(identity.public_key) << " "
+        << primechain::wallet::bytesToHex(*signature) << "\n";
     return out.str();
 }
 
@@ -265,9 +312,10 @@ bool accepted(const std::string& response) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [host] [port] [limit] [prime_miner] [composite_miner]\n"
-              << "example:\n"
-              << "  " << argv0 << " 127.0.0.1 18889 20 pcdev1_prime_miner pcdev1_composite_miner\n";
+    std::cerr << "usage: " << argv0
+              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file>\n"
+              << "legacy development: " << argv0
+              << " [host] [port] [limit] [prime_miner] [composite_miner]\n";
 }
 
 } // namespace
@@ -281,22 +329,36 @@ int main(int argc, char** argv) {
     const std::string host = argc > 1 ? argv[1] : kDefaultHost;
     const int port = argc > 2 ? std::stoi(argv[2]) : kDefaultPort;
     const primechain::PrimeValue limit = argc > 3 ? std::stoull(argv[3]) : kDefaultLimit;
-    const std::string prime_miner = argc > 4 ? argv[4] : kDefaultPrimeMiner;
-    std::string composite_miner = argc > 5 ? argv[5] : kDefaultCompositeMiner;
+    std::string prime_miner = kDefaultPrimeMiner;
+    std::string composite_miner = kDefaultCompositeMiner;
+    std::optional<primechain::wallet::MinerIdentity> prime_identity;
     std::optional<primechain::wallet::MinerIdentity> composite_identity;
-    if (argc > 5 && composite_miner == "--composite-identity") {
-        if (argc <= 6) {
+    int argument = 4;
+    while (argument < argc) {
+        const std::string option = argv[argument++];
+        if (option == "--prime-identity" || option == "--composite-identity") {
+            if (argument >= argc) { printUsage(argv[0]); return 1; }
+            primechain::wallet::MinerIdentity identity;
+            std::string error;
+            if (!primechain::wallet::loadMinerIdentity(argv[argument++], identity, error)) {
+                std::cerr << error << "\n";
+                return 1;
+            }
+            if (option == "--prime-identity") {
+                prime_miner = identity.address;
+                prime_identity = std::move(identity);
+            } else {
+                composite_miner = identity.address;
+                composite_identity = std::move(identity);
+            }
+        } else if (prime_miner == kDefaultPrimeMiner) {
+            prime_miner = option;
+        } else if (composite_miner == kDefaultCompositeMiner) {
+            composite_miner = option;
+        } else {
             printUsage(argv[0]);
             return 1;
         }
-        primechain::wallet::MinerIdentity identity;
-        std::string error;
-        if (!primechain::wallet::loadMinerIdentity(argv[6], identity, error)) {
-            std::cerr << error << "\n";
-            return 1;
-        }
-        composite_miner = identity.address;
-        composite_identity = std::move(identity);
     }
 
     MapProofIndex proofs;
@@ -326,7 +388,27 @@ int main(int argc, char** argv) {
                           << "; start from a fresh node or add proof-index bootstrap\n";
                 return 1;
             }
-            request = primeSubmission(*proof, prime_miner);
+            if (prime_identity.has_value()) {
+                auto previous_hash = hashFromHex(status->latest_hash);
+                std::string error;
+                if (!status->has_genesis) {
+                    previous_hash = primechain::storage::makeStoredRecord(
+                        primechain::node::makeGenesisPrimeRecordV0()).record_hash;
+                }
+                if (!previous_hash.has_value()) {
+                    std::cerr << "node returned invalid latest record hash\n";
+                    return 1;
+                }
+                const auto signed_request = signedPrimeSubmission(
+                    *proof, *previous_hash, *prime_identity, error);
+                if (!signed_request.has_value()) {
+                    std::cerr << "could not sign prime submission: " << error << "\n";
+                    return 1;
+                }
+                request = *signed_request;
+            } else {
+                request = primeSubmission(*proof, prime_miner);
+            }
         } else {
             const auto proof = primechain::math::makeCompositeProof(next, composite_miner);
             if (!proof.has_value() || !primechain::math::verifyCompositeProof(*proof)) {

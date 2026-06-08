@@ -47,7 +47,17 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     record.proof.p = 3;
     record.proof.witness = 2;
     record.proof.factors_of_p_minus_1.push_back({2, 1});
-    record.proof.provider_address = "pcdev1_epoch_prime_miner";
+    record.proof.provider_address = current[0].address;
+    const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> prime_factors{{2, 1}};
+    const auto prime_signature = primechain::crypto::ed25519Sign(
+        current[0].keys.private_key,
+        primechain::crypto::primeProofSigningPayload(
+            record.previous_record_hash, record.proof.p, record.proof.witness,
+            prime_factors, record.proof.provider_address),
+        error);
+    if (!prime_signature.has_value()) return {};
+    record.proof.signature = primechain::crypto::packPrimeProofAuthentication(
+        current[0].keys.public_key, *prime_signature);
     record.validator_epoch.epoch = node.validatorEpoch() + 1;
     record.validator_epoch.activation_integer = record.integer + 1;
     std::sort(next_set.begin(), next_set.end());

@@ -210,6 +210,70 @@ Bytes recordFinalizationVoteSigningPayload(
     return payload;
 }
 
+Bytes transactionSigningPayload(const Bytes& unsigned_transaction) {
+    Bytes payload;
+    appendString(payload, "primechain-transaction-signature-v1");
+    appendUint64(payload, unsigned_transaction.size());
+    payload.insert(payload.end(), unsigned_transaction.begin(), unsigned_transaction.end());
+    return payload;
+}
+
+Bytes primeProofSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue prime,
+    PrimeValue witness,
+    const std::vector<std::pair<PrimeValue, std::uint64_t>>& factors,
+    const Address& provider_address) {
+    Bytes payload;
+    appendString(payload, "primechain-prime-proof-signature-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, prime);
+    appendUint64(payload, witness);
+    appendUint64(payload, factors.size());
+    for (const auto& factor : factors) {
+        appendUint64(payload, factor.first);
+        appendUint64(payload, factor.second);
+    }
+    appendString(payload, provider_address);
+    return payload;
+}
+
+Bytes packPrimeProofAuthentication(
+    const Bytes& public_key,
+    const Bytes& signature) {
+    Bytes packed;
+    packed.reserve(public_key.size() + signature.size());
+    packed.insert(packed.end(), public_key.begin(), public_key.end());
+    packed.insert(packed.end(), signature.begin(), signature.end());
+    return packed;
+}
+
+bool verifyPackedPrimeProofAuthentication(
+    const Hash256& previous_record_hash,
+    PrimeValue prime,
+    PrimeValue witness,
+    const std::vector<std::pair<PrimeValue, std::uint64_t>>& factors,
+    const Address& provider_address,
+    const Bytes& packed_proof,
+    std::string& error) {
+    if (packed_proof.size() != 96) {
+        error = "invalid packed prime proof authentication size";
+        return false;
+    }
+    const Bytes public_key(packed_proof.begin(), packed_proof.begin() + 32);
+    const Bytes signature(packed_proof.begin() + 32, packed_proof.end());
+    if (provider_address != addressFromEd25519PublicKey(public_key)) {
+        error = "prime proof provider address mismatch";
+        return false;
+    }
+    return ed25519Verify(
+        public_key,
+        primeProofSigningPayload(
+            previous_record_hash, prime, witness, factors, provider_address),
+        signature,
+        error);
+}
+
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,

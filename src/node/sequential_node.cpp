@@ -80,6 +80,48 @@ CompositeProof toLegacyCompositeProof(const protocol::CompositeProofV0& proof) {
     return out;
 }
 
+std::vector<std::pair<PrimeValue, std::uint64_t>> primeFactorPairs(
+    const protocol::PrattPrimeProofV0& proof) {
+    std::vector<std::pair<PrimeValue, std::uint64_t>> factors;
+    factors.reserve(proof.factors_of_p_minus_1.size());
+    for (const auto& factor : proof.factors_of_p_minus_1) {
+        factors.push_back({factor.prime, factor.exponent});
+    }
+    return factors;
+}
+
+bool validatePrimeProviderSignature(
+    const protocol::PrattPrimeProofV0& proof,
+    const Hash256& previous_record_hash,
+    bool allow_development,
+    std::string& error) {
+    if (allow_development && proof.signature.empty() &&
+        protocol::isProtocolAddress(proof.provider_address)) {
+        return true;
+    }
+    if (!crypto::isEd25519Address(proof.provider_address)) {
+        error = "unsupported prime provider address";
+        return false;
+    }
+    return crypto::verifyPackedPrimeProofAuthentication(
+        previous_record_hash, proof.p, proof.witness, primeFactorPairs(proof),
+        proof.provider_address, proof.signature, error);
+}
+
+bool validateTransactionSignature(
+    const protocol::TransactionV0& tx,
+    bool allow_development,
+    std::string& error) {
+    if (crypto::isEd25519Address(tx.sender_address)) {
+        return protocol::verifyAuthenticatedTransactionSignature(tx, error);
+    }
+    if (allow_development && protocol::verifyDevelopmentTransactionSignature(tx)) {
+        return true;
+    }
+    error = "transaction requires an authenticated Ed25519 sender";
+    return false;
+}
+
 bool validateCompositeProviderSignature(
     const protocol::CompositeProofV0& proof,
     std::string& error) {
@@ -172,6 +214,12 @@ bool validateStoredPrimePayload(
     }
     if (!protocol::isProtocolAddress(decoded->proof.provider_address)) {
         error = "invalid prime payload provider address";
+        return false;
+    }
+    const bool genesis = decoded->height == 0 && decoded->integer == 2;
+    if (!genesis && !validatePrimeProviderSignature(
+            decoded->proof, decoded->previous_record_hash, validator_set.empty(), error)) {
+        error = "invalid prime payload provider signature: " + error;
         return false;
     }
     if (!math::verifyPrattProof(toMathPrattProof(decoded->proof))) {
@@ -359,6 +407,11 @@ bool SequentialNode::validatePrimeCandidate(
     if (!validateCommon(record.height, record.integer, record.previous_record_hash, error)) return false;
     if (record.proof.p != record.integer) { error = "prime proof integer mismatch"; return false; }
     if (!protocol::isProtocolAddress(record.proof.provider_address)) { error = "invalid prime provider address"; return false; }
+    if (!validatePrimeProviderSignature(
+            record.proof, record.previous_record_hash, validator_set_.empty(), error)) {
+        error = "invalid prime provider signature: " + error;
+        return false;
+    }
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyGenesisConfig(record, error)) return false;
@@ -468,9 +521,8 @@ std::vector<std::pair<PrimeValue, std::uint64_t>> SequentialNode::holdingsForAdd
 
 bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0>& transactions, std::string& error) {
     for (const auto& tx : transactions) {
-        if (!protocol::isDevelopmentAddress(tx.sender_address) ||
-            !protocol::verifyDevelopmentTransactionSignature(tx)) {
-            error = "invalid development transaction signature";
+        if (!validateTransactionSignature(tx, validator_set_.empty(), error)) {
+            error = "invalid transaction signature: " + error;
             return false;
         }
         if (tx.inputs.empty() || tx.outputs.empty()) {

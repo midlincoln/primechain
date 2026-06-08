@@ -14,7 +14,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "primechain/crypto/signature.hpp"
 #include "primechain/protocol/records.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 
 namespace {
 
@@ -183,13 +185,38 @@ primechain::protocol::TransactionV0 makeTransferTransaction(
     return tx;
 }
 
+std::optional<primechain::protocol::TransactionV0> makeAuthenticatedTransferTransaction(
+    const primechain::wallet::MinerIdentity& sender,
+    const std::string& receiver_address,
+    primechain::PrimeValue prime,
+    std::uint64_t amount,
+    std::uint64_t nonce,
+    std::string& error) {
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 1;
+    tx.inputs.push_back({prime, {amount, 1}});
+    tx.outputs.push_back({prime, {amount, 1}, receiver_address});
+    tx.fee = {prime, {0, 1}};
+    tx.nonce = nonce;
+    tx.sender_address = sender.address;
+    tx.sender_public_key = sender.public_key;
+    const auto signature = primechain::crypto::ed25519Sign(
+        sender.private_key,
+        primechain::crypto::transactionSigningPayload(
+            primechain::protocol::serializeTransaction(tx, false)),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    tx.signature = *signature;
+    return tx;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
-              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/miner.wallet pcdev1_alice 3 250000 1\n";
+              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-ed25519.wallet pc1_receiver 3 250000 1\n";
 }
 
 } // namespace
@@ -208,18 +235,24 @@ int main(int argc, char** argv) {
         const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
         const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[8]));
 
-        DevWallet sender;
-        if (!loadWallet(sender_wallet_path, sender)) {
-            std::cerr << "could not load sender wallet\n";
+        primechain::wallet::MinerIdentity sender;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(sender_wallet_path, sender, error)) {
+            std::cerr << "could not load authenticated sender wallet: " << error << "\n";
             return 1;
         }
-        if (!primechain::protocol::isDevelopmentAddress(receiver_address) || prime < 2 || amount == 0) {
+        if (!primechain::protocol::isProtocolAddress(receiver_address) || prime < 2 || amount == 0) {
             std::cerr << "invalid transfer arguments\n";
             return 1;
         }
 
-        const auto tx = makeTransferTransaction(sender, receiver_address, prime, amount, nonce);
-        const std::string tx_hex = bytesToHex(primechain::protocol::serializeTransaction(tx, true));
+        const auto tx = makeAuthenticatedTransferTransaction(
+            sender, receiver_address, prime, amount, nonce, error);
+        if (!tx.has_value()) {
+            std::cerr << "could not sign transaction: " << error << "\n";
+            return 1;
+        }
+        const std::string tx_hex = bytesToHex(primechain::protocol::serializeTransaction(*tx, true));
         auto socket = connectToServer(host, port);
         if (!socket.has_value()) {
             return 1;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "primechain/types.hpp"
@@ -54,6 +55,24 @@ Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,
     const Address& validator_address);
+Bytes transactionSigningPayload(const Bytes& unsigned_transaction);
+Bytes primeProofSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue prime,
+    PrimeValue witness,
+    const std::vector<std::pair<PrimeValue, std::uint64_t>>& factors,
+    const Address& provider_address);
+Bytes packPrimeProofAuthentication(
+    const Bytes& public_key,
+    const Bytes& signature);
+bool verifyPackedPrimeProofAuthentication(
+    const Hash256& previous_record_hash,
+    PrimeValue prime,
+    PrimeValue witness,
+    const std::vector<std::pair<PrimeValue, std::uint64_t>>& factors,
+    const Address& provider_address,
+    const Bytes& packed_proof,
+    std::string& error);
 Bytes packCompositeRevealProof(
     const Bytes& public_key,
     std::uint64_t nonce,

@@ -257,6 +257,7 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
            line.rfind("ACK_MEMPOOL ", 0) == 0 ||
@@ -583,7 +584,8 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
     const primechain::node::SequentialNodeStatus& status,
     primechain::PrimeValue p,
     const primechain::math::PrattProof& proof,
-    const std::string& prime_miner_address) {
+    const std::string& prime_miner_address,
+    const primechain::protocol::Bytes& authentication = {}) {
     primechain::protocol::PrimeRecordV0 record;
     record.version = 0;
     record.height = status.height + 1;
@@ -595,6 +597,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
         record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
     }
     record.proof.provider_address = prime_miner_address;
+    record.proof.signature = authentication;
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
@@ -1259,7 +1262,8 @@ public:
                 submitComposite(fd, *line);
                 continue;
             }
-            if (line->rfind("SUBMIT_PRIME ", 0) == 0) {
+            if (line->rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
+                line->rfind("SUBMIT_PRIME ", 0) == 0) {
                 submitPrime(fd, *line);
                 continue;
             }
@@ -1838,8 +1842,8 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        if (!primechain::protocol::verifyDevelopmentTransactionSignature(*tx)) {
-            writeAll(fd, "ERROR invalid transaction signature\n");
+        if (!primechain::protocol::verifyAuthenticatedTransactionSignature(*tx, error)) {
+            writeAll(fd, "ERROR invalid transaction signature: " + error + "\n");
             return;
         }
 
@@ -3316,34 +3320,55 @@ private:
         primechain::math::PrattProof proof;
         std::uint64_t factor_count = 0;
         std::string provider_address;
+        std::string public_key_hex;
+        std::string signature_hex;
         in >> command >> proof.p >> proof.witness >> factor_count;
-        if (!in || command != "SUBMIT_PRIME" || factor_count > 64) {
-            writeAll(fd, "ERROR invalid SUBMIT_PRIME; expected SUBMIT_PRIME p witness factor_count factor exponent ... provider_address\n");
+        const bool signed_submission = command == "SUBMIT_SIGNED_PRIME";
+        if (!in || (command != "SUBMIT_PRIME" && !signed_submission) || factor_count > 64) {
+            writeAll(fd, "ERROR invalid prime submission; expected SUBMIT_SIGNED_PRIME p witness factor_count factor exponent ... provider_address public_key signature\n");
             return;
         }
         for (std::uint64_t i = 0; i < factor_count; ++i) {
             primechain::math::PrimePowerFactor factor;
             in >> factor.prime >> factor.exponent;
             if (!in) {
-                writeAll(fd, "ERROR invalid SUBMIT_PRIME factor list\n");
+                writeAll(fd, "ERROR invalid prime submission factor list\n");
                 return;
             }
             proof.factors_of_p_minus_1.factors.push_back(factor);
         }
         in >> provider_address;
-        if (!in || !primechain::protocol::isDevelopmentAddress(provider_address)) {
-            writeAll(fd, "ERROR invalid SUBMIT_PRIME provider address\n");
+        if (signed_submission) in >> public_key_hex >> signature_hex;
+        if (!in || (signed_submission
+                ? !primechain::crypto::isEd25519Address(provider_address)
+                : !primechain::protocol::isDevelopmentAddress(provider_address))) {
+            writeAll(fd, "ERROR invalid prime submission provider address\n");
             return;
         }
         std::string extra;
         if (in >> extra) {
-            writeAll(fd, "ERROR invalid SUBMIT_PRIME trailing data\n");
+            writeAll(fd, "ERROR invalid prime submission trailing data\n");
             return;
         }
-
         if (!primechain::math::verifyPrattProof(proof)) {
             writeAll(fd, "ERROR invalid Pratt proof\n");
             return;
+        }
+        if (!signed_submission) {
+            writeAll(fd, "ERROR unsigned prime submissions are disabled\n");
+            return;
+        }
+
+        primechain::protocol::Bytes authentication;
+        if (signed_submission) {
+            const auto public_key = hexToBytes(public_key_hex);
+            const auto signature = hexToBytes(signature_hex);
+            if (public_key.size() != 32 || signature.size() != 64 ||
+                provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+                writeAll(fd, "ERROR invalid signed prime identity\n");
+                return;
+            }
+            authentication = primechain::crypto::packPrimeProofAuthentication(public_key, signature);
         }
 
         std::string error;
@@ -3364,11 +3389,7 @@ private:
 
         if (proof.p == node.status().frontier_integer && node.status().frontier_integer > 2) {
             const auto existing = store_.findByInteger(proof.p, error);
-            if (!error.empty()) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
-            if (!existing.has_value()) {
+            if (!error.empty() || !existing.has_value()) {
                 writeAll(fd, "ERROR current frontier record not found\n");
                 return;
             }
@@ -3378,7 +3399,18 @@ private:
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
-
+            if (signed_submission) {
+                std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors;
+                for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+                    factors.push_back({factor.prime, factor.exponent});
+                }
+                if (!primechain::crypto::verifyPackedPrimeProofAuthentication(
+                        *previous_hash, proof.p, proof.witness, factors,
+                        provider_address, authentication, error)) {
+                    writeAll(fd, "ERROR invalid prime provider signature: " + error + "\n");
+                    return;
+                }
+            }
             primechain::protocol::PrimeRecordV0 record;
             record.version = 0;
             record.height = node.status().height;
@@ -3390,6 +3422,7 @@ private:
                 record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
             }
             record.proof.provider_address = provider_address;
+            record.proof.signature = authentication;
             primechain::protocol::applyDevelopmentFinalization(record);
             const auto stored = primechain::storage::makeStoredRecord(record);
             handleExistingOrConflictingRecord(fd, stored, node.status().frontier_integer);
@@ -3398,16 +3431,15 @@ private:
 
         if (proof.p != node.status().frontier_integer + 1) {
             std::ostringstream out;
-            out << "ERROR SUBMIT_PRIME must extend frontier "
-                << node.status().frontier_integer
-                << " with integer "
-                << (node.status().frontier_integer + 1)
-                << "\n";
+            out << "ERROR prime submission must extend frontier "
+                << node.status().frontier_integer << " with integer "
+                << (node.status().frontier_integer + 1) << "\n";
             writeAll(fd, out.str());
             return;
         }
 
-        auto record = makePrimeRecord(node.status(), proof.p, proof, provider_address);
+        auto record = makePrimeRecord(
+            node.status(), proof.p, proof, provider_address, authentication);
         if (quorumEnabled()) record.version = 1;
         if (epochProposalReady()) {
             record.version = 2;
@@ -3432,11 +3464,8 @@ private:
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
         propagateRecord(stored);
-        writeAll(fd, "PRIME_ACCEPTED "
-            + std::to_string(proof.p)
-            + " "
-            + primechain::crypto::toHex(stored.record_hash)
-            + "\n");
+        writeAll(fd, "PRIME_ACCEPTED " + std::to_string(proof.p) + " "
+            + primechain::crypto::toHex(stored.record_hash) + "\n");
     }
 
     void propagateRecord(const primechain::storage::StoredRecord& record) {
@@ -3542,8 +3571,8 @@ private:
             limit < 2 ||
             mempool_target_integer < 3 ||
             mempool_target_integer > limit ||
-            !primechain::protocol::isDevelopmentAddress(prime_miner_address) ||
-            !primechain::protocol::isDevelopmentAddress(composite_miner_address)) {
+            !primechain::protocol::isProtocolAddress(prime_miner_address) ||
+            !primechain::protocol::isProtocolAddress(composite_miner_address)) {
             writeAll(fd, "ERROR invalid ADVANCE_TO; expected ADVANCE_TO limit prime_miner composite_miner mempool_target_integer\n");
             return;
         }

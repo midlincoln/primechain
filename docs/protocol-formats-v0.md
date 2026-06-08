@@ -22,7 +22,7 @@ The v0 chain is intentionally small-number and development-focused:
 - integers use unsigned 64-bit values,
 - all consensus-critical hashing uses SHA3-256,
 - composite contributors and controlled-testnet validators use Ed25519 signatures,
-- transaction and prime-provider authentication remain development-only,
+- TCP transactions and prime-provider rewards use Ed25519 `pc1_` identities,
 - Pratt certificates are the target prime-proof format for test-sized integers,
 - validator voting is authenticated but remains a controlled 2-of-3 mechanism, not permissionless consensus.
 
@@ -107,6 +107,7 @@ Transaction {
     fee: FeeSpec,
     nonce: UInt64,
     sender_address: Address,
+    sender_public_key: Bytes,
     signature: Bytes
 }
 ```
@@ -151,7 +152,7 @@ Validation rules:
 - sum of outputs plus fee must equal sum of inputs for each prime.
 - no floating-point arithmetic is allowed.
 
-Signature rules are placeholder in v0. The canonical signature preimage is the transaction serialized with `signature` encoded as an empty byte string.
+Authenticated TCP transactions use Ed25519. The sender address must equal `pc1_` plus the first 40 hexadecimal characters of `SHA3-256(sender_public_key)`. The signature payload is the canonical transaction serialized with `signature` encoded as an empty byte string, wrapped in the domain `primechain-transaction-signature-v1`. Any change to inputs, outputs, fee, nonce, sender address, or public key invalidates the signature. Legacy `pcdev1_` transaction signatures are accepted only by unanchored offline development-chain tooling.
 
 ## 4. Transaction Batch
 
@@ -264,7 +265,9 @@ PrattPrimeProof {
 Validation rules:
 
 - `p >= 2`.
-- `provider_address` is syntactically valid.
+- `provider_address` is a key-derived Ed25519 `pc1_` address for every non-genesis network submission.
+- `signature` packs the 32-byte public key followed by the 64-byte Ed25519 signature.
+- the signature payload uses domain `primechain-prime-proof-signature-v1` and binds `previous_record_hash`, `p`, `witness`, every `(prime, exponent)` factor pair, and `provider_address`.
 - `factors_of_p_minus_1` multiply exactly to `p - 1`.
 - every `prime` in `factors_of_p_minus_1` has an earlier finalized prime record.
 - `witness > 1` and `witness < p`.

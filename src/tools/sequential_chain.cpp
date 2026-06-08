@@ -300,8 +300,10 @@ std::optional<std::vector<primechain::protocol::TransactionV0>> fetchMempool(
             std::cerr << "could not deserialize mempool tx: " << error << "\n";
             return std::nullopt;
         }
-        if (!primechain::protocol::verifyDevelopmentTransactionSignature(*tx)) {
-            std::cerr << "invalid mempool tx signature\n";
+        std::string signature_error;
+        if (!primechain::protocol::verifyDevelopmentTransactionSignature(*tx) &&
+            !primechain::protocol::verifyAuthenticatedTransactionSignature(*tx, signature_error)) {
+            std::cerr << "invalid mempool tx signature: " << signature_error << "\n";
             return std::nullopt;
         }
         transactions.push_back(*tx);
@@ -435,7 +437,8 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
     const primechain::node::SequentialNodeStatus& status,
     primechain::PrimeValue p,
     const primechain::math::PrattProof& proof,
-    const std::string& prime_miner_address) {
+    const std::string& prime_miner_address,
+    const primechain::wallet::MinerIdentity* signing_identity = nullptr) {
     primechain::protocol::PrimeRecordV0 record;
     record.version = 0;
     record.height = status.has_genesis ? status.height + 1 : 0;
@@ -446,7 +449,25 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
     for (const auto& factor : proof.factors_of_p_minus_1.factors) {
         record.proof.factors_of_p_minus_1.push_back({factor.prime, factor.exponent});
     }
-    record.proof.provider_address = p == 2 ? "pcdev1_genesis" : prime_miner_address;
+    record.proof.provider_address = p == 2 ? "pcdev1_genesis" :
+        (signing_identity == nullptr ? prime_miner_address : signing_identity->address);
+    if (p != 2 && signing_identity != nullptr) {
+        std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors;
+        for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+            factors.push_back({factor.prime, factor.exponent});
+        }
+        std::string signing_error;
+        const auto signature = primechain::crypto::ed25519Sign(
+            signing_identity->private_key,
+            primechain::crypto::primeProofSigningPayload(
+                record.previous_record_hash, proof.p, proof.witness, factors,
+                signing_identity->address),
+            signing_error);
+        if (signature.has_value()) {
+            record.proof.signature = primechain::crypto::packPrimeProofAuthentication(
+                signing_identity->public_key, *signature);
+        }
+    }
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
 }
@@ -512,10 +533,10 @@ int main(int argc, char** argv) {
                  [](const primechain::Address& address) {
                      return primechain::crypto::isEd25519Address(address);
                  }))) ||
-        !primechain::protocol::isDevelopmentAddress(options.prime_miner_address) ||
-        !primechain::protocol::isDevelopmentAddress(options.composite_miner_address) ||
+        !primechain::protocol::isProtocolAddress(options.prime_miner_address) ||
+        !primechain::protocol::isProtocolAddress(options.composite_miner_address) ||
         (options.has_transfer &&
-            (!primechain::protocol::isDevelopmentAddress(options.transfer_receiver_address) ||
+            (!primechain::protocol::isProtocolAddress(options.transfer_receiver_address) ||
              options.transfer_amount == 0 ||
              options.transfer_prime < 2 ||
              options.transfer_target_integer < 3 ||
@@ -607,7 +628,9 @@ int main(int argc, char** argv) {
             }
 
             if (n != 2) {
-                auto record = makePrimeRecord(node.status(), n, *proof, options.prime_miner_address);
+                auto record = makePrimeRecord(
+                    node.status(), n, *proof, options.prime_miner_address,
+                    finalization_validators.empty() ? nullptr : &finalization_validators.front());
                 if (options.has_transfer && n == options.transfer_target_integer) {
                     record.transactions.push_back(makeTransferTransaction(
                         transfer_sender,

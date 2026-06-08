@@ -192,6 +192,58 @@ int main() {
         return 1;
     }
 
+    std::string auth_error;
+    const auto account = primechain::crypto::generateEd25519KeyPair(auth_error);
+    if (!expect(account.has_value(), "generate authenticated transaction key")) {
+        std::cerr << auth_error << "\n";
+        return 1;
+    }
+    TransactionV0 authenticated_tx;
+    authenticated_tx.version = 1;
+    authenticated_tx.inputs.push_back({5, {100, 1}});
+    authenticated_tx.outputs.push_back({5, {100, 1}, "pcdev1_receiver"});
+    authenticated_tx.fee = {5, {0, 1}};
+    authenticated_tx.nonce = 9;
+    authenticated_tx.sender_public_key = account->public_key;
+    authenticated_tx.sender_address =
+        primechain::crypto::addressFromEd25519PublicKey(account->public_key);
+    const auto authenticated_signature = primechain::crypto::ed25519Sign(
+        account->private_key,
+        primechain::crypto::transactionSigningPayload(
+            serializeTransaction(authenticated_tx, false)),
+        auth_error);
+    if (!expect(authenticated_signature.has_value(), "sign authenticated transaction")) return 1;
+    authenticated_tx.signature = *authenticated_signature;
+    if (!expect(verifyAuthenticatedTransactionSignature(authenticated_tx, auth_error),
+                "verify authenticated transaction")) return 1;
+    auto tampered_tx = authenticated_tx;
+    tampered_tx.outputs[0].amount.numerator += 1;
+    auth_error.clear();
+    if (!expect(!verifyAuthenticatedTransactionSignature(tampered_tx, auth_error),
+                "reject tampered authenticated transaction")) return 1;
+
+    const primechain::Hash256 previous_hash = primechain::crypto::sha3_256({1, 2, 3});
+    const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors{{2, 2}};
+    const auto prime_signature = primechain::crypto::ed25519Sign(
+        account->private_key,
+        primechain::crypto::primeProofSigningPayload(
+            previous_hash, 5, 2, factors, authenticated_tx.sender_address),
+        auth_error);
+    if (!expect(prime_signature.has_value(), "sign prime proof provider")) return 1;
+    const auto packed_prime_auth = primechain::crypto::packPrimeProofAuthentication(
+        account->public_key, *prime_signature);
+    if (!expect(primechain::crypto::verifyPackedPrimeProofAuthentication(
+                    previous_hash, 5, 2, factors, authenticated_tx.sender_address,
+                    packed_prime_auth, auth_error),
+                "verify prime proof provider")) return 1;
+    auto wrong_previous = previous_hash;
+    wrong_previous[0] ^= 1;
+    auth_error.clear();
+    if (!expect(!primechain::crypto::verifyPackedPrimeProofAuthentication(
+                    wrong_previous, 5, 2, factors, authenticated_tx.sender_address,
+                    packed_prime_auth, auth_error),
+                "reject prime proof replay on another frontier")) return 1;
+
     const auto composite = makeCompositeRecord();
     const auto composite_hash_a = candidateRecordHash(composite);
     const auto composite_hash_b = candidateRecordHash(composite);

@@ -275,15 +275,18 @@ Shortcut using `primechain-send`:
 
 `primechain-send` uses the sender wallet address as the prime miner address for this fresh generated test chain, so the sender owns prime `3` before record `4` spends it.
 
-Submit a signed development transaction to a running TCP node:
+Submit an authenticated Ed25519 transaction to a running TCP node:
 
 ```bash
+./build/primechain-wallet new-miner ./wallets/sender.wallet
+./build/primechain-wallet new-miner ./wallets/alice.wallet
+alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
 ./build/primechain-sync-server 18889 ./data/send-chain.dat --enable-ack-mempool
 ./build/primechain-send submit 127.0.0.1 18889 \
-  ./wallets/miner.wallet pcdev1_1654a887b941f792dd86094f19e90479 3 250000 1
+  ./wallets/sender.wallet "$alice" 3 250000 1
 ```
 
-The TCP node currently validates the transaction signature/address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
+The TCP node verifies the Ed25519 signature and key-derived sender address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
 
 Create a cryptographic miner identity for signed composite mining:
 
@@ -324,7 +327,8 @@ The frontier miner can use the identity directly:
 
 ```bash
 ./build/primechain-frontier-miner 127.0.0.1 18889 100 \
-  pcdev1_prime_miner --composite-identity ./wallets/composite-miner.wallet
+  --prime-identity ./wallets/composite-miner.wallet \
+  --composite-identity ./wallets/composite-miner.wallet
 ```
 
 Ed25519 is a real classical signature scheme, but it is not post-quantum. This
@@ -469,33 +473,24 @@ example, `2 * 2 = 5` is rejected and cannot advance an honest node. Competing
 valid finalized records for the same current tip still use the existing
 lower-record-hash conflict rule.
 
-Submit one miner-produced Pratt prime proof to a running TCP node:
+Submit authenticated prime proofs with the frontier miner:
 
 ```bash
-./build/primechain-sync-query 127.0.0.1 18889 \
-  SUBMIT_PRIME 5 2 1 2 2 pcdev1_prime_miner
+./build/primechain-wallet new-miner ./wallets/miner.wallet
+./build/primechain-frontier-miner 127.0.0.1 18889 20 \
+  --prime-identity ./wallets/miner.wallet \
+  --composite-identity ./wallets/miner.wallet
 ```
 
-Format:
+Signed prime wire format:
 
 ```text
-SUBMIT_PRIME p witness factor_count factor_1 exponent_1 ... provider_address
+SUBMIT_SIGNED_PRIME p witness factor_count factor_1 exponent_1 ... provider_address public_key signature
 ```
 
-The example certifies `5` using witness `2` and factorization `5 - 1 = 2^2`. For `11`, whose `p - 1` factorization is `2^1 * 5^1`, the line shape is:
+The Ed25519 signature binds the previous finalized record hash, the prime, Pratt witness, complete `p - 1` factorization, and reward address. A peer that copies a Pratt certificate cannot replace the provider address or replay the signature at another frontier. Unsigned `SUBMIT_PRIME` is rejected by TCP nodes; it remains only as an internal offline-development representation.
 
-```bash
-./build/primechain-sync-query 127.0.0.1 18889 \
-  SUBMIT_PRIME 11 2 2 2 1 5 1 pcdev1_prime_miner
-```
-
-The current prototype accepts Pratt certificates only. Future protocol versions can add certificate-type fields for ECPP/APR-CL without changing the basic rule that nodes verify the certificate locally before advancing.
-
-Current success response:
-
-```text
-PRIME_ACCEPTED <p> <record_hash>
-```
+The current prototype accepts Pratt certificates only. Future protocol versions can add certificate-type fields for ECPP/APR-CL without changing the authentication rule. Successful submission returns `PRIME_ACCEPTED <p> <record_hash>`.
 
 Ask a running TCP node for the recursive factorization it can reconstruct from
 stored arithmetic records. This is a development/helper command, not normal
@@ -539,8 +534,10 @@ Run the prototype frontier miner loop against a TCP sync node:
 
 ```bash
 ./build/primechain-sync-server 18889 ./data/frontier-node.dat
+./build/primechain-wallet new-miner ./wallets/miner.wallet
 ./build/primechain-frontier-miner 127.0.0.1 18889 20 \
-  pcdev1_prime_miner pcdev1_composite_miner
+  --prime-identity ./wallets/miner.wallet \
+  --composite-identity ./wallets/miner.wallet
 ```
 
 The frontier miner repeatedly:
@@ -548,7 +545,7 @@ The frontier miner repeatedly:
 - asks the node for `GET_STATUS`;
 - tests `frontier + 1`;
 - submits `SUBMIT_COMPOSITE` when the next integer is composite;
-- submits `SUBMIT_PRIME` with a Pratt proof when the next integer is prime;
+- submits `SUBMIT_SIGNED_PRIME` with an authenticated Pratt proof when the next integer is prime;
 - stops when the node frontier reaches the requested limit.
 
 This is the first real mining flow for the sequential arithmetic chain. It is still a prototype: it keeps its composite proof index locally during the run, so it works best from a fresh node or a node whose needed composite proofs were mined by this same process.
@@ -710,7 +707,7 @@ Current identifiers are development-level only:
 - peers are known by IPv4 address and port, for example `127.0.0.1:18889`;
 - wallet addresses are development strings such as `pcdev1_...`;
 - miner and composite provider fields are address strings embedded in records;
-- transaction records include a development signature/hash check, but this is not yet a production key/address scheme;
+- TCP transactions use Ed25519 signatures and key-derived `pc1_` sender addresses;
 - peer messages are not signed, and nodes do not yet have persistent public-key identities.
 
 This means the current rate-limit layer is intentionally simple:
@@ -719,7 +716,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Composite contributors and controlled-testnet validators may now use Ed25519 `pc1_` identities. Signed commit-phase votes freeze a shared candidate snapshot at a 2-of-3 threshold, and version 1 composite records permanently embed that certificate. Prime submissions, transactions, validator rotation, post-quantum signatures, and legacy `pcdev1_` paths still require migration.
+Composite contributors, prime discoverers, transaction senders, and controlled-testnet validators use Ed25519 `pc1_` identities. Prime signatures bind the frontier and complete Pratt proof; transaction signatures bind the complete unsigned transaction. Legacy `pcdev1_` records remain supported only in explicitly unanchored development chains. Ed25519 is classical, so post-quantum migration remains required before a value-bearing public network.
 
 Terminal 2:
 
@@ -969,8 +966,8 @@ Completed prototype milestones:
 - first-pass peer connection/read timeouts and dead-peer warnings
 - basic per-connection TCP rate limits
 - first miner-submitted composite flow with `SUBMIT_COMPOSITE`
-- first miner-submitted Pratt prime flow with `SUBMIT_PRIME`
-- first frontier miner loop using `SUBMIT_COMPOSITE` and `SUBMIT_PRIME`
+- authenticated miner-submitted Pratt prime flow with `SUBMIT_SIGNED_PRIME`
+- frontier miner loop using authenticated composite and prime submissions
 - genesis-anchored 2-of-3 validator quorum
 - signed validator epoch transitions embedded in version-2 arithmetic records
 - replay-derived active validator set with next-integer activation
@@ -979,9 +976,9 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Authenticate prime submissions and production transaction signatures.
-2. Add an explicit finalization round-change and timeout protocol.
-3. Harden persistence, indexing, resource limits, and adversarial network tests.
+1. Add an explicit finalization round-change and timeout protocol.
+2. Harden persistence, indexing, resource limits, and adversarial network tests.
+3. Add transaction nonce/replay policy and fee rules.
 4. Add the planned post-quantum signature migration after consensus stabilizes.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

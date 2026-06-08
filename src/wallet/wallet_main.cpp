@@ -123,8 +123,10 @@ DevWallet createWallet() {
 
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
-              << "  " << argv0 << " new <wallet-file>\n"
+              << "  " << argv0 << " new <development-wallet-file>\n"
+              << "  " << argv0 << " new-miner <ed25519-wallet-file>\n"
               << "  " << argv0 << " address <wallet-file>\n"
+              << "  " << argv0 << " miner-address <ed25519-wallet-file>\n"
               << "  " << argv0 << " balance <record-store.dat> <wallet-file>\n";
 }
 
@@ -172,11 +174,17 @@ int main(int argc, char** argv) {
 
     if (command == "address") {
         DevWallet wallet;
-        if (!loadWallet(argv[2], wallet)) {
+        if (loadWallet(argv[2], wallet)) {
+            std::cout << wallet.address << "\n";
+            return 0;
+        }
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
             std::cerr << "could not load wallet\n";
             return 1;
         }
-        std::cout << wallet.address << "\n";
+        std::cout << identity.address << "\n";
         return 0;
     }
 
@@ -185,10 +193,18 @@ int main(int argc, char** argv) {
             printUsage(argv[0]);
             return 1;
         }
+        primechain::Address wallet_address;
         DevWallet wallet;
-        if (!loadWallet(argv[3], wallet)) {
-            std::cerr << "could not load wallet\n";
-            return 1;
+        if (loadWallet(argv[3], wallet)) {
+            wallet_address = wallet.address;
+        } else {
+            primechain::wallet::MinerIdentity identity;
+            std::string identity_error;
+            if (!primechain::wallet::loadMinerIdentity(argv[3], identity, identity_error)) {
+                std::cerr << "could not load wallet\n";
+                return 1;
+            }
+            wallet_address = identity.address;
         }
         primechain::node::SequentialNode node(argv[2]);
         std::string error;
@@ -196,8 +212,8 @@ int main(int argc, char** argv) {
             std::cerr << "could not load record store: " << error << "\n";
             return 1;
         }
-        const auto holdings = node.holdingsForAddress(wallet.address);
-        std::cout << "address: " << wallet.address << "\n";
+        const auto holdings = node.holdingsForAddress(wallet_address);
+        std::cout << "address: " << wallet_address << "\n";
         std::cout << "holdings: " << holdings.size() << "\n";
         for (const auto& holding : holdings) {
             std::cout << holding.first << " " << holding.second << "\n";

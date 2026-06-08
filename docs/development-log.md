@@ -445,3 +445,9 @@ The current protocol deliberately favors safety over liveness: a validator will
 not sign a second candidate for the same integer. An explicit timeout and
 round-change protocol remains future work. Ed25519 remains the controlled-testnet
 algorithm and can later be replaced behind the signature interface by ML-DSA.
+
+## 2026-06-08: Prime and transaction authentication
+
+TCP prime submissions and transactions now use Ed25519 `pc1_` identities. A prime signature binds the previous finalized record hash, prime, Pratt witness, complete `p - 1` factorization, and reward address. This prevents certificate copying from redirecting the prime-discovery reward and prevents replay at a different frontier. TCP nodes reject unsigned `SUBMIT_PRIME`.
+
+Transaction signatures bind the canonical unsigned transaction under a separate domain, including inputs, outputs, fee, nonce, sender address, and sender public key. Mempool admission, propagation, record validation, replay, and synchronized nodes verify the signature. Development `pcdev1_` signatures remain only for explicitly unanchored development fixtures. Ed25519 identity files are currently reused by miners and transaction senders; post-quantum key formats remain a later migration.
