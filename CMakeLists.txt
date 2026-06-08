@@ -32,6 +32,7 @@ add_library(primechain_core
     src/math/number_theory.cpp
     src/node/sequential_node.cpp
     src/protocol/records.cpp
+    src/storage/atomic_file.cpp
     src/storage/commitment_store.cpp
     src/storage/finalization_store.cpp
     src/storage/phase_store.cpp
@@ -275,6 +276,15 @@ add_executable(primechain-finalization-store-tests
 )
 
 target_link_libraries(primechain-finalization-store-tests
+    PRIVATE
+        primechain_core
+)
+
+add_executable(primechain-sidecar-recovery-tests
+    tests/sidecar_recovery_tests.cpp
+)
+
+target_link_libraries(primechain-sidecar-recovery-tests
     PRIVATE
         primechain_core
 )
@@ -703,6 +713,13 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/finalization-store-test.dat* && $<TARGET_FILE:primechain-finalization-store-tests> ${CMAKE_CURRENT_BINARY_DIR}/finalization-store-test.dat"
+)
+
+add_test(
+    NAME sidecar_recovery
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sidecar-recovery-test* && $<TARGET_FILE:primechain-sidecar-recovery-tests> ${CMAKE_CURRENT_BINARY_DIR}/sidecar-recovery-test"
 )
 
 add_test(

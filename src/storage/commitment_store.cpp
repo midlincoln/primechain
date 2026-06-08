@@ -5,6 +5,8 @@
 #include <limits>
 #include <utility>
 
+#include "primechain/storage/atomic_file.hpp"
+
 namespace primechain::storage {
 namespace {
 
@@ -38,6 +40,12 @@ CommitmentStore::CommitmentStore(std::string path)
     : path_(std::move(path)) {}
 
 std::vector<StoredCommitment> CommitmentStore::loadAll(std::string& error) const {
+    error.clear();
+    if (!detail::prepareAtomicLoad(path_, [](const std::string& candidate, std::string& candidate_error) {
+            CommitmentStore candidate_store(candidate);
+            candidate_store.loadAll(candidate_error);
+            return candidate_error.empty();
+        }, error)) return {};
     std::vector<StoredCommitment> commitments;
     std::ifstream in(path_, std::ios::binary);
     if (!in) {
@@ -105,6 +113,7 @@ std::vector<StoredCommitment> CommitmentStore::loadAll(std::string& error) const
 bool CommitmentStore::replaceAll(
     const std::vector<StoredCommitment>& commitments,
     std::string& error) const {
+    error.clear();
     const std::string temp_path = path_ + ".tmp";
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -155,8 +164,7 @@ bool CommitmentStore::replaceAll(
         std::remove(temp_path.c_str());
         return false;
     }
-    if (std::rename(temp_path.c_str(), path_.c_str()) != 0) {
-        error = "could not atomically replace commitment store";
+    if (!detail::commitAtomicTemp(temp_path, path_, "commitment store", error)) {
         std::remove(temp_path.c_str());
         return false;
     }

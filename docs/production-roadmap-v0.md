@@ -8,6 +8,8 @@ The current code is a development/testnet prototype. The goal is to build a real
 
 Status: implemented for the canonical arithmetic-record store. Snapshots,
 pruning, factor indexes, and large-dataset compaction remain future work.
+Temporary coordination sidecars also use synchronized atomic replacement and
+validated stale-temp recovery.
 
 Purpose: make the sequential arithmetic chain persistent and replayable.
 

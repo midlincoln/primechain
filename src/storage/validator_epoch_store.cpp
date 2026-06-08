@@ -5,6 +5,8 @@
 #include <limits>
 #include <utility>
 
+#include "primechain/storage/atomic_file.hpp"
+
 namespace primechain::storage {
 namespace {
 
@@ -58,6 +60,12 @@ void writeAddress(std::ostream& out, const Address& address) {
 ValidatorEpochStore::ValidatorEpochStore(std::string path) : path_(std::move(path)) {}
 
 std::vector<ValidatorEpochVoteRecord> ValidatorEpochStore::loadAll(std::string& error) const {
+    error.clear();
+    if (!detail::prepareAtomicLoad(path_, [](const std::string& candidate, std::string& candidate_error) {
+            ValidatorEpochStore candidate_store(candidate);
+            candidate_store.loadAll(candidate_error);
+            return candidate_error.empty();
+        }, error)) return {};
     std::vector<ValidatorEpochVoteRecord> votes;
     std::ifstream in(path_, std::ios::binary);
     if (!in) return votes;
@@ -99,6 +107,7 @@ std::vector<ValidatorEpochVoteRecord> ValidatorEpochStore::loadAll(std::string& 
 bool ValidatorEpochStore::replaceAll(
     const std::vector<ValidatorEpochVoteRecord>& votes,
     std::string& error) const {
+    error.clear();
     const std::string temp_path = path_ + ".tmp";
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -138,8 +147,7 @@ bool ValidatorEpochStore::replaceAll(
         std::remove(temp_path.c_str());
         return false;
     }
-    if (std::rename(temp_path.c_str(), path_.c_str()) != 0) {
-        error = "could not atomically replace validator epoch store";
+    if (!detail::commitAtomicTemp(temp_path, path_, "validator epoch store", error)) {
         std::remove(temp_path.c_str());
         return false;
     }

@@ -64,6 +64,14 @@ rebuilt from the hash-verified chain. Tip replacement and validated peer-sync
 installation write and synchronize a temporary chain before atomically renaming
 it over the live store. Builds use 64-bit file offsets on 32-bit Linux.
 
+Temporary consensus coordination files (`.commitments`, `.phases`, `.epochs`,
+`.finalization`, and `.rounds`) use the same durable replacement rule. Their
+temporary file is synchronized before rename and the parent directory is
+synchronized afterward. On restart, an existing primary always wins and any
+stale temp is removed. If the primary is absent, a fully parseable temp is
+promoted; an incomplete temp is discarded. Corrupt primary files remain hard
+startup errors and are never hidden by temp recovery.
+
 ## Run Demo Node
 
 ```bash
@@ -1028,10 +1036,11 @@ Completed prototype milestones:
 - synchronized chain appends with incomplete-tail recovery
 - durable, automatically rebuilt integer-to-record-offset indexes
 - atomic tip replacement and peer-sync store installation
+- synchronized sidecar replacement and stale-temp recovery
 
 Next milestones:
 
-1. Add persistence fault tests beyond the record store, then snapshots and pruning.
+1. Add replay snapshots and define a pruning policy.
 2. Build a unified mining client around the stabilized protocol formats.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

@@ -528,3 +528,18 @@ Fault tests cover incomplete append recovery, index corruption and rebuild,
 atomic tip replacement, rejection of incomplete install sources, preservation
 of the live store after failed installation, and detection of interior payload
 corruption.
+
+## 2026-06-08: Coordination Sidecar Crash Recovery
+
+Unified durability behavior for `.commitments`, `.phases`, `.epochs`,
+`.finalization`, and `.rounds`. Every replacement now synchronizes the complete
+temporary file before atomic rename and synchronizes the containing directory
+afterward.
+
+Restart recovery follows one deterministic rule. A committed primary file is
+authoritative and removes any stale temp. If the primary is absent, a temp that
+fully passes the store's existing parser is promoted; an incomplete or malformed
+temp is discarded. A corrupt primary remains a hard error and cannot be hidden
+by a valid temp. Format-level tests apply this sequence independently to all
+five sidecars, while multi-node tests continue to cover restart, propagation,
+epoch activation, and finalization round recovery.

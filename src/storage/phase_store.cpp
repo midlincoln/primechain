@@ -5,6 +5,8 @@
 #include <limits>
 #include <utility>
 
+#include "primechain/storage/atomic_file.hpp"
+
 namespace primechain::storage {
 namespace {
 
@@ -53,6 +55,12 @@ void writeBytes(std::ostream& out, const std::vector<std::uint8_t>& bytes) {
 PhaseStore::PhaseStore(std::string path) : path_(std::move(path)) {}
 
 std::vector<CommitPhaseVote> PhaseStore::loadAll(std::string& error) const {
+    error.clear();
+    if (!detail::prepareAtomicLoad(path_, [](const std::string& candidate, std::string& candidate_error) {
+            PhaseStore candidate_store(candidate);
+            candidate_store.loadAll(candidate_error);
+            return candidate_error.empty();
+        }, error)) return {};
     std::vector<CommitPhaseVote> votes;
     std::ifstream in(path_, std::ios::binary);
     if (!in) return votes;
@@ -84,6 +92,7 @@ std::vector<CommitPhaseVote> PhaseStore::loadAll(std::string& error) const {
 }
 
 bool PhaseStore::replaceAll(const std::vector<CommitPhaseVote>& votes, std::string& error) const {
+    error.clear();
     const std::string temp_path = path_ + ".tmp";
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -119,8 +128,7 @@ bool PhaseStore::replaceAll(const std::vector<CommitPhaseVote>& votes, std::stri
         std::remove(temp_path.c_str());
         return false;
     }
-    if (std::rename(temp_path.c_str(), path_.c_str()) != 0) {
-        error = "could not atomically replace phase store";
+    if (!detail::commitAtomicTemp(temp_path, path_, "phase store", error)) {
         std::remove(temp_path.c_str());
         return false;
     }

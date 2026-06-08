@@ -5,6 +5,8 @@
 #include <limits>
 #include <utility>
 
+#include "primechain/storage/atomic_file.hpp"
+
 namespace primechain::storage {
 namespace {
 constexpr std::uint64_t kMagic = 0x3152474e48434350ull;
@@ -51,6 +53,11 @@ RoundChangeStore::RoundChangeStore(std::string path) : path_(std::move(path)) {}
 
 std::vector<protocol::RoundChangeVoteV1> RoundChangeStore::loadAll(std::string& error) const {
     error.clear();
+    if (!detail::prepareAtomicLoad(path_, [](const std::string& candidate, std::string& candidate_error) {
+            RoundChangeStore candidate_store(candidate);
+            candidate_store.loadAll(candidate_error);
+            return candidate_error.empty();
+        }, error)) return {};
     std::vector<protocol::RoundChangeVoteV1> votes;
     std::ifstream in(path_, std::ios::binary);
     if (!in) return votes;
@@ -104,8 +111,7 @@ bool RoundChangeStore::replaceAll(
         std::remove(temp_path.c_str());
         return false;
     }
-    if (std::rename(temp_path.c_str(), path_.c_str()) != 0) {
-        error = "could not atomically replace round-change store";
+    if (!detail::commitAtomicTemp(temp_path, path_, "round-change store", error)) {
         std::remove(temp_path.c_str());
         return false;
     }
