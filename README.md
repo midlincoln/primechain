@@ -16,7 +16,7 @@ Implemented:
 - TCP node listening on localhost
 - ML-DSA-65 miner, wallet, and validator identities
 - terminal miner that submits authenticated arithmetic records to the TCP node
-- append-only disk chain log for accepted test blocks
+- crash-recoverable append-only chain store with a durable integer index
 - consensus validation for:
   - previous hash linkage
   - next-prime rule
@@ -26,7 +26,7 @@ Implemented:
 
 Not implemented yet:
 
-- production-scale persistence and indexes
+- snapshots, pruning, and production-scale database compaction
 - permissionless validator selection
 - authenticated/encrypted peer transport
 - ECPP or APR-CL certificate formats
@@ -48,6 +48,21 @@ cmake --build .
 cd build
 ctest --output-on-failure
 ```
+
+## Record Store Durability
+
+The canonical `<record-store>.dat` file remains byte-compatible with earlier
+prototype stores. Successful appends are synchronized before returning. If a
+process or machine stops during an append, the next open verifies the complete
+prefix and truncates only an incomplete trailing record; hash corruption inside
+a completed record remains a hard error.
+
+`<record-store>.dat.idx` stores canonical integer-to-byte-offset entries for
+latest, single-record, and range lookup. It is an acceleration cache rather
+than consensus state: missing, stale, malformed, or inconsistent indexes are
+rebuilt from the hash-verified chain. Tip replacement and validated peer-sync
+installation write and synchronize a temporary chain before atomically renaming
+it over the live store. Builds use 64-bit file offsets on 32-bit Linux.
 
 ## Run Demo Node
 
@@ -1010,10 +1025,13 @@ Completed prototype milestones:
 - operational transaction fees and contiguous sender nonces
 - NIST ML-DSA-65 signatures for transactions, miners, validators, epochs, and round changes
 - framed TCP messages for PQ-sized keys, signatures, and records
+- synchronized chain appends with incomplete-tail recovery
+- durable, automatically rebuilt integer-to-record-offset indexes
+- atomic tip replacement and peer-sync store installation
 
 Next milestones:
 
-1. Harden persistence, indexing, resource limits, and adversarial network tests.
+1. Add persistence fault tests beyond the record store, then snapshots and pruning.
 2. Build a unified mining client around the stabilized protocol formats.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

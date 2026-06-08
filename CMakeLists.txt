@@ -5,6 +5,8 @@ project(primechain
     LANGUAGES C CXX
 )
 
+add_compile_definitions(_FILE_OFFSET_BITS=64)
+
 find_package(OpenSSL REQUIRED)
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mldsa-native/mldsa/mldsa_native.c")
@@ -688,7 +690,7 @@ add_test(
     NAME record_store
     COMMAND
         /bin/sh -c
-        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat && $<TARGET_FILE:primechain-record-store-tests> ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat"
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat* && $<TARGET_FILE:primechain-record-store-tests> ${CMAKE_CURRENT_BINARY_DIR}/record-store-test.dat"
 )
 add_test(
     NAME sequential_node

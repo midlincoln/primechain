@@ -1,5 +1,7 @@
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <sys/stat.h>
 
 #include "primechain/storage/record_store.hpp"
 
@@ -25,7 +27,9 @@ primechain::protocol::PrimeRecordV0 makePrime2() {
     return record;
 }
 
-primechain::protocol::CompositeRecordV0 makeComposite4(const primechain::Hash256& previous) {
+primechain::protocol::CompositeRecordV0 makeComposite4(
+    const primechain::Hash256& previous,
+    const std::string& provider = "pcdev1_composite") {
     primechain::protocol::CompositeRecordV0 record;
     record.version = 0;
     record.height = 2;
@@ -34,9 +38,14 @@ primechain::protocol::CompositeRecordV0 makeComposite4(const primechain::Hash256
     record.proof.g = 4;
     record.proof.d = 2;
     record.proof.e = 2;
-    record.proof.provider_address = "pcdev1_composite";
+    record.proof.provider_address = provider;
     primechain::protocol::applyDevelopmentFinalization(record);
     return record;
+}
+
+std::uint64_t fileSize(const std::string& path) {
+    struct stat info {};
+    return stat(path.c_str(), &info) == 0 ? static_cast<std::uint64_t>(info.st_size) : 0;
 }
 
 } // namespace
@@ -149,6 +158,99 @@ int main(int argc, char** argv) {
     if (!expect(!store.append(corrupted, error), "reject hash mismatch on append")) {
         return 1;
     }
+
+    const std::uint64_t complete_size = fileSize(path);
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::app);
+        const char interrupted_header[] = "partial-record";
+        out.write(interrupted_header, sizeof(interrupted_header));
+    }
+    if (!expect(fileSize(path) > complete_size, "simulate interrupted append")) return 1;
+    error.clear();
+    const auto recovered_tip = store.latest(error);
+    if (!expect(error.empty() && recovered_tip.has_value(), "recover incomplete append")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(recovered_tip->record_hash == composite.record_hash,
+            "recovery preserves complete tip")) return 1;
+    if (!expect(fileSize(path) == complete_size, "recovery truncates incomplete bytes")) return 1;
+
+    {
+        std::ofstream out(path + ".idx", std::ios::binary | std::ios::trunc);
+        out << "corrupt-index";
+    }
+    error.clear();
+    const auto rebuilt_lookup = store.findByInteger(2, error);
+    if (!expect(error.empty() && rebuilt_lookup.has_value(), "rebuild corrupt index")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(fileSize(path + ".idx") > 24, "persist rebuilt index")) return 1;
+
+    const auto replacement = primechain::storage::makeStoredRecord(
+        makeComposite4(genesis.record_hash, "pcdev1_replacement"));
+    error.clear();
+    if (!expect(store.replaceTip(composite.record_hash, replacement, error),
+            "atomically replace tip")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    error.clear();
+    const auto replaced_tip = store.latest(error);
+    if (!expect(error.empty() && replaced_tip.has_value() &&
+            replaced_tip->record_hash == replacement.record_hash,
+            "replacement becomes indexed tip")) return 1;
+    if (!expect(fileSize(path + ".rewrite.tmp") == 0, "replacement temp removed")) return 1;
+
+    const std::string source_path = path + ".source";
+    primechain::storage::RecordStore source_store(source_path);
+    error.clear();
+    if (!expect(source_store.append(genesis, error), "create validated install source")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    {
+        std::ofstream out(source_path, std::ios::binary | std::ios::app);
+        out << "incomplete";
+    }
+    error.clear();
+    if (!expect(!store.installValidatedStore(source_path, error),
+            "reject incomplete install source")) return 1;
+    error.clear();
+    const auto tip_after_failed_install = store.latest(error);
+    if (!expect(error.empty() && tip_after_failed_install.has_value() &&
+            tip_after_failed_install->record_hash == replacement.record_hash,
+            "failed install preserves live store")) return 1;
+
+    error.clear();
+    source_store.loadAll(error);
+    if (!expect(error.empty(), "recover install source tail")) return 1;
+    error.clear();
+    if (!expect(store.installValidatedStore(source_path, error),
+            "atomically install validated store")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    error.clear();
+    const auto installed = store.loadAll(error);
+    if (!expect(error.empty() && installed.size() == 1 &&
+            installed.front().record_hash == genesis.record_hash,
+            "installed store replaces prior chain")) return 1;
+
+    {
+        std::fstream io(path, std::ios::binary | std::ios::in | std::ios::out);
+        io.seekg(72);
+        char byte = 0;
+        io.get(byte);
+        byte ^= 0x01;
+        io.seekp(72);
+        io.put(byte);
+    }
+    error.clear();
+    store.loadAll(error);
+    if (!expect(error.find("payload hash mismatch") != std::string::npos,
+            "detect interior payload corruption")) return 1;
 
     std::cout << "record store tests passed\n";
     return 0;

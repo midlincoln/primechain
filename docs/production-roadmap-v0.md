@@ -6,6 +6,9 @@ The current code is a development/testnet prototype. The goal is to build a real
 
 ## Stage 1: Canonical Disk Records And Indexes
 
+Status: implemented for the canonical arithmetic-record store. Snapshots,
+pruning, factor indexes, and large-dataset compaction remain future work.
+
 Purpose: make the sequential arithmetic chain persistent and replayable.
 
 Deliverables:
@@ -15,6 +18,9 @@ Deliverables:
 - replay with record-hash verification,
 - latest frontier lookup,
 - `integer -> record metadata` index,
+- synchronized append with incomplete-tail recovery,
+- atomic tip replacement and validated peer-sync installation,
+- automatic index validation and rebuild,
 - later: factor and prime indexes.
 
 Why first:

@@ -1439,10 +1439,12 @@ public:
         }
 
 
-        if (!copyFile(temp_path, store_path_, error)) {
+        if (!store_.installValidatedStore(temp_path, error)) {
             std::remove(temp_path.c_str());
+            std::remove((temp_path + ".idx").c_str());
             return false;
         }
+        std::remove((temp_path + ".idx").c_str());
         validator_set_ = reloaded.validatorSet();
         clearEpochVotesAfterRecord();
         revalidateMempool();

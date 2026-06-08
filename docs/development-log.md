@@ -506,3 +506,25 @@ transport limit, TCP commands and responses now use a bounded `FRAME <size>`
 envelope above 4096 bytes, with a one-megabyte maximum. Record sync, mempool
 exchange, quorum votes, validator epochs, and mining tools decode frames as one
 logical protocol message.
+
+## 2026-06-08: Crash-Recoverable Record Store And Index
+
+Hardened the canonical arithmetic-record store without changing its `.dat`
+wire format. Appends now use explicit POSIX writes and synchronize the chain
+file before success. Startup and lookup recover a crash-interrupted append by
+hash-verifying the complete prefix and truncating only an incomplete trailing
+record. Invalid magic, kind, size, or payload hashes inside completed records
+remain fatal corruption errors.
+
+Added a persistent `.idx` sidecar mapping each integer to its record byte
+offset. Latest, integer, and range queries use the index instead of loading and
+hashing every payload. The index is non-consensus acceleration state: stale,
+malformed, interrupted, or inconsistent files are automatically rebuilt from
+the verified chain. Tip replacement and validated peer synchronization now
+write and synchronize temporary stores before atomic rename, and the build
+enables 64-bit file offsets on 32-bit Linux.
+
+Fault tests cover incomplete append recovery, index corruption and rebuild,
+atomic tip replacement, rejection of incomplete install sources, preservation
+of the live store after failed installation, and detection of interior payload
+corruption.
