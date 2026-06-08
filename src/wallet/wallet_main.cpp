@@ -124,9 +124,9 @@ DevWallet createWallet() {
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " new <development-wallet-file>\n"
-              << "  " << argv0 << " new-miner <ed25519-wallet-file>\n"
+              << "  " << argv0 << " new-miner <ml-dsa-65-wallet-file>\n"
               << "  " << argv0 << " address <wallet-file>\n"
-              << "  " << argv0 << " miner-address <ed25519-wallet-file>\n"
+              << "  " << argv0 << " miner-address <ml-dsa-65-wallet-file>\n"
               << "  " << argv0 << " balance <record-store.dat> <wallet-file>\n";
 }
 

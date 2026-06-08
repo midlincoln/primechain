@@ -12,7 +12,7 @@ namespace {
 
 struct ValidatorKey {
     primechain::Address address;
-    primechain::crypto::Ed25519KeyPair keys;
+    primechain::crypto::SignatureKeyPair keys;
 };
 
 bool expect(bool condition, const std::string& name) {
@@ -23,9 +23,9 @@ bool expect(bool condition, const std::string& name) {
 std::vector<ValidatorKey> makeValidators(std::size_t count, std::string& error) {
     std::vector<ValidatorKey> out;
     for (std::size_t i = 0; i < count; ++i) {
-        const auto keys = primechain::crypto::generateEd25519KeyPair(error);
+        const auto keys = primechain::crypto::generateProtocolSignatureKeyPair(error);
         if (!keys.has_value()) return {};
-        out.push_back({primechain::crypto::addressFromEd25519PublicKey(keys->public_key), *keys});
+        out.push_back({primechain::crypto::addressFromProtocolPublicKey(keys->public_key), *keys});
     }
     std::sort(out.begin(), out.end(), [](const ValidatorKey& lhs, const ValidatorKey& rhs) {
         return lhs.address < rhs.address;
@@ -49,7 +49,7 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     record.proof.factors_of_p_minus_1.push_back({2, 1});
     record.proof.provider_address = current[0].address;
     const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> prime_factors{{2, 1}};
-    const auto prime_signature = primechain::crypto::ed25519Sign(
+    const auto prime_signature = primechain::crypto::signProtocolMessage(
         current[0].keys.private_key,
         primechain::crypto::primeProofSigningPayload(
             record.previous_record_hash, record.proof.p, record.proof.witness,
@@ -67,7 +67,7 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
         primechain::protocol::ValidatorEpochVoteV1 vote;
         vote.validator_address = current[i].address;
         vote.public_key = current[i].keys.public_key;
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             current[i].keys.private_key,
             primechain::crypto::validatorEpochVoteSigningPayload(
                 record.previous_record_hash,
@@ -84,7 +84,7 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     std::sort(record.validator_epoch.votes.begin(), record.validator_epoch.votes.end(),
         [](const auto& lhs, const auto& rhs) { return lhs.validator_address < rhs.validator_address; });
     primechain::protocol::updateTransactionBatch(record);
-    record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
     record.finalized_by.votes.clear();
     const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
     for (std::size_t i = 0; i < 2; ++i) {

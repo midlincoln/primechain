@@ -51,24 +51,24 @@ std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRec
     std::string& error) {
     using namespace primechain;
 
-    const auto miner = crypto::generateEd25519KeyPair(error);
+    const auto miner = crypto::generateProtocolSignatureKeyPair(error);
     if (!miner.has_value()) {
         return std::nullopt;
     }
-    const Address miner_address = crypto::addressFromEd25519PublicKey(miner->public_key);
+    const Address miner_address = crypto::addressFromProtocolPublicKey(miner->public_key);
     constexpr PrimeValue integer = 4;
     constexpr PrimeValue divisor = 2;
     constexpr std::uint64_t nonce = 77;
     const Hash256 commitment_hash = crypto::compositeCommitment(
         integer, divisor, divisor, nonce, miner_address);
-    const auto commitment_signature = crypto::ed25519Sign(
+    const auto commitment_signature = crypto::signProtocolMessage(
         miner->private_key,
         crypto::compositeCommitSigningPayload(integer, commitment_hash, miner_address),
         error);
     if (!commitment_signature.has_value()) {
         return std::nullopt;
     }
-    const auto reveal_signature = crypto::ed25519Sign(
+    const auto reveal_signature = crypto::signProtocolMessage(
         miner->private_key,
         crypto::compositeRevealSigningPayload(
             integer, divisor, divisor, nonce, miner_address),
@@ -79,16 +79,16 @@ std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRec
 
     struct ValidatorIdentity {
         Address address;
-        crypto::Ed25519KeyPair keys;
+        crypto::SignatureKeyPair keys;
     };
     std::vector<ValidatorIdentity> validators;
     for (int i = 0; i < 3; ++i) {
-        const auto keys = crypto::generateEd25519KeyPair(error);
+        const auto keys = crypto::generateProtocolSignatureKeyPair(error);
         if (!keys.has_value()) {
             return std::nullopt;
         }
         validators.push_back({
-            crypto::addressFromEd25519PublicKey(keys->public_key), *keys});
+            crypto::addressFromProtocolPublicKey(keys->public_key), *keys});
     }
     std::sort(validators.begin(), validators.end(),
         [](const ValidatorIdentity& left, const ValidatorIdentity& right) {
@@ -114,7 +114,7 @@ std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRec
     record.commit_phase.snapshot_hash = protocol::commitPhaseSnapshotHash(
         integer, record.commit_phase.commitments);
     for (std::size_t i = 0; i < 2; ++i) {
-        const auto signature = crypto::ed25519Sign(
+        const auto signature = crypto::signProtocolMessage(
             validators[i].keys.private_key,
             crypto::commitPhaseVoteSigningPayload(
                 integer, record.commit_phase.snapshot_hash, validators[i].address),
@@ -193,21 +193,21 @@ int main() {
     }
 
     std::string auth_error;
-    const auto account = primechain::crypto::generateEd25519KeyPair(auth_error);
+    const auto account = primechain::crypto::generateProtocolSignatureKeyPair(auth_error);
     if (!expect(account.has_value(), "generate authenticated transaction key")) {
         std::cerr << auth_error << "\n";
         return 1;
     }
     TransactionV0 authenticated_tx;
-    authenticated_tx.version = 1;
+    authenticated_tx.version = 2;
     authenticated_tx.inputs.push_back({5, {100, 1}});
     authenticated_tx.outputs.push_back({5, {100, 1}, "pcdev1_receiver"});
     authenticated_tx.fee = {5, {0, 1}};
     authenticated_tx.nonce = 9;
     authenticated_tx.sender_public_key = account->public_key;
     authenticated_tx.sender_address =
-        primechain::crypto::addressFromEd25519PublicKey(account->public_key);
-    const auto authenticated_signature = primechain::crypto::ed25519Sign(
+        primechain::crypto::addressFromProtocolPublicKey(account->public_key);
+    const auto authenticated_signature = primechain::crypto::signProtocolMessage(
         account->private_key,
         primechain::crypto::transactionSigningPayload(
             serializeTransaction(authenticated_tx, false)),
@@ -224,7 +224,7 @@ int main() {
 
     const primechain::Hash256 previous_hash = primechain::crypto::sha3_256({1, 2, 3});
     const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors{{2, 2}};
-    const auto prime_signature = primechain::crypto::ed25519Sign(
+    const auto prime_signature = primechain::crypto::signProtocolMessage(
         account->private_key,
         primechain::crypto::primeProofSigningPayload(
             previous_hash, 5, 2, factors, authenticated_tx.sender_address),
@@ -330,15 +330,15 @@ int main() {
         return 1;
     }
     auto signed_record = composite;
-    signed_record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    signed_record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
     signed_record.finalized_by.votes.clear();
-    std::vector<primechain::crypto::Ed25519KeyPair> validator_keys;
+    std::vector<primechain::crypto::SignatureKeyPair> validator_keys;
     std::vector<primechain::Address> validator_set;
     for (int i = 0; i < 3; ++i) {
         std::string key_error;
-        const auto key = primechain::crypto::generateEd25519KeyPair(key_error);
+        const auto key = primechain::crypto::generateProtocolSignatureKeyPair(key_error);
         if (!expect(key.has_value(), "generate finalization validator key")) return 1;
-        validator_set.push_back(primechain::crypto::addressFromEd25519PublicKey(key->public_key));
+        validator_set.push_back(primechain::crypto::addressFromProtocolPublicKey(key->public_key));
         validator_keys.push_back(*key);
     }
     std::vector<std::size_t> order{0, 1, 2};
@@ -403,13 +403,13 @@ int main() {
     std::vector<primechain::Address> genesis_validators;
     for (int i = 0; i < 3; ++i) {
         certificate_error.clear();
-        const auto keys = primechain::crypto::generateEd25519KeyPair(certificate_error);
+        const auto keys = primechain::crypto::generateProtocolSignatureKeyPair(certificate_error);
         if (!expect(keys.has_value(), "generate genesis validator identity")) {
             std::cerr << certificate_error << "\n";
             return 1;
         }
         genesis_validators.push_back(
-            primechain::crypto::addressFromEd25519PublicKey(keys->public_key));
+            primechain::crypto::addressFromProtocolPublicKey(keys->public_key));
     }
     const auto anchored_genesis = primechain::node::makeGenesisPrimeRecordV0(
         genesis_validators);

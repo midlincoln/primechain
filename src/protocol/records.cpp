@@ -16,8 +16,8 @@ namespace {
 constexpr std::uint64_t kCompositeRecordTag = 1;
 constexpr std::uint64_t kPrimeRecordTag = 2;
 constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
-constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-ed25519-v1";
-constexpr std::string_view kRoundFinalizationRule = "fixed-2-of-3-ed25519-rounds-v2";
+constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-mldsa65-v2";
+constexpr std::string_view kRoundFinalizationRule = "fixed-2-of-3-mldsa65-rounds-v3";
 constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
 
 class ByteReader {
@@ -479,7 +479,7 @@ bool isDevelopmentAddress(const Address& address) {
 }
 
 bool isProtocolAddress(const Address& address) {
-    return isDevelopmentAddress(address) || crypto::isEd25519Address(address);
+    return isDevelopmentAddress(address) || crypto::isProtocolSignatureAddress(address);
 }
 
 Address developmentAddressFromPublicKey(const Bytes& public_key) {
@@ -705,7 +705,7 @@ bool verifyCommitPhaseCertificate(
         return false;
     }
     for (const auto& validator : certificate.validator_set) {
-        if (!crypto::isEd25519Address(validator)) {
+        if (!crypto::isProtocolSignatureAddress(validator)) {
             error = "invalid commit-phase validator address";
             return false;
         }
@@ -726,12 +726,12 @@ bool verifyCommitPhaseCertificate(
             }
         }
         if (commitment.provider_address !=
-            crypto::addressFromEd25519PublicKey(commitment.public_key)) {
+            crypto::addressFromProtocolPublicKey(commitment.public_key)) {
             error = "embedded commitment address mismatch";
             return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(
+        if (!crypto::verifyProtocolMessageSignature(
                 commitment.public_key,
                 crypto::compositeCommitSigningPayload(
                     record.integer, commitment.commitment_hash,
@@ -764,12 +764,12 @@ bool verifyCommitPhaseCertificate(
             error = "commit-phase vote is outside validator set";
             return false;
         }
-        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+        if (vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "commit-phase vote address mismatch";
             return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(
+        if (!crypto::verifyProtocolMessageSignature(
                 vote.public_key,
                 crypto::commitPhaseVoteSigningPayload(
                     record.integer, certificate.snapshot_hash,
@@ -822,7 +822,7 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
         return false;
     }
     for (const auto& validator : validators) {
-        if (!crypto::isEd25519Address(validator)) {
+        if (!crypto::isProtocolSignatureAddress(validator)) {
             error = "invalid genesis validator address";
             return false;
         }
@@ -860,7 +860,7 @@ bool verifyValidatorEpochTransition(
         return false;
     }
     for (const auto& validator : transition.next_validator_set) {
-        if (!crypto::isEd25519Address(validator)) {
+        if (!crypto::isProtocolSignatureAddress(validator)) {
             error = "invalid next validator address";
             return false;
         }
@@ -881,12 +881,12 @@ bool verifyValidatorEpochTransition(
             error = "validator epoch vote is outside current set";
             return false;
         }
-        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+        if (vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "validator epoch vote address mismatch";
             return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(
+        if (!crypto::verifyProtocolMessageSignature(
                 vote.public_key,
                 crypto::validatorEpochVoteSigningPayload(
                     previous_record_hash, record_integer, transition.epoch,
@@ -936,15 +936,15 @@ bool verifyDevelopmentTransactionSignature(const TransactionV0& tx) {
 }
 
 bool verifyAuthenticatedTransactionSignature(const TransactionV0& tx, std::string& error) {
-    if (!crypto::isEd25519Address(tx.sender_address)) {
-        error = "transaction sender is not an Ed25519 address";
+    if (!crypto::isProtocolSignatureAddress(tx.sender_address)) {
+        error = "transaction sender is not an ML-DSA-65 address";
         return false;
     }
-    if (tx.sender_address != crypto::addressFromEd25519PublicKey(tx.sender_public_key)) {
+    if (tx.sender_address != crypto::addressFromProtocolPublicKey(tx.sender_public_key)) {
         error = "transaction sender address does not match public key";
         return false;
     }
-    return crypto::ed25519Verify(
+    return crypto::verifyProtocolMessageSignature(
         tx.sender_public_key,
         crypto::transactionSigningPayload(serializeTransaction(tx, false)),
         tx.signature,
@@ -1014,7 +1014,7 @@ ValidatorVoteV0 makeSignedValidatorVote(
     vote.public_key = public_key;
     vote.record_hash = record_hash;
     vote.round = round;
-    const auto signature = crypto::ed25519Sign(
+    const auto signature = crypto::signProtocolMessage(
         private_key,
         crypto::recordFinalizationVoteSigningPayload(record_hash, round, validator_address),
         error);
@@ -1051,13 +1051,13 @@ bool verifyRoundChangeCertificate(
         }
         previous_round_validator = change.validator_address;
         if (!std::binary_search(validator_set.begin(), validator_set.end(), change.validator_address) ||
-            change.validator_address != crypto::addressFromEd25519PublicKey(change.public_key) ||
+            change.validator_address != crypto::addressFromProtocolPublicKey(change.public_key) ||
             change.previous_record_hash != previous_record_hash || change.integer != integer ||
             change.new_round != round) {
             error = "round-change vote target mismatch"; return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(change.public_key,
+        if (!crypto::verifyProtocolMessageSignature(change.public_key,
                 crypto::roundChangeVoteSigningPayload(change.previous_record_hash,
                     change.integer, change.new_round, change.validator_address),
                 change.signature, signature_error)) {
@@ -1076,7 +1076,7 @@ bool verifyRecordFinalization(
     std::string& error) {
     if (validator_set.empty()) return verifyDevelopmentFinalization(proof, candidate_hash, error);
     if (proof.rule != kSignedFinalizationRule && proof.rule != kRoundFinalizationRule) {
-        error = "quorum records require Ed25519 finalization"; return false;
+        error = "quorum records require ML-DSA-65 finalization"; return false;
     }
     if (validator_set.size() != 3 || proof.votes.size() < 2 || proof.votes.size() > 3) {
         error = "signed finalization requires two or three votes from a three-validator set"; return false;
@@ -1097,14 +1097,14 @@ bool verifyRecordFinalization(
         if (!std::binary_search(validator_set.begin(), validator_set.end(), vote.validator_address)) {
             error = "finalization vote is outside active validator set"; return false;
         }
-        if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
+        if (vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "finalization vote address mismatch"; return false;
         }
         if (vote.record_hash != candidate_hash || vote.round != round) {
             error = "finalization vote target mismatch"; return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(vote.public_key,
+        if (!crypto::verifyProtocolMessageSignature(vote.public_key,
                 crypto::recordFinalizationVoteSigningPayload(vote.record_hash, vote.round, vote.validator_address),
                 vote.signature, signature_error)) {
             error = "invalid finalization vote signature"; return false;

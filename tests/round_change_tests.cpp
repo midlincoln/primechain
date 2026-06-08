@@ -13,7 +13,7 @@ namespace {
 
 struct ValidatorKey {
     primechain::Address address;
-    primechain::crypto::Ed25519KeyPair keys;
+    primechain::crypto::SignatureKeyPair keys;
 };
 
 bool expect(bool condition, const std::string& name) {
@@ -24,10 +24,10 @@ bool expect(bool condition, const std::string& name) {
 std::vector<ValidatorKey> makeValidators(std::string& error) {
     std::vector<ValidatorKey> validators;
     for (int i = 0; i < 3; ++i) {
-        const auto keys = primechain::crypto::generateEd25519KeyPair(error);
+        const auto keys = primechain::crypto::generateProtocolSignatureKeyPair(error);
         if (!keys.has_value()) return {};
         validators.push_back({
-            primechain::crypto::addressFromEd25519PublicKey(keys->public_key), *keys});
+            primechain::crypto::addressFromProtocolPublicKey(keys->public_key), *keys});
     }
     std::sort(validators.begin(), validators.end(),
         [](const auto& left, const auto& right) {
@@ -55,7 +55,7 @@ primechain::protocol::RoundChangeVoteV1 makeRoundChangeVote(
     vote.previous_record_hash = previous_hash;
     vote.integer = integer;
     vote.new_round = new_round;
-    const auto signature = primechain::crypto::ed25519Sign(
+    const auto signature = primechain::crypto::signProtocolMessage(
         validator.keys.private_key,
         primechain::crypto::roundChangeVoteSigningPayload(
             previous_hash, integer, new_round, validator.address),
@@ -79,7 +79,7 @@ primechain::protocol::PrimeRecordV0 makeRoundTwoPrime(
     record.proof.provider_address = validators[0].address;
 
     const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors{{2, 1}};
-    const auto prime_signature = primechain::crypto::ed25519Sign(
+    const auto prime_signature = primechain::crypto::signProtocolMessage(
         validators[0].keys.private_key,
         primechain::crypto::primeProofSigningPayload(
             record.previous_record_hash, record.integer, record.proof.witness,
@@ -89,7 +89,7 @@ primechain::protocol::PrimeRecordV0 makeRoundTwoPrime(
     record.proof.signature = primechain::crypto::packPrimeProofAuthentication(
         validators[0].keys.public_key, *prime_signature);
 
-    record.finalized_by.rule = "fixed-2-of-3-ed25519-rounds-v2";
+    record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-v3";
     for (std::size_t i = 0; i < 2; ++i) {
         record.finalized_by.round_changes.push_back(makeRoundChangeVote(
             validators[i], record.previous_record_hash, record.integer, 2, error));

@@ -217,7 +217,7 @@ std::optional<std::string> signedPrimeSubmission(
     for (const auto& factor : proof.factors_of_p_minus_1.factors) {
         factors.push_back({factor.prime, factor.exponent});
     }
-    const auto signature = primechain::crypto::ed25519Sign(
+    const auto signature = primechain::crypto::signProtocolMessage(
         identity.private_key,
         primechain::crypto::primeProofSigningPayload(
             previous_record_hash, proof.p, proof.witness, factors, identity.address),
@@ -270,7 +270,7 @@ std::optional<std::string> signedCompositeCommitSubmission(
     std::string& error) {
     const auto commitment = primechain::crypto::compositeCommitment(
         proof.m, proof.d, proof.e, nonce, identity.address);
-    const auto signature = primechain::crypto::ed25519Sign(
+    const auto signature = primechain::crypto::signProtocolMessage(
         identity.private_key,
         primechain::crypto::compositeCommitSigningPayload(
             proof.m, commitment, identity.address),
@@ -289,7 +289,7 @@ std::optional<std::string> signedCompositeRevealSubmission(
     std::uint64_t nonce,
     const primechain::wallet::MinerIdentity& identity,
     std::string& error) {
-    const auto signature = primechain::crypto::ed25519Sign(
+    const auto signature = primechain::crypto::signProtocolMessage(
         identity.private_key,
         primechain::crypto::compositeRevealSigningPayload(
             proof.m, proof.d, proof.e, nonce, identity.address),

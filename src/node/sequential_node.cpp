@@ -108,7 +108,7 @@ bool validatePrimeProviderSignature(
         protocol::isProtocolAddress(proof.provider_address)) {
         return true;
     }
-    if (!crypto::isEd25519Address(proof.provider_address)) {
+    if (!crypto::isProtocolSignatureAddress(proof.provider_address)) {
         error = "unsupported prime provider address";
         return false;
     }
@@ -121,9 +121,9 @@ bool validateTransactionSignature(
     const protocol::TransactionV0& tx,
     bool allow_development,
     std::string& error) {
-    if (crypto::isEd25519Address(tx.sender_address)) {
-        if (tx.version != 1) {
-            error = "authenticated transaction requires version 1";
+    if (crypto::isProtocolSignatureAddress(tx.sender_address)) {
+        if (tx.version != 2) {
+            error = "authenticated transaction requires version 2";
             return false;
         }
         return protocol::verifyAuthenticatedTransactionSignature(tx, error);
@@ -132,7 +132,7 @@ bool validateTransactionSignature(
         protocol::verifyDevelopmentTransactionSignature(tx)) {
         return true;
     }
-    error = "transaction requires an authenticated Ed25519 sender";
+    error = "transaction requires an authenticated ML-DSA-65 sender";
     return false;
 }
 
@@ -142,7 +142,7 @@ bool validateCompositeProviderSignature(
     if (protocol::isDevelopmentAddress(proof.provider_address)) {
         return true;
     }
-    if (!primechain::crypto::isEd25519Address(proof.provider_address)) {
+    if (!primechain::crypto::isProtocolSignatureAddress(proof.provider_address)) {
         error = "unsupported composite provider address";
         return false;
     }

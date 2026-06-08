@@ -9,9 +9,9 @@
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     std::string error;
-    const auto keys = primechain::crypto::generateEd25519KeyPair(error);
+    const auto keys = primechain::crypto::generateProtocolSignatureKeyPair(error);
     if (!keys.has_value()) return 1;
-    const auto address = primechain::crypto::addressFromEd25519PublicKey(keys->public_key);
+    const auto address = primechain::crypto::addressFromProtocolPublicKey(keys->public_key);
     const primechain::Hash256 candidate = primechain::crypto::sha3_256({1, 2, 3});
     auto vote = primechain::protocol::makeSignedValidatorVote(
         address, keys->public_key, keys->private_key, candidate, 1, error);

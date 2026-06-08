@@ -790,8 +790,8 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
             commitment.signature = hexToBytes(signature_hex);
             std::string verification_error;
             if (commitment.provider_address !=
-                    primechain::crypto::addressFromEd25519PublicKey(commitment.public_key) ||
-                !primechain::crypto::ed25519Verify(
+                    primechain::crypto::addressFromProtocolPublicKey(commitment.public_key) ||
+                !primechain::crypto::verifyProtocolMessageSignature(
                     commitment.public_key,
                     primechain::crypto::compositeCommitSigningPayload(
                         commitment.integer,
@@ -1441,8 +1441,8 @@ public:
             } else {
                 std::string verification_error;
                 if (commitment.provider_address !=
-                        primechain::crypto::addressFromEd25519PublicKey(commitment.public_key) ||
-                    !primechain::crypto::ed25519Verify(
+                        primechain::crypto::addressFromProtocolPublicKey(commitment.public_key) ||
+                    !primechain::crypto::verifyProtocolMessageSignature(
                         commitment.public_key,
                         primechain::crypto::compositeCommitSigningPayload(
                             commitment.integer,
@@ -2150,11 +2150,11 @@ private:
             vote.new_round < std::max<std::uint64_t>(2, active_round) ||
             vote.new_round > active_round + 1 ||
             !std::binary_search(validator_set_.begin(), validator_set_.end(), vote.validator_address) ||
-            vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "invalid round-change vote target";
             return false;
         }
-        return primechain::crypto::ed25519Verify(
+        return primechain::crypto::verifyProtocolMessageSignature(
             vote.public_key,
             primechain::crypto::roundChangeVoteSigningPayload(
                 vote.previous_record_hash, vote.integer, vote.new_round, vote.validator_address),
@@ -2226,12 +2226,12 @@ private:
             const auto& vote = record.vote;
             if (record.integer != target || vote.round == 0 ||
                 vote.validator_address != validator_identity_->address ||
-                vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+                vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
                 error = "invalid persisted finalization vote";
                 return false;
             }
             std::string verify_error;
-            if (!primechain::crypto::ed25519Verify(
+            if (!primechain::crypto::verifyProtocolMessageSignature(
                     vote.public_key,
                     primechain::crypto::recordFinalizationVoteSigningPayload(
                         vote.record_hash, vote.round, vote.validator_address),
@@ -2315,12 +2315,12 @@ private:
         if (proposer_vote != nullptr) {
             if (proposer_vote->record_hash != candidate_hash || proposer_vote->round != round ||
                 !std::binary_search(validator_set_.begin(), validator_set_.end(), proposer_vote->validator_address) ||
-                proposer_vote->validator_address != primechain::crypto::addressFromEd25519PublicKey(proposer_vote->public_key)) {
+                proposer_vote->validator_address != primechain::crypto::addressFromProtocolPublicKey(proposer_vote->public_key)) {
                 error = "candidate request is not authorized by an active validator";
                 return false;
             }
             std::string authorization_error;
-            if (!primechain::crypto::ed25519Verify(
+            if (!primechain::crypto::verifyProtocolMessageSignature(
                     proposer_vote->public_key,
                     primechain::crypto::recordFinalizationVoteSigningPayload(
                         proposer_vote->record_hash, proposer_vote->round, proposer_vote->validator_address),
@@ -2364,7 +2364,7 @@ private:
         vote.previous_record_hash = previous_hash;
         vote.integer = integer;
         vote.new_round = new_round;
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             validator_identity_->private_key,
             primechain::crypto::roundChangeVoteSigningPayload(
                 previous_hash, integer, new_round, vote.validator_address), error);
@@ -2443,7 +2443,7 @@ private:
         std::string& error) const {
         if (vote.record_hash != candidate_hash || vote.round != expected_round ||
             !std::binary_search(validator_set_.begin(), validator_set_.end(), vote.validator_address) ||
-            vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "invalid validator finalization vote target";
             return false;
         }
@@ -2451,7 +2451,7 @@ private:
             if (existing.validator_address == vote.validator_address) return true;
         }
         std::string signature_error;
-        if (!primechain::crypto::ed25519Verify(
+        if (!primechain::crypto::verifyProtocolMessageSignature(
                 vote.public_key,
                 primechain::crypto::recordFinalizationVoteSigningPayload(
                     vote.record_hash, vote.round, vote.validator_address),
@@ -2534,10 +2534,10 @@ private:
         std::string& error) {
         std::uint64_t round = activeFinalizationRound(record.integer);
         if (round == 1) {
-            record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+            record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
             record.finalized_by.round_changes.clear();
         } else {
-            record.finalized_by.rule = "fixed-2-of-3-ed25519-rounds-v2";
+            record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-v3";
             record.finalized_by.round_changes = certifiedRoundChanges(record.integer, round);
         }
         if (collectFinalizationVotes(record, kind, round, error)) return true;
@@ -2551,7 +2551,7 @@ private:
         const std::uint64_t next_round = round + 1;
         if (!advanceFinalizationRound(
                 record.previous_record_hash, record.integer, next_round, error)) return false;
-        record.finalized_by.rule = "fixed-2-of-3-ed25519-rounds-v2";
+        record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-v3";
         record.finalized_by.round_changes = certifiedRoundChanges(record.integer, next_round);
         record.finalized_by.votes.clear();
         return collectFinalizationVotes(record, kind, next_round, error);
@@ -2660,12 +2660,12 @@ private:
                 std::find(validator_set_.begin(), validator_set_.end(), vote.validator_address) ==
                     validator_set_.end() ||
                 vote.validator_address !=
-                    primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+                    primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
                 error = "invalid persisted commit-phase vote";
                 return false;
             }
             std::string verify_error;
-            if (!primechain::crypto::ed25519Verify(
+            if (!primechain::crypto::verifyProtocolMessageSignature(
                     vote.public_key,
                     primechain::crypto::commitPhaseVoteSigningPayload(
                         vote.integer, vote.snapshot_hash, vote.validator_address),
@@ -2746,7 +2746,7 @@ private:
             return false;
         }
         if (vote.validator_address !=
-            primechain::crypto::addressFromEd25519PublicKey(vote.public_key)) {
+            primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "validator address does not match public key";
             return false;
         }
@@ -2763,7 +2763,7 @@ private:
             }
         }
         std::string verify_error;
-        if (!primechain::crypto::ed25519Verify(
+        if (!primechain::crypto::verifyProtocolMessageSignature(
                 vote.public_key,
                 primechain::crypto::commitPhaseVoteSigningPayload(
                     vote.integer, vote.snapshot_hash, vote.validator_address),
@@ -2809,7 +2809,7 @@ private:
         vote.validator_address = validator_identity_->address;
         vote.public_key = validator_identity_->public_key;
         std::string error;
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             validator_identity_->private_key,
             primechain::crypto::commitPhaseVoteSigningPayload(
                 integer, vote.snapshot_hash, vote.validator_address),
@@ -2952,12 +2952,12 @@ private:
                 !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
                 std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
                 std::find(validator_set_.begin(), validator_set_.end(), record.vote.validator_address) == validator_set_.end() ||
-                record.vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(record.vote.public_key)) {
+                record.vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(record.vote.public_key)) {
                 error = "invalid persisted validator epoch vote";
                 return false;
             }
             std::string verify_error;
-            if (!primechain::crypto::ed25519Verify(
+            if (!primechain::crypto::verifyProtocolMessageSignature(
                     record.vote.public_key,
                     primechain::crypto::validatorEpochVoteSigningPayload(
                         record.previous_record_hash, record.record_integer, record.epoch,
@@ -3066,13 +3066,13 @@ private:
             record.next_validator_set.size() != 3 ||
             !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
             std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
-            !std::all_of(record.next_validator_set.begin(), record.next_validator_set.end(), primechain::crypto::isEd25519Address)) {
+            !std::all_of(record.next_validator_set.begin(), record.next_validator_set.end(), primechain::crypto::isProtocolSignatureAddress)) {
             writeAll(fd, "ERROR epoch proposal does not match current chain state\n");
             return;
         }
         if (std::find(validator_set_.begin(), validator_set_.end(), voter) == validator_set_.end() ||
-            voter != primechain::crypto::addressFromEd25519PublicKey(record.vote.public_key) ||
-            !primechain::crypto::ed25519Verify(
+            voter != primechain::crypto::addressFromProtocolPublicKey(record.vote.public_key) ||
+            !primechain::crypto::verifyProtocolMessageSignature(
                 record.vote.public_key,
                 primechain::crypto::validatorEpochVoteSigningPayload(
                     record.previous_record_hash, record.record_integer, record.epoch,
@@ -3131,16 +3131,17 @@ private:
         const auto public_key = hexToBytes(public_key_hex);
         const auto signature = hexToBytes(signature_hex);
         if (!in || command != "SUBMIT_SIGNED_COMMIT" || !commitment_hash.has_value() ||
-            public_key.size() != 32 || signature.size() != 64 || (in >> extra)) {
+            public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+            signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) || (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_SIGNED_COMMIT\n");
             return;
         }
-        if (provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+        if (provider_address != primechain::crypto::addressFromProtocolPublicKey(public_key)) {
             writeAll(fd, "ERROR signed commitment address does not match public key\n");
             return;
         }
         std::string error;
-        if (!primechain::crypto::ed25519Verify(
+        if (!primechain::crypto::verifyProtocolMessageSignature(
                 public_key,
                 primechain::crypto::compositeCommitSigningPayload(
                     g, *commitment_hash, provider_address),
@@ -3367,16 +3368,17 @@ private:
         const auto public_key = hexToBytes(public_key_hex);
         const auto signature = hexToBytes(signature_hex);
         if (!in || command != "SUBMIT_SIGNED_REVEAL" ||
-            public_key.size() != 32 || signature.size() != 64 || (in >> extra)) {
+            public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+            signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) || (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_SIGNED_REVEAL\n");
             return;
         }
-        if (provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+        if (provider_address != primechain::crypto::addressFromProtocolPublicKey(public_key)) {
             writeAll(fd, "ERROR signed reveal address does not match public key\n");
             return;
         }
         std::string error;
-        if (!primechain::crypto::ed25519Verify(
+        if (!primechain::crypto::verifyProtocolMessageSignature(
                 public_key,
                 primechain::crypto::compositeRevealSigningPayload(
                     g, d, e, nonce, provider_address),
@@ -3637,7 +3639,7 @@ private:
         in >> provider_address;
         if (signed_submission) in >> public_key_hex >> signature_hex;
         if (!in || (signed_submission
-                ? !primechain::crypto::isEd25519Address(provider_address)
+                ? !primechain::crypto::isProtocolSignatureAddress(provider_address)
                 : !primechain::protocol::isDevelopmentAddress(provider_address))) {
             writeAll(fd, "ERROR invalid prime submission provider address\n");
             return;
@@ -3660,8 +3662,9 @@ private:
         if (signed_submission) {
             const auto public_key = hexToBytes(public_key_hex);
             const auto signature = hexToBytes(signature_hex);
-            if (public_key.size() != 32 || signature.size() != 64 ||
-                provider_address != primechain::crypto::addressFromEd25519PublicKey(public_key)) {
+            if (public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+                signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+                provider_address != primechain::crypto::addressFromProtocolPublicKey(public_key)) {
                 writeAll(fd, "ERROR invalid signed prime identity\n");
                 return;
             }
@@ -4206,9 +4209,9 @@ int main(int argc, char** argv) {
         if (unique_validators.size() != 3 ||
             !std::all_of(options.validator_set.begin(), options.validator_set.end(),
                 [](const primechain::Address& address) {
-                    return primechain::crypto::isEd25519Address(address);
+                    return primechain::crypto::isProtocolSignatureAddress(address);
                 })) {
-            std::cerr << "validator set must contain three distinct pc1_ addresses\n";
+            std::cerr << "validator set must contain three distinct pcpq1_ addresses\n";
             return 1;
         }
         primechain::wallet::MinerIdentity loaded;

@@ -39,13 +39,13 @@ crypto::Bytes hexToBytes(const std::string& hex) {
 }
 
 bool createMinerIdentity(MinerIdentity& identity, std::string& error) {
-    const auto pair = crypto::generateEd25519KeyPair(error);
+    const auto pair = crypto::generateProtocolSignatureKeyPair(error);
     if (!pair.has_value()) {
         return false;
     }
     identity.private_key = pair->private_key;
     identity.public_key = pair->public_key;
-    identity.address = crypto::addressFromEd25519PublicKey(identity.public_key);
+    identity.address = crypto::addressFromProtocolPublicKey(identity.public_key);
     return true;
 }
 
@@ -55,7 +55,8 @@ bool saveMinerIdentity(const std::string& path, const MinerIdentity& identity, s
         error = "could not open miner identity file";
         return false;
     }
-    out << "version=pc-miner-ed25519-v1\n";
+    out << "version=pc-miner-mldsa65-v2\n";
+    out << "algorithm=" << crypto::signatureAlgorithmName(crypto::kProtocolSignatureAlgorithm) << "\n";
     out << "address=" << identity.address << "\n";
     out << "private_key=" << bytesToHex(identity.private_key) << "\n";
     out << "public_key=" << bytesToHex(identity.public_key) << "\n";
@@ -86,17 +87,17 @@ bool loadMinerIdentity(const std::string& path, MinerIdentity& identity, std::st
         else if (key == "private_key") identity.private_key = hexToBytes(value);
         else if (key == "public_key") identity.public_key = hexToBytes(value);
     }
-    if (version != "pc-miner-ed25519-v1" ||
-        identity.private_key.size() != 32 ||
-        identity.public_key.size() != 32 ||
-        identity.address != crypto::addressFromEd25519PublicKey(identity.public_key)) {
+    if (version != "pc-miner-mldsa65-v2" ||
+        identity.private_key.size() != crypto::signaturePrivateKeySize(crypto::kProtocolSignatureAlgorithm) ||
+        identity.public_key.size() != crypto::signaturePublicKeySize(crypto::kProtocolSignatureAlgorithm) ||
+        identity.address != crypto::addressFromProtocolPublicKey(identity.public_key)) {
         error = "invalid miner identity file";
         return false;
     }
     const crypto::Bytes challenge{'p', 'r', 'i', 'm', 'e', 'c', 'h', 'a', 'i', 'n'};
-    const auto signature = crypto::ed25519Sign(identity.private_key, challenge, error);
+    const auto signature = crypto::signProtocolMessage(identity.private_key, challenge, error);
     if (!signature.has_value() ||
-        !crypto::ed25519Verify(identity.public_key, challenge, *signature, error)) {
+        !crypto::verifyProtocolMessageSignature(identity.public_key, challenge, *signature, error)) {
         error = "miner identity private/public key mismatch";
         return false;
     }

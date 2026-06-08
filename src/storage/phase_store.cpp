@@ -9,7 +9,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3156455341485055ull;
-constexpr std::uint64_t kMaxFieldBytes = 1024;
+constexpr std::uint64_t kMaxFieldBytes = 8192;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
     value = 0;

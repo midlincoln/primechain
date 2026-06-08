@@ -457,7 +457,7 @@ primechain::protocol::PrimeRecordV0 makePrimeRecord(
             factors.push_back({factor.prime, factor.exponent});
         }
         std::string signing_error;
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             signing_identity->private_key,
             primechain::crypto::primeProofSigningPayload(
                 record.previous_record_hash, proof.p, proof.witness, factors,
@@ -495,7 +495,7 @@ bool applySignedFinalization(
     const std::vector<primechain::wallet::MinerIdentity>& validators,
     std::string& error) {
     primechain::protocol::updateTransactionBatch(record);
-    record.finalized_by.rule = "fixed-2-of-3-ed25519-v1";
+    record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
     record.finalized_by.votes.clear();
     const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
     for (const auto& validator : validators) {
@@ -531,7 +531,7 @@ int main(int argc, char** argv) {
             (options.validator_set.size() != 3 ||
              !std::all_of(options.validator_set.begin(), options.validator_set.end(),
                  [](const primechain::Address& address) {
-                     return primechain::crypto::isEd25519Address(address);
+                     return primechain::crypto::isProtocolSignatureAddress(address);
                  }))) ||
         !primechain::protocol::isProtocolAddress(options.prime_miner_address) ||
         !primechain::protocol::isProtocolAddress(options.composite_miner_address) ||

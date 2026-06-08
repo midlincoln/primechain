@@ -52,12 +52,12 @@ int main(int argc, char** argv) {
         std::vector<primechain::Address> next_set{argv[6], argv[7], argv[8]};
         std::sort(next_set.begin(), next_set.end());
         if (std::adjacent_find(next_set.begin(), next_set.end()) != next_set.end() ||
-            !std::all_of(next_set.begin(), next_set.end(), primechain::crypto::isEd25519Address)) {
+            !std::all_of(next_set.begin(), next_set.end(), primechain::crypto::isProtocolSignatureAddress)) {
             std::cerr << "next validator set must contain three distinct pc1 addresses\n";
             return 1;
         }
         const auto activation_integer = record_integer + 1;
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             identity.private_key,
             primechain::crypto::validatorEpochVoteSigningPayload(
                 previous_hash, record_integer, epoch, activation_integer, next_set, identity.address),
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         }
         primechain::Hash256 snapshot{};
         std::copy(snapshot_bytes.begin(), snapshot_bytes.end(), snapshot.begin());
-        const auto signature = primechain::crypto::ed25519Sign(
+        const auto signature = primechain::crypto::signProtocolMessage(
             identity.private_key,
             primechain::crypto::commitPhaseVoteSigningPayload(g, snapshot, identity.address),
             error);
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
         payload = primechain::crypto::compositeRevealSigningPayload(
             g, d, e, nonce, identity.address);
     }
-    const auto signature = primechain::crypto::ed25519Sign(identity.private_key, payload, error);
+    const auto signature = primechain::crypto::signProtocolMessage(identity.private_key, payload, error);
     if (!signature.has_value()) {
         std::cerr << error << "\n";
         return 1;

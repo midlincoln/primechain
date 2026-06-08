@@ -11,7 +11,7 @@ namespace {
 constexpr std::uint64_t kCommitmentStoreMagicV0 = 0x3056544d43435055ull;
 constexpr std::uint64_t kCommitmentStoreMagicV1 = 0x3156544d43435055ull;
 constexpr std::uint64_t kMaxAddressBytes = 1024;
-constexpr std::uint64_t kMaxAuthBytes = 1024;
+constexpr std::uint64_t kMaxAuthBytes = 8192;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
     value = 0;

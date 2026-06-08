@@ -199,14 +199,14 @@ std::optional<primechain::protocol::TransactionV0> makeAuthenticatedTransferTran
         return std::nullopt;
     }
     primechain::protocol::TransactionV0 tx;
-    tx.version = 1;
+    tx.version = 2;
     tx.inputs.push_back({prime, {amount + fee, 1}});
     tx.outputs.push_back({prime, {amount, 1}, receiver_address});
     tx.fee = {prime, {fee, 1}};
     tx.nonce = nonce;
     tx.sender_address = sender.address;
     tx.sender_public_key = sender.public_key;
-    const auto signature = primechain::crypto::ed25519Sign(
+    const auto signature = primechain::crypto::signProtocolMessage(
         sender.private_key,
         primechain::crypto::transactionSigningPayload(
             primechain::protocol::serializeTransaction(tx, false)),
@@ -223,7 +223,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
-              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-ed25519.wallet pc1_receiver 3 250000 1000 1\n";
+              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1000 1\n";
 }
 
 } // namespace

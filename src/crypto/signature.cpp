@@ -150,6 +150,34 @@ bool isAddressForAlgorithm(SignatureAlgorithm algorithm, const Address& address)
         [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); });
 }
 
+std::optional<SignatureKeyPair> generateProtocolSignatureKeyPair(std::string& error) {
+    return generateSignatureKeyPair(kProtocolSignatureAlgorithm, error);
+}
+
+std::optional<Bytes> signProtocolMessage(
+    const Bytes& private_key,
+    const Bytes& message,
+    std::string& error) {
+    return signMessage(kProtocolSignatureAlgorithm, private_key, message, error);
+}
+
+bool verifyProtocolMessageSignature(
+    const Bytes& public_key,
+    const Bytes& message,
+    const Bytes& signature,
+    std::string& error) {
+    return verifyMessageSignature(
+        kProtocolSignatureAlgorithm, public_key, message, signature, error);
+}
+
+Address addressFromProtocolPublicKey(const Bytes& public_key) {
+    return addressFromPublicKey(kProtocolSignatureAlgorithm, public_key);
+}
+
+bool isProtocolSignatureAddress(const Address& address) {
+    return isAddressForAlgorithm(kProtocolSignatureAlgorithm, address);
+}
+
 std::optional<Ed25519KeyPair> generateEd25519KeyPair(std::string& error) {
     PkeyCtxPtr context(EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr), EVP_PKEY_CTX_free);
     if (!context || EVP_PKEY_keygen_init(context.get()) <= 0) {
@@ -250,7 +278,7 @@ Bytes compositeCommitSigningPayload(
     const Hash256& commitment_hash,
     const Address& provider_address) {
     Bytes payload;
-    appendString(payload, "primechain-composite-commit-signature-v1");
+    appendString(payload, "primechain-composite-commit-signature-mldsa65-v2");
     appendUint64(payload, integer);
     appendHash(payload, commitment_hash);
     appendString(payload, provider_address);
@@ -264,7 +292,7 @@ Bytes compositeRevealSigningPayload(
     std::uint64_t nonce,
     const Address& provider_address) {
     Bytes payload;
-    appendString(payload, "primechain-composite-reveal-signature-v1");
+    appendString(payload, "primechain-composite-reveal-signature-mldsa65-v2");
     appendUint64(payload, integer);
     appendUint64(payload, d);
     appendUint64(payload, e);
@@ -278,7 +306,7 @@ Bytes commitPhaseVoteSigningPayload(
     const Hash256& snapshot_hash,
     const Address& validator_address) {
     Bytes payload;
-    appendString(payload, "primechain-commit-phase-vote-v1");
+    appendString(payload, "primechain-commit-phase-vote-mldsa65-v2");
     appendUint64(payload, integer);
     appendHash(payload, snapshot_hash);
     appendString(payload, validator_address);
@@ -293,7 +321,7 @@ Bytes validatorEpochVoteSigningPayload(
     const std::vector<Address>& next_validator_set,
     const Address& validator_address) {
     Bytes payload;
-    appendString(payload, "primechain-validator-epoch-v1");
+    appendString(payload, "primechain-validator-epoch-mldsa65-v2");
     appendHash(payload, previous_record_hash);
     appendUint64(payload, record_integer);
     appendUint64(payload, epoch);
@@ -309,7 +337,7 @@ Bytes recordFinalizationVoteSigningPayload(
     std::uint64_t round,
     const Address& validator_address) {
     Bytes payload;
-    appendString(payload, "primechain-record-finalization-v1");
+    appendString(payload, "primechain-record-finalization-mldsa65-v2");
     appendHash(payload, candidate_hash);
     appendUint64(payload, round);
     appendString(payload, validator_address);
@@ -322,7 +350,7 @@ Bytes roundChangeVoteSigningPayload(
     std::uint64_t new_round,
     const Address& validator_address) {
     Bytes payload;
-    appendString(payload, "primechain-finalization-round-change-v1");
+    appendString(payload, "primechain-finalization-round-change-mldsa65-v2");
     appendHash(payload, previous_record_hash);
     appendUint64(payload, integer);
     appendUint64(payload, new_round);
@@ -332,7 +360,7 @@ Bytes roundChangeVoteSigningPayload(
 
 Bytes transactionSigningPayload(const Bytes& unsigned_transaction) {
     Bytes payload;
-    appendString(payload, "primechain-transaction-signature-v1");
+    appendString(payload, "primechain-transaction-signature-mldsa65-v2");
     appendUint64(payload, unsigned_transaction.size());
     payload.insert(payload.end(), unsigned_transaction.begin(), unsigned_transaction.end());
     return payload;
@@ -345,7 +373,7 @@ Bytes primeProofSigningPayload(
     const std::vector<std::pair<PrimeValue, std::uint64_t>>& factors,
     const Address& provider_address) {
     Bytes payload;
-    appendString(payload, "primechain-prime-proof-signature-v1");
+    appendString(payload, "primechain-prime-proof-signature-mldsa65-v2");
     appendHash(payload, previous_record_hash);
     appendUint64(payload, prime);
     appendUint64(payload, witness);
@@ -376,17 +404,19 @@ bool verifyPackedPrimeProofAuthentication(
     const Address& provider_address,
     const Bytes& packed_proof,
     std::string& error) {
-    if (packed_proof.size() != 96) {
+    const std::size_t public_key_size = signaturePublicKeySize(kProtocolSignatureAlgorithm);
+    const std::size_t signature_size = signatureSize(kProtocolSignatureAlgorithm);
+    if (packed_proof.size() != public_key_size + signature_size) {
         error = "invalid packed prime proof authentication size";
         return false;
     }
-    const Bytes public_key(packed_proof.begin(), packed_proof.begin() + 32);
-    const Bytes signature(packed_proof.begin() + 32, packed_proof.end());
-    if (provider_address != addressFromEd25519PublicKey(public_key)) {
+    const Bytes public_key(packed_proof.begin(), packed_proof.begin() + public_key_size);
+    const Bytes signature(packed_proof.begin() + public_key_size, packed_proof.end());
+    if (provider_address != addressFromProtocolPublicKey(public_key)) {
         error = "prime proof provider address mismatch";
         return false;
     }
-    return ed25519Verify(
+    return verifyProtocolMessageSignature(
         public_key,
         primeProofSigningPayload(
             previous_record_hash, prime, witness, factors, provider_address),
@@ -413,21 +443,23 @@ bool verifyPackedCompositeRevealProof(
     const Address& provider_address,
     const Bytes& packed_proof,
     std::string& error) {
-    if (packed_proof.size() != 104) {
+    const std::size_t public_key_size = signaturePublicKeySize(kProtocolSignatureAlgorithm);
+    const std::size_t signature_size = signatureSize(kProtocolSignatureAlgorithm);
+    if (packed_proof.size() != public_key_size + 8 + signature_size) {
         error = "invalid packed composite reveal proof size";
         return false;
     }
-    const Bytes public_key(packed_proof.begin(), packed_proof.begin() + 32);
+    const Bytes public_key(packed_proof.begin(), packed_proof.begin() + public_key_size);
     std::uint64_t nonce = 0;
     for (int i = 0; i < 8; ++i) {
-        nonce |= static_cast<std::uint64_t>(packed_proof[32 + i]) << (i * 8);
+        nonce |= static_cast<std::uint64_t>(packed_proof[public_key_size + i]) << (i * 8);
     }
-    const Bytes signature(packed_proof.begin() + 40, packed_proof.end());
-    if (provider_address != addressFromEd25519PublicKey(public_key)) {
+    const Bytes signature(packed_proof.begin() + public_key_size + 8, packed_proof.end());
+    if (provider_address != addressFromProtocolPublicKey(public_key)) {
         error = "composite reveal proof address mismatch";
         return false;
     }
-    return ed25519Verify(
+    return verifyProtocolMessageSignature(
         public_key,
         compositeRevealSigningPayload(integer, d, e, nonce, provider_address),
         signature,
@@ -446,9 +478,10 @@ bool packedCompositeRevealMatchesCommitment(
             integer, d, e, provider_address, packed_proof, error)) {
         return false;
     }
+    const std::size_t public_key_size = signaturePublicKeySize(kProtocolSignatureAlgorithm);
     std::uint64_t nonce = 0;
     for (int i = 0; i < 8; ++i) {
-        nonce |= static_cast<std::uint64_t>(packed_proof[32 + i]) << (i * 8);
+        nonce |= static_cast<std::uint64_t>(packed_proof[public_key_size + i]) << (i * 8);
     }
     if (compositeCommitment(integer, d, e, nonce, provider_address) !=
         expected_commitment) {

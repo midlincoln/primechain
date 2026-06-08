@@ -17,6 +17,8 @@ enum class SignatureAlgorithm : std::uint8_t {
     MlDsa65 = 2,
 };
 
+constexpr SignatureAlgorithm kProtocolSignatureAlgorithm = SignatureAlgorithm::MlDsa65;
+
 struct SignatureKeyPair {
     SignatureAlgorithm algorithm{SignatureAlgorithm::Ed25519};
     Bytes private_key;
@@ -44,6 +46,18 @@ bool verifyMessageSignature(
     std::string& error);
 Address addressFromPublicKey(SignatureAlgorithm algorithm, const Bytes& public_key);
 bool isAddressForAlgorithm(SignatureAlgorithm algorithm, const Address& address);
+std::optional<SignatureKeyPair> generateProtocolSignatureKeyPair(std::string& error);
+std::optional<Bytes> signProtocolMessage(
+    const Bytes& private_key,
+    const Bytes& message,
+    std::string& error);
+bool verifyProtocolMessageSignature(
+    const Bytes& public_key,
+    const Bytes& message,
+    const Bytes& signature,
+    std::string& error);
+Address addressFromProtocolPublicKey(const Bytes& public_key);
+bool isProtocolSignatureAddress(const Address& address);
 
 struct Ed25519KeyPair {
     Bytes private_key;
