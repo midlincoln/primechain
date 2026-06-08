@@ -55,6 +55,11 @@ Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,
     const Address& validator_address);
+Bytes roundChangeVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    std::uint64_t new_round,
+    const Address& validator_address);
 Bytes transactionSigningPayload(const Bytes& unsigned_transaction);
 Bytes primeProofSigningPayload(
     const Hash256& previous_record_hash,

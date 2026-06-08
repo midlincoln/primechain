@@ -346,6 +346,7 @@ Controlled-testnet finalization uses a genesis-anchored validator set and 2-of-3
 ```text
 FinalizationProof {
     rule: String,
+    round_changes: [RoundChangeVote],
     votes: [ValidatorVote]
 }
 ```
@@ -355,9 +356,12 @@ Rules:
 ```text
 fixed-2-of-3-dev
 fixed-2-of-3-ed25519-v1
+fixed-2-of-3-ed25519-rounds-v2
 ```
 
-`fixed-2-of-3-dev` is restricted to unanchored single-node development records and deterministic genesis construction. Validator-anchored records use `fixed-2-of-3-ed25519-v1`.
+`fixed-2-of-3-dev` is restricted to unanchored single-node development records
+and deterministic genesis construction. Validator-anchored round-1 records use
+`fixed-2-of-3-ed25519-v1`; later rounds use the certificate-bearing v2 rule.
 
 ```text
 ValidatorVote {
@@ -386,12 +390,57 @@ Validation rules:
 - two or three distinct active validators sign the identical candidate hash,
 - the public key derives the claimed validator address,
 - votes are sorted by validator address,
-- the current protocol round is `1`,
-- validators persist one signed candidate per frontier integer to prevent equivocation across restart.
+- round 1 uses `fixed-2-of-3-ed25519-v1` and has no round-change votes,
+- later rounds use `fixed-2-of-3-ed25519-rounds-v2`,
+- validators persist one signed candidate per `(frontier integer, round)` to prevent equivocation across restart.
 
-The proposing validator signs first and sends the complete candidate record, an empty vote list, and its authorization vote to validator peers. A peer rejects requests not authorized by an active validator, then independently validates arithmetic, certificates, transactions, rewards, epoch changes, and tip linkage before signing. The finalized record includes the collected votes and has a different finalized record hash.
+The proposing validator signs first and sends the complete candidate record, an empty vote list, and its authorization vote to validator peers. A peer rejects requests not authorized by an active validator, then independently validates arithmetic, certificates, transactions, rewards, epoch changes, tip linkage, and any embedded round-change certificate before signing. The finalized record includes the collected votes and has a different finalized record hash.
 
-This remains controlled-testnet consensus. A timeout and round-change protocol is still required for robust liveness.
+### 8.1 Finalization Round Change
+
+If round 1 stalls, validators may authorize a later round without permitting
+equivocation inside the earlier round:
+
+```text
+RoundChangeVote {
+    validator_address: Address,
+    public_key: Bytes,
+    previous_record_hash: Hash256,
+    integer: UInt64,
+    new_round: UInt64,
+    signature: Bytes
+}
+```
+
+The signed payload is:
+
+```text
+Encode(
+    "primechain-finalization-round-change-v1",
+    previous_record_hash,
+    integer,
+    new_round,
+    validator_address
+)
+```
+
+Two or three distinct active validators must sign the same frontier hash,
+integer, and target round. The next candidate embeds those canonical votes and
+is signed in that round. The round-change certificate is part of the candidate
+hash and permanent record history. Temporary votes are atomically stored in
+`<record-store>.rounds`; per-round signed choices remain in
+`<record-store>.finalization`. Both sidecars are cleared after finalization and
+are not needed for historical replay.
+
+`--finalization-timeout-ms N` enables automatic recovery. After a failed vote
+collection attempt, the proposer waits `N` milliseconds, obtains a 2-of-3
+certificate for the next round, and retries the candidate once. A later
+submission may repeat the process for another round. A value of `0`, the
+default, preserves fail-fast behavior.
+
+This remains controlled-testnet consensus. The timeout is only a local liveness
+trigger; safety comes from the embedded validator signatures, not synchronized
+clocks.
 
 ## 9. Record Hashing
 

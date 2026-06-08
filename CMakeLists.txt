@@ -22,6 +22,7 @@ add_library(primechain_core
     src/storage/finalization_store.cpp
     src/storage/phase_store.cpp
     src/storage/record_store.cpp
+    src/storage/round_change_store.cpp
     src/storage/validator_epoch_store.cpp
     src/wallet/miner_identity.cpp
 )
@@ -259,6 +260,15 @@ add_executable(primechain-finalization-store-tests
 )
 
 target_link_libraries(primechain-finalization-store-tests
+    PRIVATE
+        primechain_core
+)
+
+add_executable(primechain-round-change-tests
+    tests/round_change_tests.cpp
+)
+
+target_link_libraries(primechain-round-change-tests
     PRIVATE
         primechain_core
 )
@@ -672,6 +682,13 @@ add_test(
 )
 
 add_test(
+    NAME round_change
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-change-test.dat* && $<TARGET_FILE:primechain-round-change-tests> ${CMAKE_CURRENT_BINARY_DIR}/round-change-test.dat"
+)
+
+add_test(
     NAME validator_epoch_rotation
     COMMAND
         /bin/sh -c
@@ -745,4 +762,11 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/epoch-net*; a=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.wallet) && b=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.wallet) && c=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-c.wallet) && x=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-x.wallet) && next=$(printf '%s\\n%s\\n%s\\n' $a $b $x | sort | tr '\\n' ' ') && set -- $next && n1=$1 && n2=$2 && n3=$3 && ($<TARGET_FILE:primechain-sync-server> 19076 ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.dat --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.wallet > ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.pid) && sleep 0.2 && ($<TARGET_FILE:primechain-sync-server> 19077 ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.dat --peer 127.0.0.1 19076 --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.wallet > ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.pid) && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19076 ADD_PEER 127.0.0.1 19077 >/dev/null && previous=$($<TARGET_FILE:primechain-sync-query> 127.0.0.1 19076 GET_STATUS | awk '{print $8}') && vote_a=$($<TARGET_FILE:primechain-composite-commitment> sign-epoch ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.wallet $previous 3 1 $n1 $n2 $n3) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19076 $vote_a | grep -q '^EPOCH_VOTE_ACCEPTED 1 votes=1$' && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19077 GET_EPOCH_VOTES | grep -q '^EPOCH_VOTES 1 ' && vote_b=$($<TARGET_FILE:primechain-composite-commitment> sign-epoch ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.wallet $previous 3 1 $n1 $n2 $n3) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19077 $vote_b | grep -q '^EPOCH_VOTE_ACCEPTED 1 votes=2$' && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19076 GET_EPOCH_VOTES | grep -q '^EPOCH_VOTES 2 ' && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19076 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.wallet | grep -q 'frontier miner complete frontier=3' && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19077 GET_VALIDATORS | grep -q \"^VALIDATORS 3 $n1 $n2 $n3$\" && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/epoch-net-b.pid)"
+)
+
+add_test(
+    NAME finalization_round_change_recovers_stalled_candidate
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-net*; a=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet) && b=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet) && c=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-c.wallet) && ($<TARGET_FILE:primechain-sync-server> 19079 ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.pid) && sleep 0.2 && ! $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19079 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b-miner.log 2>&1 && test -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.finalization && ($<TARGET_FILE:primechain-sync-server> 19080 ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat --peer 127.0.0.1 19079 --finalization-timeout-ms 50 --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19080 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet | grep -q 'frontier miner complete frontier=3' && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19079 GET_STATUS | grep -q '^STATUS 2 2 0 1 1 3 ' && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.finalization && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.rounds && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.finalization && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.rounds && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.pid) && sleep 0.2 && rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.finalization ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.rounds && ($<TARGET_FILE:primechain-sync-server> 19081 ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat > ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19081 GET_STATUS | grep -q '^STATUS 2 2 0 1 1 3 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.pid)"
 )

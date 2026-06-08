@@ -185,7 +185,8 @@ bool validateStoredCompositePayload(
         return false;
     }
     if (!protocol::verifyRecordFinalization(
-            decoded->finalized_by, protocol::candidateRecordHash(*decoded), validator_set, error)) {
+            decoded->finalized_by, protocol::candidateRecordHash(*decoded),
+            decoded->previous_record_hash, decoded->integer, validator_set, error)) {
         return false;
     }
     return true;
@@ -233,7 +234,8 @@ bool validateStoredPrimePayload(
         return false;
     }
     if (!protocol::verifyRecordFinalization(
-            decoded->finalized_by, protocol::candidateRecordHash(*decoded), validator_set, error)) {
+            decoded->finalized_by, protocol::candidateRecordHash(*decoded),
+            decoded->previous_record_hash, decoded->integer, validator_set, error)) {
         return false;
     }
     return true;
@@ -434,7 +436,8 @@ bool SequentialNode::validatePrimeCandidate(
 bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, std::string& error) {
     if (!validateCompositeCandidate(record, error)) return false;
     if (!protocol::verifyRecordFinalization(
-            record.finalized_by, protocol::candidateRecordHash(record), validator_set_, error)) return false;
+            record.finalized_by, protocol::candidateRecordHash(record),
+            record.previous_record_hash, record.integer, validator_set_, error)) return false;
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
@@ -465,7 +468,8 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
 bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::string& error) {
     if (!validatePrimeCandidate(record, error)) return false;
     if (!protocol::verifyRecordFinalization(
-            record.finalized_by, protocol::candidateRecordHash(record), validator_set_, error)) return false;
+            record.finalized_by, protocol::candidateRecordHash(record),
+            record.previous_record_hash, record.integer, validator_set_, error)) return false;
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;

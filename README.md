@@ -394,8 +394,8 @@ a command-line validator set that differs from chain history. Use a fresh record
 store when creating a quorum testnet; an existing version-0 test chain is not
 automatically upgraded.
 
-This is still not permissionless consensus. Validator selection is manual and
-validator rotation is not implemented.
+This is still not permissionless consensus. Validator selection is manual;
+controlled validator rotation is described below.
 
 Submit a composite proof using the development commit-reveal flow. First,
 the miner chooses a nonce and computes the canonical commitment locally:
@@ -849,9 +849,28 @@ During replay, `SequentialNode` currently verifies:
 
 Startup and continuous peer sync use a temporary store before replacing the local store. If a hostile peer serves records whose payload hashes are correct but whose arithmetic is invalid, the temporary replay fails and the real local store is left unchanged. This prevents partial poisoning of the local chain during sync.
 
-Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-ed25519-v1`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer. The sidecar is cleared after the finalized record arrives.
+Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-ed25519-v1`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer and round. The sidecar is cleared after the finalized record arrives.
 
-This is controlled-testnet finalization, not permissionless Sybil resistance. There is not yet a round-change protocol: a validator that signs a candidate remains locked to it until that record finalizes. Existing pre-migration quorum stores must be regenerated.
+Enable controlled round recovery with:
+
+```bash
+./build/primechain-sync-server 18889 ./data/validator-a.dat \
+  --validator-set $a $b $c \
+  --validator-identity ./wallets/validator-a.wallet \
+  --finalization-timeout-ms 1000
+```
+
+If vote collection stalls, the proposer waits for the configured timeout and
+requests a signed transition to the next round. Two current validators must
+authorize the same frontier hash, integer, and round. The next candidate embeds
+that certificate and may differ from the candidate signed in the abandoned
+round. Temporary votes are stored in `<record-store>.rounds`; finalized records
+remain replayable after `.rounds` and `.finalization` are removed. The default
+timeout is `0`, which preserves fail-fast behavior.
+
+This is controlled-testnet finalization, not permissionless Sybil resistance.
+The timeout is a local trigger and is not trusted consensus time. Existing
+pre-migration quorum stores must be regenerated.
 
 Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half.
 
@@ -973,13 +992,15 @@ Completed prototype milestones:
 - replay-derived active validator set with next-integer activation
 - Ed25519 2-of-3 signatures over complete prime and composite candidate records
 - persistent validator anti-equivocation state in `.finalization` sidecars
+- signed 2-of-3 finalization round changes with embedded replay evidence
+- optional timeout-driven retry through `--finalization-timeout-ms`
 
 Next milestones:
 
-1. Add an explicit finalization round-change and timeout protocol.
-2. Harden persistence, indexing, resource limits, and adversarial network tests.
-3. Add transaction nonce/replay policy and fee rules.
-4. Add the planned post-quantum signature migration after consensus stabilizes.
+1. Add transaction nonce/replay policy and operational fee rules.
+2. Add the planned post-quantum signature migration after consensus stabilizes.
+3. Harden persistence, indexing, resource limits, and adversarial network tests.
+4. Build a unified mining client around the stabilized protocol formats.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 

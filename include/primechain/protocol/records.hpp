@@ -98,8 +98,18 @@ struct CommitPhaseCertificateV1 {
     std::vector<CommitCertificateVoteV1> votes;
 };
 
+struct RoundChangeVoteV1 {
+    Address validator_address;
+    Bytes public_key;
+    Hash256 previous_record_hash{};
+    PrimeValue integer{0};
+    std::uint64_t new_round{0};
+    Bytes signature;
+};
+
 struct FinalizationProofV0 {
     std::string rule{"fixed-2-of-3-dev"};
+    std::vector<RoundChangeVoteV1> round_changes;
     std::vector<ValidatorVoteV0> votes;
 };
 
@@ -183,9 +193,18 @@ ValidatorVoteV0 makeSignedValidatorVote(
     const Hash256& record_hash,
     std::uint64_t round,
     std::string& error);
+bool verifyRoundChangeCertificate(
+    const FinalizationProofV0& proof,
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    const std::vector<Address>& validator_set,
+    std::uint64_t& round,
+    std::string& error);
 bool verifyRecordFinalization(
     const FinalizationProofV0& proof,
     const Hash256& candidate_hash,
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
     const std::vector<Address>& validator_set,
     std::string& error);
 Hash256 commitPhaseSnapshotHash(

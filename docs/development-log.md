@@ -441,13 +441,34 @@ public keys in validator votes, replay verification, and the internal
 stored in `<record-store>.finalization`; this prevents restart-based equivocation
 and is cleared when the finalized record is appended or synchronized.
 
-The current protocol deliberately favors safety over liveness: a validator will
-not sign a second candidate for the same integer. An explicit timeout and
-round-change protocol remains future work. Ed25519 remains the controlled-testnet
-algorithm and can later be replaced behind the signature interface by ML-DSA.
+At this milestone the protocol deliberately favored safety over liveness: a
+validator would not sign a second candidate for the same integer. Timeout and
+round-change support was the next milestone. Ed25519 remains the
+controlled-testnet algorithm and can later be replaced behind the signature
+interface by ML-DSA.
 
 ## 2026-06-08: Prime and transaction authentication
 
 TCP prime submissions and transactions now use Ed25519 `pc1_` identities. A prime signature binds the previous finalized record hash, prime, Pratt witness, complete `p - 1` factorization, and reward address. This prevents certificate copying from redirecting the prime-discovery reward and prevents replay at a different frontier. TCP nodes reject unsigned `SUBMIT_PRIME`.
 
 Transaction signatures bind the canonical unsigned transaction under a separate domain, including inputs, outputs, fee, nonce, sender address, and sender public key. Mempool admission, propagation, record validation, replay, and synchronized nodes verify the signature. Development `pcdev1_` signatures remain only for explicitly unanchored development fixtures. Ed25519 identity files are currently reused by miners and transaction senders; post-quantum key formats remain a later migration.
+
+## 2026-06-08: Signed Finalization Round Changes
+
+Added a controlled 2-of-3 round-change protocol for stalled record
+finalization. Validators sign a domain-separated transition bound to the
+current record hash, next integer, target round, and validator identity. A
+candidate in round 2 or later must embed two or three canonical round-change
+votes and collect its finalization signatures in that exact round.
+
+Anti-equivocation state is now keyed by `(integer, round)`. Round-change votes
+are atomically stored in `<record-store>.rounds`, survive restart, and are
+cleared with `.finalization` state after the record is accepted or synchronized.
+Historical replay verifies the embedded certificate and does not depend on
+either sidecar.
+
+`--finalization-timeout-ms` enables one automatic next-round retry after a
+failed collection attempt; `0` retains fail-fast behavior. A network test first
+locks one validator to a competing round-1 candidate, then proves that two
+validators authorize round 2, finalize a different candidate, converge, clear
+temporary state, and replay from the arithmetic record alone.

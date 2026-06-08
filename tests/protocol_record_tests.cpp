@@ -357,7 +357,8 @@ int main() {
     }
     if (!expect(
             verifyRecordFinalization(
-                signed_record.finalized_by, signed_hash, sorted_validators, vote_error),
+                signed_record.finalized_by, signed_hash, signed_record.previous_record_hash,
+                signed_record.integer, sorted_validators, vote_error),
             "valid signed two-of-three finalization")) {
         std::cerr << vote_error << "\n";
         return 1;
@@ -367,7 +368,8 @@ int main() {
     vote_error.clear();
     if (!expect(
             !verifyRecordFinalization(
-                tampered_finalization, signed_hash, sorted_validators, vote_error),
+                tampered_finalization, signed_hash, signed_record.previous_record_hash,
+                signed_record.integer, sorted_validators, vote_error),
             "reject tampered finalization signature")) return 1;
 
     auto duplicate_vote = composite;

@@ -210,6 +210,20 @@ Bytes recordFinalizationVoteSigningPayload(
     return payload;
 }
 
+Bytes roundChangeVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    std::uint64_t new_round,
+    const Address& validator_address) {
+    Bytes payload;
+    appendString(payload, "primechain-finalization-round-change-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, integer);
+    appendUint64(payload, new_round);
+    appendString(payload, validator_address);
+    return payload;
+}
+
 Bytes transactionSigningPayload(const Bytes& unsigned_transaction) {
     Bytes payload;
     appendString(payload, "primechain-transaction-signature-v1");

@@ -17,6 +17,7 @@ constexpr std::uint64_t kCompositeRecordTag = 1;
 constexpr std::uint64_t kPrimeRecordTag = 2;
 constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
 constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-ed25519-v1";
+constexpr std::string_view kRoundFinalizationRule = "fixed-2-of-3-ed25519-rounds-v2";
 constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
 
 class ByteReader {
@@ -166,20 +167,32 @@ void appendValidatorVote(std::vector<std::uint8_t>& out, const ValidatorVoteV0& 
     appendBytes(out, vote.signature);
 }
 
+void appendRoundChangeVote(
+    std::vector<std::uint8_t>& out,
+    const RoundChangeVoteV1& vote) {
+    appendAddress(out, vote.validator_address);
+    appendBytes(out, vote.public_key);
+    appendHash(out, vote.previous_record_hash);
+    appendUint64(out, vote.integer);
+    appendUint64(out, vote.new_round);
+    appendBytes(out, vote.signature);
+}
+
 void appendFinalizationProof(
     std::vector<std::uint8_t>& out,
     const FinalizationProofV0& proof,
     bool include_votes) {
     appendString(out, proof.rule);
+    if (proof.rule == kRoundFinalizationRule) {
+        appendUint64(out, proof.round_changes.size());
+        for (const auto& vote : proof.round_changes) appendRoundChangeVote(out, vote);
+    }
     if (!include_votes) {
         appendUint64(out, 0);
         return;
     }
-
     appendUint64(out, proof.votes.size());
-    for (const auto& vote : proof.votes) {
-        appendValidatorVote(out, vote);
-    }
+    for (const auto& vote : proof.votes) appendValidatorVote(out, vote);
 }
 
 void appendCommitCertificateEntry(
@@ -379,19 +392,35 @@ bool readValidatorEpochTransition(
     return true;
 }
 
+bool readRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
+    return reader.readString(vote.validator_address) &&
+           reader.readBytes(vote.public_key) &&
+           reader.readHash(vote.previous_record_hash) &&
+           reader.readUint64(vote.integer) &&
+           reader.readUint64(vote.new_round) &&
+           reader.readBytes(vote.signature);
+}
+
 bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
+    std::uint64_t round_change_count = 0;
     std::uint64_t vote_count = 0;
-    if (!reader.readString(proof.rule) || !reader.readUint64(vote_count)) {
-        return false;
+    if (!reader.readString(proof.rule)) return false;
+    proof.round_changes.clear();
+    if (proof.rule == kRoundFinalizationRule) {
+        if (!reader.readUint64(round_change_count) || round_change_count > 16) return false;
+        for (std::uint64_t i = 0; i < round_change_count; ++i) {
+            RoundChangeVoteV1 vote;
+            if (!readRoundChangeVote(reader, vote)) return false;
+            proof.round_changes.push_back(std::move(vote));
+        }
     }
+    if (!reader.readUint64(vote_count) || vote_count > 16) return false;
     proof.votes.clear();
     proof.votes.reserve(static_cast<std::size_t>(vote_count));
     for (std::uint64_t i = 0; i < vote_count; ++i) {
         ValidatorVoteV0 vote;
-        if (!readValidatorVote(reader, vote)) {
-            return false;
-        }
-        proof.votes.push_back(vote);
+        if (!readValidatorVote(reader, vote)) return false;
+        proof.votes.push_back(std::move(vote));
     }
     return true;
 }
@@ -993,50 +1022,92 @@ ValidatorVoteV0 makeSignedValidatorVote(
     return vote;
 }
 
+bool verifyRoundChangeCertificate(
+    const FinalizationProofV0& proof,
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    const std::vector<Address>& validator_set,
+    std::uint64_t& round,
+    std::string& error) {
+    round = 1;
+    if (proof.round_changes.empty()) {
+        if (proof.rule != kSignedFinalizationRule) {
+            error = "round one must use the original signed-finalization rule";
+            return false;
+        }
+        return true;
+    }
+    if (proof.rule != kRoundFinalizationRule ||
+        proof.round_changes.size() < 2 || proof.round_changes.size() > 3) {
+        error = "later finalization rounds require a two-of-three round-change certificate";
+        return false;
+    }
+    round = proof.round_changes.front().new_round;
+    if (round < 2) { error = "round-change target must be at least two"; return false; }
+    Address previous_round_validator;
+    for (const auto& change : proof.round_changes) {
+        if (!previous_round_validator.empty() && previous_round_validator >= change.validator_address) {
+            error = "round-change votes are not canonical"; return false;
+        }
+        previous_round_validator = change.validator_address;
+        if (!std::binary_search(validator_set.begin(), validator_set.end(), change.validator_address) ||
+            change.validator_address != crypto::addressFromEd25519PublicKey(change.public_key) ||
+            change.previous_record_hash != previous_record_hash || change.integer != integer ||
+            change.new_round != round) {
+            error = "round-change vote target mismatch"; return false;
+        }
+        std::string signature_error;
+        if (!crypto::ed25519Verify(change.public_key,
+                crypto::roundChangeVoteSigningPayload(change.previous_record_hash,
+                    change.integer, change.new_round, change.validator_address),
+                change.signature, signature_error)) {
+            error = "invalid round-change vote signature"; return false;
+        }
+    }
+    return true;
+}
+
 bool verifyRecordFinalization(
     const FinalizationProofV0& proof,
     const Hash256& candidate_hash,
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
     const std::vector<Address>& validator_set,
     std::string& error) {
-    if (validator_set.empty()) {
-        return verifyDevelopmentFinalization(proof, candidate_hash, error);
-    }
-    if (proof.rule != kSignedFinalizationRule) {
-        error = "quorum records require Ed25519 finalization";
-        return false;
+    if (validator_set.empty()) return verifyDevelopmentFinalization(proof, candidate_hash, error);
+    if (proof.rule != kSignedFinalizationRule && proof.rule != kRoundFinalizationRule) {
+        error = "quorum records require Ed25519 finalization"; return false;
     }
     if (validator_set.size() != 3 || proof.votes.size() < 2 || proof.votes.size() > 3) {
-        error = "signed finalization requires two or three votes from a three-validator set";
+        error = "signed finalization requires two or three votes from a three-validator set"; return false;
+    }
+    std::uint64_t round = 0;
+    if (!verifyRoundChangeCertificate(
+            proof, previous_record_hash, integer, validator_set, round, error)) return false;
+    if (proof.votes.front().round != round) {
+        error = "finalization votes do not match certified round";
         return false;
     }
     Address previous;
     for (const auto& vote : proof.votes) {
         if (!previous.empty() && previous >= vote.validator_address) {
-            error = "finalization votes are not canonical";
-            return false;
+            error = "finalization votes are not canonical"; return false;
         }
         previous = vote.validator_address;
         if (!std::binary_search(validator_set.begin(), validator_set.end(), vote.validator_address)) {
-            error = "finalization vote is outside active validator set";
-            return false;
+            error = "finalization vote is outside active validator set"; return false;
         }
         if (vote.validator_address != crypto::addressFromEd25519PublicKey(vote.public_key)) {
-            error = "finalization vote address mismatch";
-            return false;
+            error = "finalization vote address mismatch"; return false;
         }
-        if (vote.record_hash != candidate_hash || vote.round != 1) {
-            error = "finalization vote target mismatch";
-            return false;
+        if (vote.record_hash != candidate_hash || vote.round != round) {
+            error = "finalization vote target mismatch"; return false;
         }
         std::string signature_error;
-        if (!crypto::ed25519Verify(
-                vote.public_key,
-                crypto::recordFinalizationVoteSigningPayload(
-                    vote.record_hash, vote.round, vote.validator_address),
-                vote.signature,
-                signature_error)) {
-            error = "invalid finalization vote signature";
-            return false;
+        if (!crypto::ed25519Verify(vote.public_key,
+                crypto::recordFinalizationVoteSigningPayload(vote.record_hash, vote.round, vote.validator_address),
+                vote.signature, signature_error)) {
+            error = "invalid finalization vote signature"; return false;
         }
     }
     return true;
