@@ -904,6 +904,43 @@ Local `.dat` chain stores and `.wallet` files are test artifacts. They can be re
 
 This is the first local peer-sync API. It is still plain TCP and development-only.
 
+
+### Validator Epoch Rotation Workflow
+
+A quorum node reports the exact target that validators must sign:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_VALIDATOR_EPOCH
+# VALIDATOR_EPOCH <current_epoch> <next_integer> <current_tip_hash>
+```
+
+Create the three replacement validator identities first, sort their `pc1_`
+addresses lexicographically, then have at least two validators from the current
+set independently sign the same proposal:
+
+```bash
+vote=$(./build/primechain-composite-commitment sign-epoch \
+  ./wallets/validator-a.wallet <current_tip_hash> <next_integer> <next_epoch> \
+  <next_validator_a> <next_validator_b> <next_validator_c>)
+./build/primechain-sync-query 127.0.0.1 18889 $vote
+```
+
+Inspect the pending certificate with:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_EPOCH_VOTES
+```
+
+Votes are validated, atomically stored in `<record-store>.epochs`, and gossiped
+to configured peers. Once two current validators sign the same proposal, the
+next accepted prime or composite record automatically becomes version 2 and
+embeds the epoch transition. The old set authorizes that record; the new set is
+active from the following integer. The temporary epoch-vote file is then cleared.
+
+After rotation, nodes still pass the original genesis addresses to
+`--validator-set`. A newly activated validator supplies its own identity through
+`--validator-identity`; replay confirms that identity belongs to the active epoch.
+
 ## Development Roadmap
 
 Completed prototype milestones:
@@ -937,11 +974,10 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Add a user-facing TCP/CLI workflow for proposing and signing validator epochs.
-2. Replace development finalization and hashes with production consensus primitives.
-3. Authenticate prime submissions and production transaction signatures.
-4. Harden persistence, indexing, resource limits, and adversarial network tests.
-5. Add the planned post-quantum signature migration after consensus stabilizes.
+1. Replace development finalization and hashes with production consensus primitives.
+2. Authenticate prime submissions and production transaction signatures.
+3. Harden persistence, indexing, resource limits, and adversarial network tests.
+4. Add the planned post-quantum signature migration after consensus stabilizes.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 

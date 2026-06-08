@@ -28,6 +28,7 @@
 #include "primechain/storage/commitment_store.hpp"
 #include "primechain/storage/phase_store.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/storage/validator_epoch_store.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
 namespace {
@@ -248,6 +249,8 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
            line.rfind("CLOSE_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
+           line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
+           line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
@@ -1047,6 +1050,7 @@ public:
           store_(store_path_),
           commitment_store_(store_path_ + ".commitments"),
           phase_store_(store_path_ + ".phases"),
+          epoch_store_(store_path_ + ".epochs"),
           genesis_validator_set_(validator_set),
           validator_set_(std::move(validator_set)),
           validator_identity_(std::move(validator_identity)) {
@@ -1080,17 +1084,24 @@ public:
         if (!node.load(error)) return false;
         if (!quorumEnabled()) return true;
         if (!node.status().has_genesis) {
-            return node.initializeGenesis(genesis_validator_set_, error);
-        }
-        std::vector<primechain::Address> anchored;
-        if (!loadGenesisValidatorSet(store_path_, anchored, error)) return false;
-        if (anchored != genesis_validator_set_) {
-            error = anchored.empty()
-                ? "quorum mode requires validator set anchored in genesis"
-                : "configured validator set differs from genesis anchor";
-            return false;
+            if (!node.initializeGenesis(genesis_validator_set_, error)) return false;
+        } else {
+            std::vector<primechain::Address> anchored;
+            if (!loadGenesisValidatorSet(store_path_, anchored, error)) return false;
+            if (anchored != genesis_validator_set_) {
+                error = anchored.empty()
+                    ? "quorum mode requires validator set anchored in genesis"
+                    : "configured validator set differs from genesis anchor";
+                return false;
+            }
         }
         validator_set_ = node.validatorSet();
+        if (validator_identity_.has_value() &&
+            std::find(validator_set_.begin(), validator_set_.end(), validator_identity_->address) ==
+                validator_set_.end()) {
+            error = "local validator identity is not in active validator epoch";
+            return false;
+        }
         return true;
     }
 
@@ -1116,6 +1127,10 @@ public:
             }
             if (*line == "GET_VALIDATORS") {
                 sendValidators(fd);
+                continue;
+            }
+            if (*line == "GET_VALIDATOR_EPOCH") {
+                sendValidatorEpoch(fd);
                 continue;
             }
             if (line->rfind("GET_RECORD ", 0) == 0) {
@@ -1176,6 +1191,18 @@ public:
             }
             if (line->rfind("SUBMIT_PHASE_VOTE ", 0) == 0) {
                 submitPhaseVote(fd, *line);
+                continue;
+            }
+            if (*line == "GET_EPOCH_VOTES") {
+                sendEpochVotes(fd);
+                continue;
+            }
+            if (line->rfind("SUBMIT_EPOCH_VOTE ", 0) == 0) {
+                submitEpochVote(fd, *line);
+                continue;
+            }
+            if (line->rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0) {
+                submitEpochVote(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
@@ -1287,6 +1314,7 @@ public:
             return false;
         }
         validator_set_ = reloaded.validatorSet();
+        clearEpochVotesAfterRecord();
         std::remove(temp_path.c_str());
         return true;
     }
@@ -1405,6 +1433,10 @@ public:
 
     bool loadPhaseVotes(std::string& error) {
         return loadPhaseVotesInternal(error);
+    }
+
+    bool loadEpochVotes(std::string& error) {
+        return loadEpochVotesInternal(error);
     }
 
 private:
@@ -1614,6 +1646,20 @@ private:
         out << "VALIDATORS " << node.validatorSet().size();
         for (const auto& validator : node.validatorSet()) out << " " << validator;
         out << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void sendValidatorEpoch(int fd) const {
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        std::ostringstream out;
+        out << "VALIDATOR_EPOCH " << node.validatorEpoch() << " "
+            << (node.status().frontier_integer + 1) << " "
+            << primechain::crypto::toHex(node.status().latest_record_hash) << "\n";
         writeAll(fd, out.str());
     }
 
@@ -1898,6 +1944,7 @@ private:
                     return;
                 }
                 validator_set_ = reloaded.validatorSet();
+                clearEpochVotesAfterRecord();
                 propagateRecord(*validated);
                 writeAll(fd, "RECORD_REPLACED "
                     + primechain::crypto::toHex(validated->record_hash)
@@ -2266,6 +2313,215 @@ private:
                           << ": " << error << "\n";
             }
         }
+    }
+
+    std::vector<primechain::storage::ValidatorEpochVoteRecord> epochVoteSnapshot() const {
+        std::vector<primechain::storage::ValidatorEpochVoteRecord> out;
+        for (const auto& entry : epoch_votes_) out.push_back(entry.second);
+        return out;
+    }
+
+    bool persistEpochVotes(std::string& error) const {
+        return epoch_store_.replaceAll(epochVoteSnapshot(), error);
+    }
+
+    bool epochProposalReady() const {
+        return epoch_votes_.size() >= 2;
+    }
+
+    primechain::protocol::ValidatorEpochTransitionV1 embeddedValidatorEpoch() const {
+        primechain::protocol::ValidatorEpochTransitionV1 transition;
+        if (!epochProposalReady()) return transition;
+        const auto& proposal = epoch_votes_.begin()->second;
+        transition.epoch = proposal.epoch;
+        transition.activation_integer = proposal.activation_integer;
+        transition.next_validator_set = proposal.next_validator_set;
+        for (const auto& entry : epoch_votes_) transition.votes.push_back(entry.second.vote);
+        std::sort(transition.votes.begin(), transition.votes.end(), [](const auto& left, const auto& right) {
+            return left.validator_address < right.validator_address;
+        });
+        return transition;
+    }
+
+    bool loadEpochVotesInternal(std::string& error) {
+        epoch_votes_.clear();
+        const auto stored = epoch_store_.loadAll(error);
+        if (!error.empty()) return false;
+        if (stored.empty()) return true;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        for (const auto& record : stored) {
+            if (record.previous_record_hash != node.status().latest_record_hash ||
+                record.record_integer != node.status().frontier_integer + 1 ||
+                record.epoch != node.validatorEpoch() + 1 ||
+                record.activation_integer != record.record_integer + 1 ||
+                record.next_validator_set.size() != 3 ||
+                !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
+                std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
+                std::find(validator_set_.begin(), validator_set_.end(), record.vote.validator_address) == validator_set_.end() ||
+                record.vote.validator_address != primechain::crypto::addressFromEd25519PublicKey(record.vote.public_key)) {
+                error = "invalid persisted validator epoch vote";
+                return false;
+            }
+            std::string verify_error;
+            if (!primechain::crypto::ed25519Verify(
+                    record.vote.public_key,
+                    primechain::crypto::validatorEpochVoteSigningPayload(
+                        record.previous_record_hash, record.record_integer, record.epoch,
+                        record.activation_integer, record.next_validator_set,
+                        record.vote.validator_address),
+                    record.vote.signature, verify_error)) {
+                error = "invalid persisted validator epoch signature";
+                return false;
+            }
+            if (!epoch_votes_.empty()) {
+                const auto& first = epoch_votes_.begin()->second;
+                if (record.previous_record_hash != first.previous_record_hash ||
+                    record.record_integer != first.record_integer || record.epoch != first.epoch ||
+                    record.activation_integer != first.activation_integer ||
+                    record.next_validator_set != first.next_validator_set) {
+                    error = "conflicting persisted validator epoch proposals";
+                    return false;
+                }
+            }
+            if (!epoch_votes_.emplace(record.vote.validator_address, record).second) {
+                error = "duplicate persisted validator epoch vote";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void sendEpochVotes(int fd) const {
+        if (epoch_votes_.empty()) {
+            writeAll(fd, "EPOCH_VOTES 0\nEND_EPOCH_VOTES\n");
+            return;
+        }
+        const auto& proposal = epoch_votes_.begin()->second;
+        std::ostringstream out;
+        out << "EPOCH_VOTES " << epoch_votes_.size() << " "
+            << primechain::crypto::toHex(proposal.previous_record_hash) << " "
+            << proposal.record_integer << " " << proposal.epoch << " "
+            << proposal.activation_integer;
+        for (const auto& validator : proposal.next_validator_set) out << " " << validator;
+        out << "\n";
+        for (const auto& entry : epoch_votes_) {
+            const auto& vote = entry.second.vote;
+            out << "EPOCH_VOTE " << vote.validator_address << " "
+                << bytesToHex(vote.public_key) << " " << bytesToHex(vote.signature) << "\n";
+        }
+        out << "END_EPOCH_VOTES\n";
+        writeAll(fd, out.str());
+    }
+
+    bool submitEpochVoteToPeer(
+        const PeerEndpoint& peer,
+        const primechain::storage::ValidatorEpochVoteRecord& record,
+        std::string& error) const {
+        auto socket = connectToServer(peer.host, peer.port);
+        if (!socket.has_value()) { error = "could not connect to peer"; return false; }
+        std::ostringstream command;
+        command << "SUBMIT_EPOCH_VOTE_PEER " << primechain::crypto::toHex(record.previous_record_hash)
+                << " " << record.record_integer << " " << record.epoch << " "
+                << record.activation_integer;
+        for (const auto& validator : record.next_validator_set) command << " " << validator;
+        command << " " << record.vote.validator_address << " "
+                << bytesToHex(record.vote.public_key) << " " << bytesToHex(record.vote.signature) << "\n";
+        if (!writeAll(socket->fd(), command.str())) { error = "could not submit epoch vote"; return false; }
+        shutdown(socket->fd(), SHUT_WR);
+        const auto response = readLine(socket->fd());
+        if (response.has_value() &&
+            (response->rfind("EPOCH_VOTE_ACCEPTED ", 0) == 0 ||
+             response->rfind("EPOCH_VOTE_DUPLICATE ", 0) == 0)) return true;
+        error = response.has_value() ? *response : "peer did not return epoch vote response";
+        return false;
+    }
+
+    void propagateEpochVote(const primechain::storage::ValidatorEpochVoteRecord& record) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitEpochVoteToPeer(peer, record, error)) {
+                std::cerr << "epoch vote propagation warning to " << peer.host << ":"
+                          << peer.port << ": " << error << "\n";
+            }
+        }
+    }
+
+    void submitEpochVote(int fd, const std::string& line, bool propagate = true) {
+        std::istringstream in(line);
+        std::string command, previous_hex, voter, public_hex, signature_hex, extra;
+        primechain::storage::ValidatorEpochVoteRecord record;
+        in >> command >> previous_hex >> record.record_integer >> record.epoch >> record.activation_integer;
+        record.next_validator_set.resize(3);
+        in >> record.next_validator_set[0] >> record.next_validator_set[1] >> record.next_validator_set[2]
+           >> voter >> public_hex >> signature_hex;
+        const auto previous = parseHash(previous_hex);
+        record.vote.validator_address = voter;
+        record.vote.public_key = hexToBytes(public_hex);
+        record.vote.signature = hexToBytes(signature_hex);
+        if (!in || command != "SUBMIT_EPOCH_VOTE" && command != "SUBMIT_EPOCH_VOTE_PEER" || !previous.has_value() || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SUBMIT_EPOCH_VOTE\n");
+            return;
+        }
+        record.previous_record_hash = *previous;
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
+        if (!quorumEnabled() || record.previous_record_hash != node.status().latest_record_hash ||
+            record.record_integer != node.status().frontier_integer + 1 ||
+            record.epoch != node.validatorEpoch() + 1 || record.activation_integer != record.record_integer + 1 ||
+            record.next_validator_set.size() != 3 ||
+            !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
+            std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
+            !std::all_of(record.next_validator_set.begin(), record.next_validator_set.end(), primechain::crypto::isEd25519Address)) {
+            writeAll(fd, "ERROR epoch proposal does not match current chain state\n");
+            return;
+        }
+        if (std::find(validator_set_.begin(), validator_set_.end(), voter) == validator_set_.end() ||
+            voter != primechain::crypto::addressFromEd25519PublicKey(record.vote.public_key) ||
+            !primechain::crypto::ed25519Verify(
+                record.vote.public_key,
+                primechain::crypto::validatorEpochVoteSigningPayload(
+                    record.previous_record_hash, record.record_integer, record.epoch,
+                    record.activation_integer, record.next_validator_set, voter),
+                record.vote.signature, error)) {
+            writeAll(fd, "ERROR invalid validator epoch vote\n");
+            return;
+        }
+        if (!epoch_votes_.empty()) {
+            const auto& first = epoch_votes_.begin()->second;
+            if (record.previous_record_hash != first.previous_record_hash ||
+                record.record_integer != first.record_integer || record.epoch != first.epoch ||
+                record.activation_integer != first.activation_integer ||
+                record.next_validator_set != first.next_validator_set) {
+                writeAll(fd, "ERROR conflicting validator epoch proposal\n");
+                return;
+            }
+        }
+        const auto found = epoch_votes_.find(voter);
+        if (found != epoch_votes_.end()) {
+            if (found->second.vote.signature == record.vote.signature) {
+                writeAll(fd, "EPOCH_VOTE_DUPLICATE " + std::to_string(record.epoch) + " votes=" + std::to_string(epoch_votes_.size()) + "\n");
+            } else {
+                writeAll(fd, "ERROR validator already voted for this epoch\n");
+            }
+            return;
+        }
+        epoch_votes_[voter] = record;
+        if (!persistEpochVotes(error)) {
+            epoch_votes_.erase(voter);
+            writeAll(fd, "ERROR could not persist epoch vote: " + error + "\n");
+            return;
+        }
+        if (propagate) propagateEpochVote(record);
+        writeAll(fd, "EPOCH_VOTE_ACCEPTED " + std::to_string(record.epoch) + " votes=" + std::to_string(epoch_votes_.size()) + "\n");
+    }
+
+    void clearEpochVotesAfterRecord() {
+        if (epoch_votes_.empty()) return;
+        epoch_votes_.clear();
+        std::string error;
+        if (!persistEpochVotes(error)) std::cerr << "epoch vote cleanup warning: " << error << "\n";
     }
 
     void submitSignedCommit(int fd, const std::string& line) {
@@ -2732,6 +2988,10 @@ private:
         if (quorumEnabled()) {
             record.version = 1;
             record.commit_phase = embeddedCommitPhaseCertificate(g);
+            if (epochProposalReady()) {
+                record.version = 2;
+                record.validator_epoch = embeddedValidatorEpoch();
+            }
             primechain::protocol::applyDevelopmentFinalization(record);
         }
         error.clear();
@@ -2739,6 +2999,8 @@ private:
             writeAll(fd, "ERROR could not append composite record: " + error + "\n");
             return;
         }
+        validator_set_ = node.validatorSet();
+        clearEpochVotesAfterRecord();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         propagateRecord(stored);
@@ -2847,11 +3109,18 @@ private:
         }
 
         auto record = makePrimeRecord(node.status(), proof.p, proof, provider_address);
+        if (epochProposalReady()) {
+            record.version = 2;
+            record.validator_epoch = embeddedValidatorEpoch();
+            primechain::protocol::applyDevelopmentFinalization(record);
+        }
         error.clear();
         if (!node.appendPrime(record, error)) {
             writeAll(fd, "ERROR could not append prime record: " + error + "\n");
             return;
         }
+        validator_set_ = node.validatorSet();
+        clearEpochVotesAfterRecord();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         propagateRecord(stored);
@@ -3108,6 +3377,7 @@ private:
     primechain::storage::RecordStore store_;
     primechain::storage::CommitmentStore commitment_store_;
     primechain::storage::PhaseStore phase_store_;
+    primechain::storage::ValidatorEpochStore epoch_store_;
     std::vector<primechain::Address> genesis_validator_set_;
     std::vector<primechain::Address> validator_set_;
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
@@ -3118,6 +3388,7 @@ private:
     std::map<
         std::pair<primechain::PrimeValue, std::string>,
         primechain::storage::CommitPhaseVote> phase_votes_;
+    std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
 };
 
 struct Options {
@@ -3248,10 +3519,6 @@ int main(int argc, char** argv) {
             std::cerr << "validator identity load failed: " << error << "\n";
             return 1;
         }
-        if (unique_validators.find(loaded.address) == unique_validators.end()) {
-            std::cerr << "local validator identity is not in configured validator set\n";
-            return 1;
-        }
         std::sort(options.validator_set.begin(), options.validator_set.end());
         validator_identity = std::move(loaded);
     }
@@ -3272,18 +3539,6 @@ int main(int argc, char** argv) {
         options.enable_factorization_helper,
         options.validator_set,
         validator_identity);
-    {
-        std::string error;
-        if (!sync_server.loadCommitments(error)) {
-            std::cerr << "commitment store load failed: " << error << "\n";
-            return 1;
-        }
-        error.clear();
-        if (!sync_server.loadPhaseVotes(error)) {
-            std::cerr << "phase store load failed: " << error << "\n";
-            return 1;
-        }
-    }
     if (!options.peers.empty()) {
         std::string error;
         sync_server.discoverPeersFromKnown();
@@ -3297,6 +3552,21 @@ int main(int argc, char** argv) {
         std::string error;
         if (!sync_server.ensureValidatorAnchor(error)) {
             std::cerr << "validator genesis anchor failed: " << error << "\n";
+            return 1;
+        }
+        error.clear();
+        if (!sync_server.loadCommitments(error)) {
+            std::cerr << "commitment store load failed: " << error << "\n";
+            return 1;
+        }
+        error.clear();
+        if (!sync_server.loadPhaseVotes(error)) {
+            std::cerr << "phase store load failed: " << error << "\n";
+            return 1;
+        }
+        error.clear();
+        if (!sync_server.loadEpochVotes(error)) {
+            std::cerr << "validator epoch store load failed: " << error << "\n";
             return 1;
         }
     }

@@ -391,3 +391,22 @@ the original trust root across rotation and peer synchronization.
 Tests accept a valid 2-of-3 rotation and reject insufficient quorum and altered
 signatures. Low-level `SUBMIT_RECORD` ingestion supports version-2 records; a
 user-facing proposal and vote command is the next operational step.
+
+## 2026-06-08: Validator Epoch Operator Workflow
+
+Added `GET_VALIDATOR_EPOCH`, `SUBMIT_EPOCH_VOTE`, and `GET_EPOCH_VOTES`, plus the
+`primechain-composite-commitment sign-epoch` command. Current validators can now
+create a 2-of-3 signed replacement proposal through TCP without constructing a
+binary record manually.
+
+Epoch votes are validated against the current replayed tip, stored atomically in
+`<record-store>.epochs`, and propagated to configured peers. The next accepted
+prime or composite record automatically embeds a ready transition as record
+version 2, activates the replacement set for the following integer, and removes
+the temporary vote state.
+
+Startup now distinguishes the immutable genesis trust anchor from the active
+validator epoch. This permits a newly rotated-in validator to start with the
+original genesis set plus its new active identity. The TCP integration test covers
+vote persistence across restart, quorum completion, prime-record finalization,
+epoch activation, sidecar cleanup, and startup by the replacement validator.

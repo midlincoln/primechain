@@ -566,9 +566,21 @@ only after that record is accepted, so it authorizes the following integer. Repl
 derives the same active set and epoch from genesis plus all accepted transitions.
 The genesis set remains the immutable peer-sync trust anchor.
 
-`SUBMIT_RECORD` can ingest a fully constructed version-2 record. A dedicated
-proposal/vote CLI and TCP workflow remains to be added before operator testing.
-Permissionless validator selection remains future work.
+The controlled-testnet coordination commands are:
+
+```text
+GET_VALIDATOR_EPOCH
+VALIDATOR_EPOCH current_epoch next_integer current_tip_hash
+SUBMIT_EPOCH_VOTE previous_hash record_integer epoch activation_integer next_a next_b next_c voter public_key signature
+GET_EPOCH_VOTES
+```
+
+Votes are bound to the current tip and next integer, stored atomically in the
+`.epochs` sidecar, and propagated to configured peers. Two matching current-set
+votes make the proposal ready. The next accepted prime or composite record embeds
+the transition and clears temporary votes. `SUBMIT_RECORD` also accepts a fully
+constructed valid version-2 record. Permissionless validator selection remains
+future work.
 
 ## 11. Bitcoin Mirror Payload
 
