@@ -282,11 +282,25 @@ Submit an authenticated Ed25519 transaction to a running TCP node:
 ./build/primechain-wallet new-miner ./wallets/alice.wallet
 alice=$(./build/primechain-wallet address ./wallets/alice.wallet)
 ./build/primechain-sync-server 18889 ./data/send-chain.dat --enable-ack-mempool
+sender=$(./build/primechain-wallet address ./wallets/sender.wallet)
+./build/primechain-sync-query 127.0.0.1 18889 GET_NONCE "$sender"
 ./build/primechain-send submit 127.0.0.1 18889 \
-  ./wallets/sender.wallet "$alice" 3 250000 1
+  ./wallets/sender.wallet "$alice" 3 250000 1000 1
 ```
 
-The TCP node verifies the Ed25519 signature and key-derived sender address and stores accepted transactions in an in-memory development mempool. If the node was started with `--peer`, newly accepted transactions are forwarded to configured peers with the same `SUBMIT_TX` command. Duplicate transaction hashes are ignored, which prevents simple propagation loops.
+The optional value before the nonce is the fee in integer micro-units of the
+transferred prime; omitting it creates a zero-fee transaction. `GET_NONCE`
+returns `NONCE <address> <confirmed> <next>`, where `next` includes contiguous
+transactions already in the local mempool.
+
+The TCP node verifies the Ed25519 signature, key-derived sender address,
+confirmed balance, fee conservation, and contiguous sender nonce before storing
+the transaction in its in-memory mempool. The input amount must equal outputs
+plus the fee for each prime asset. When an arithmetic record finalizes the
+batch, its proof provider receives the fees after all transactions are applied.
+Peers forward accepted transactions with the same `SUBMIT_TX` command.
+Duplicate hashes and conflicting sender nonces are rejected, and stale mempool
+entries are pruned after record acceptance or synchronization.
 
 Create a cryptographic miner identity for signed composite mining:
 
@@ -838,9 +852,10 @@ During replay, `SequentialNode` currently verifies:
 - composite records deserialize and satisfy `d * e = g`
 - prime records deserialize and satisfy the stored Pratt proof
 - embedded transaction lists match the record transaction count/root
-- development transaction sender addresses derive from sender public keys
-- development transaction signatures match the deterministic dev signature rule
-- transaction debits and credits balance per prime asset
+- transaction sender addresses derive from sender public keys
+- transaction signatures match the Ed25519 or explicit offline-development rule
+- transaction inputs equal outputs plus fees per prime asset
+- sender nonces are contiguous and fees are paid to the record proof provider
 - record payloads link to the previous record hash
 - single-node development records satisfy the deterministic development finalization rule
 - quorum records contain two or three canonical Ed25519 validator signatures over the candidate record hash
@@ -883,7 +898,7 @@ Development wallet/address tools:
 ./build/primechain-balance ./data/sequential-500.dat pcdev1_prime_miner
 ```
 
-Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Current development transaction signatures are deterministic placeholders, not production cryptography.
+Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Live TCP transactions use Ed25519; deterministic development signatures remain only for unanchored offline fixtures.
 
 ## Recreate Current Prototype From GitHub
 

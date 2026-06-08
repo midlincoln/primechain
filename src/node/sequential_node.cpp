@@ -1,6 +1,7 @@
 #include "primechain/node/sequential_node.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <utility>
 
@@ -16,6 +17,14 @@ std::optional<std::uint64_t> microUnits(const protocol::Amount& amount) {
         return std::nullopt;
     }
     return amount.numerator;
+}
+
+bool checkedAdd(std::uint64_t& total, std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint64_t>::max() - total) {
+        return false;
+    }
+    total += value;
+    return true;
 }
 
 bool validateTransactionBatch(
@@ -113,9 +122,14 @@ bool validateTransactionSignature(
     bool allow_development,
     std::string& error) {
     if (crypto::isEd25519Address(tx.sender_address)) {
+        if (tx.version != 1) {
+            error = "authenticated transaction requires version 1";
+            return false;
+        }
         return protocol::verifyAuthenticatedTransactionSignature(tx, error);
     }
-    if (allow_development && protocol::verifyDevelopmentTransactionSignature(tx)) {
+    if (allow_development && tx.version == 0 &&
+        protocol::verifyDevelopmentTransactionSignature(tx)) {
         return true;
     }
     error = "transaction requires an authenticated Ed25519 sender";
@@ -255,6 +269,7 @@ bool SequentialNode::load(std::string& error) {
     status_ = {};
     balances_.clear();
     total_supply_.clear();
+    account_nonces_.clear();
     pending_composite_providers_.clear();
     validator_set_.clear();
     validator_epoch_ = 0;
@@ -299,7 +314,7 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, error) ||
+                !applyTransactions(decoded->transactions, decoded->proof.provider_address, error) ||
                 !applyCompositeLedger(*decoded, error)) {
                 return false;
             }
@@ -323,7 +338,7 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, error) ||
+                !applyTransactions(decoded->transactions, decoded->proof.provider_address, error) ||
                 !applyPrimeLedger(*decoded, error)) {
                 return false;
             }
@@ -395,10 +410,13 @@ bool SequentialNode::validateCompositeCandidate(
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
+    const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, error) && applyCompositeLedger(record, error);
+    const bool valid = applyTransactions(record.transactions, record.proof.provider_address, error) &&
+        applyCompositeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
+    account_nonces_ = nonces_before;
     pending_composite_providers_ = pending_before;
     return valid;
 }
@@ -425,10 +443,13 @@ bool SequentialNode::validatePrimeCandidate(
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
+    const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, error) && applyPrimeLedger(record, error);
+    const bool valid = applyTransactions(record.transactions, record.proof.provider_address, error) &&
+        applyPrimeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
+    account_nonces_ = nonces_before;
     pending_composite_providers_ = pending_before;
     return valid;
 }
@@ -441,10 +462,13 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
+    const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    if (!applyTransactions(record.transactions, error) || !applyCompositeLedger(record, error)) {
+    if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
+        !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
+        account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
@@ -452,6 +476,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     if (!store_.append(stored, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
+        account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
@@ -473,10 +498,13 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
 
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
+    const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    if (!applyTransactions(record.transactions, error) || !applyPrimeLedger(record, error)) {
+    if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
+        !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
+        account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
@@ -484,6 +512,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     if (!store_.append(stored, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
+        account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         return false;
     }
@@ -505,6 +534,11 @@ std::uint64_t SequentialNode::balanceMicroUnits(const Address& address, PrimeVal
     return found->second;
 }
 
+std::uint64_t SequentialNode::accountNonce(const Address& address) const {
+    const auto found = account_nonces_.find(address);
+    return found == account_nonces_.end() ? 0 : found->second;
+}
+
 std::uint64_t SequentialNode::totalSupplyMicroUnits(PrimeValue prime) const {
     const auto found = total_supply_.find(prime);
     if (found == total_supply_.end()) {
@@ -523,7 +557,24 @@ std::vector<std::pair<PrimeValue, std::uint64_t>> SequentialNode::holdingsForAdd
     return out;
 }
 
-bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0>& transactions, std::string& error) {
+bool SequentialNode::validatePendingTransactions(
+    const std::vector<protocol::TransactionV0>& transactions,
+    std::string& error) {
+    const auto balances_before = balances_;
+    const auto total_supply_before = total_supply_;
+    const auto nonces_before = account_nonces_;
+    const bool valid = applyTransactions(transactions, {}, error);
+    balances_ = balances_before;
+    total_supply_ = total_supply_before;
+    account_nonces_ = nonces_before;
+    return valid;
+}
+
+bool SequentialNode::applyTransactions(
+    const std::vector<protocol::TransactionV0>& transactions,
+    const Address& fee_recipient,
+    std::string& error) {
+    std::map<PrimeValue, std::uint64_t> collected_fees;
     for (const auto& tx : transactions) {
         if (!validateTransactionSignature(tx, validator_set_.empty(), error)) {
             error = "invalid transaction signature: " + error;
@@ -533,8 +584,14 @@ bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0
             error = "transaction must have inputs and outputs";
             return false;
         }
-        if (tx.fee.amount.numerator != 0 || tx.fee.amount.denominator != 1) {
-            error = "non-zero fees are not supported yet";
+        const auto expected_nonce = accountNonce(tx.sender_address) + 1;
+        if (expected_nonce == 0 || tx.nonce != expected_nonce) {
+            error = "transaction nonce must be the next sender nonce";
+            return false;
+        }
+        if (tx.fee.amount.denominator != 1 ||
+            (tx.fee.amount.numerator != 0 && tx.fee.prime < 2)) {
+            error = "transaction fee must be integer micro-units of a valid prime asset";
             return false;
         }
 
@@ -546,7 +603,10 @@ bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0
                 error = "transaction input amount must be positive integer micro-units";
                 return false;
             }
-            debits[input.prime] += *units;
+            if (!checkedAdd(debits[input.prime], *units)) {
+                error = "transaction input amount overflow";
+                return false;
+            }
         }
         for (const auto& output : tx.outputs) {
             if (!protocol::isProtocolAddress(output.receiver_address)) {
@@ -558,10 +618,18 @@ bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0
                 error = "transaction output amount must be positive integer micro-units";
                 return false;
             }
-            credits[output.prime] += *units;
+            if (!checkedAdd(credits[output.prime], *units)) {
+                error = "transaction output amount overflow";
+                return false;
+            }
+        }
+        if (tx.fee.amount.numerator != 0 &&
+            !checkedAdd(credits[tx.fee.prime], tx.fee.amount.numerator)) {
+            error = "transaction fee amount overflow";
+            return false;
         }
         if (debits != credits) {
-            error = "transaction debits and credits do not balance";
+            error = "transaction inputs must equal outputs plus fee for each prime asset";
             return false;
         }
 
@@ -572,6 +640,17 @@ bool SequentialNode::applyTransactions(const std::vector<protocol::TransactionV0
         }
         for (const auto& output : tx.outputs) {
             credit(output.receiver_address, output.prime, output.amount.numerator);
+        }
+        if (tx.fee.amount.numerator != 0 &&
+            !checkedAdd(collected_fees[tx.fee.prime], tx.fee.amount.numerator)) {
+            error = "transaction fee batch overflow";
+            return false;
+        }
+        account_nonces_[tx.sender_address] = tx.nonce;
+    }
+    if (!fee_recipient.empty()) {
+        for (const auto& fee : collected_fees) {
+            credit(fee_recipient, fee.first, fee.second);
         }
     }
     return true;

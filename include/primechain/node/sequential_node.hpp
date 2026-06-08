@@ -37,8 +37,12 @@ public:
 
     const SequentialNodeStatus& status() const { return status_; }
     std::uint64_t balanceMicroUnits(const Address& address, PrimeValue prime) const;
+    std::uint64_t accountNonce(const Address& address) const;
     std::vector<std::pair<PrimeValue, std::uint64_t>> holdingsForAddress(const Address& address) const;
     std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
+    bool validatePendingTransactions(
+        const std::vector<protocol::TransactionV0>& transactions,
+        std::string& error);
     const std::vector<Address>& validatorSet() const { return validator_set_; }
     std::uint64_t validatorEpoch() const { return validator_epoch_; }
 
@@ -48,7 +52,10 @@ private:
         PrimeValue integer,
         const Hash256& previous_record_hash,
         std::string& error) const;
-    bool applyTransactions(const std::vector<protocol::TransactionV0>& transactions, std::string& error);
+    bool applyTransactions(
+        const std::vector<protocol::TransactionV0>& transactions,
+        const Address& fee_recipient,
+        std::string& error);
     bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
     bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
@@ -58,6 +65,7 @@ private:
     SequentialNodeStatus status_;
     std::map<std::pair<Address, PrimeValue>, std::uint64_t> balances_;
     std::map<PrimeValue, std::uint64_t> total_supply_;
+    std::map<Address, std::uint64_t> account_nonces_;
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
     std::uint64_t validator_epoch_{0};

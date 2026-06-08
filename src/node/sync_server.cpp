@@ -1338,6 +1338,10 @@ public:
                 sendBalance(fd, *line);
                 continue;
             }
+            if (line->rfind("GET_NONCE ", 0) == 0) {
+                sendNonce(fd, *line);
+                continue;
+            }
             writeAll(fd, "ERROR unknown command\n");
         }
     }
@@ -1404,6 +1408,7 @@ public:
         }
         validator_set_ = reloaded.validatorSet();
         clearEpochVotesAfterRecord();
+        revalidateMempool();
         std::remove(temp_path.c_str());
         return true;
     }
@@ -1875,6 +1880,7 @@ private:
             writeAll(fd, "ERROR invalid SUBMIT_TX\n");
             return;
         }
+        revalidateMempool();
         if (mempool_.size() >= kMaxMempoolTransactions) {
             writeAll(fd, "ERROR mempool full; max="
                 + std::to_string(kMaxMempoolTransactions)
@@ -1905,6 +1911,23 @@ private:
                 writeAll(fd, "TX_DUPLICATE " + primechain::crypto::toHex(hash) + "\n");
                 return;
             }
+            if (existing.sender_address == tx->sender_address && existing.nonce == tx->nonce) {
+                writeAll(fd, "ERROR conflicting transaction for sender nonce\n");
+                return;
+            }
+        }
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        auto pending = mempool_;
+        pending.push_back(*tx);
+        error.clear();
+        if (!node.validatePendingTransactions(pending, error)) {
+            writeAll(fd, "ERROR invalid pending transaction: " + error + "\n");
+            return;
         }
 
         mempool_.push_back(*tx);
@@ -1986,6 +2009,7 @@ private:
         }
         validator_set_ = node.validatorSet();
         clearSignedCandidate(submitted->integer);
+        revalidateMempool();
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
@@ -2048,6 +2072,7 @@ private:
                 }
                 validator_set_ = reloaded.validatorSet();
                 clearEpochVotesAfterRecord();
+                revalidateMempool();
                 propagateRecord(*validated);
                 writeAll(fd, "RECORD_REPLACED "
                     + primechain::crypto::toHex(validated->record_hash)
@@ -3574,6 +3599,7 @@ private:
         }
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
+        revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
@@ -3731,6 +3757,7 @@ private:
         }
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
+        revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
@@ -3824,6 +3851,25 @@ private:
                 }
             }
             if (!acknowledged) {
+                retained.push_back(tx);
+            }
+        }
+        mempool_ = std::move(retained);
+    }
+
+    void revalidateMempool() {
+        primechain::node::SequentialNode node(store_path_);
+        std::string error;
+        if (!node.load(error)) {
+            return;
+        }
+        std::vector<primechain::protocol::TransactionV0> retained;
+        retained.reserve(mempool_.size());
+        for (const auto& tx : mempool_) {
+            auto candidate = retained;
+            candidate.push_back(tx);
+            error.clear();
+            if (node.validatePendingTransactions(candidate, error)) {
                 retained.push_back(tx);
             }
         }
@@ -3938,6 +3984,7 @@ private:
         }
 
         removeMempoolTransactions(included_transactions);
+        revalidateMempool();
         for (const auto& record : appended_records) {
             propagateRecord(record);
         }
@@ -3975,6 +4022,36 @@ private:
         }
         out << "END_BALANCE\n";
         writeAll(fd, out.str());
+    }
+
+    void sendNonce(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        std::string address;
+        std::string extra;
+        in >> command >> address;
+        if (!in || command != "GET_NONCE" || !primechain::protocol::isProtocolAddress(address) ||
+            (in >> extra)) {
+            writeAll(fd, "ERROR invalid GET_NONCE\n");
+            return;
+        }
+
+        revalidateMempool();
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const std::uint64_t confirmed = node.accountNonce(address);
+        std::uint64_t next = confirmed + 1;
+        for (const auto& tx : mempool_) {
+            if (tx.sender_address == address && tx.nonce == next) {
+                ++next;
+            }
+        }
+        writeAll(fd, "NONCE " + address + " " + std::to_string(confirmed) + " " +
+            std::to_string(next) + "\n");
     }
 
     std::string store_path_;

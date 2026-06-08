@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -190,13 +191,18 @@ std::optional<primechain::protocol::TransactionV0> makeAuthenticatedTransferTran
     const std::string& receiver_address,
     primechain::PrimeValue prime,
     std::uint64_t amount,
+    std::uint64_t fee,
     std::uint64_t nonce,
     std::string& error) {
+    if (fee > std::numeric_limits<std::uint64_t>::max() - amount) {
+        error = "amount plus fee overflows micro-units";
+        return std::nullopt;
+    }
     primechain::protocol::TransactionV0 tx;
     tx.version = 1;
-    tx.inputs.push_back({prime, {amount, 1}});
+    tx.inputs.push_back({prime, {amount + fee, 1}});
     tx.outputs.push_back({prime, {amount, 1}, receiver_address});
-    tx.fee = {prime, {0, 1}};
+    tx.fee = {prime, {fee, 1}};
     tx.nonce = nonce;
     tx.sender_address = sender.address;
     tx.sender_public_key = sender.public_key;
@@ -214,16 +220,17 @@ void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
+              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
-              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-ed25519.wallet pc1_receiver 3 250000 1\n";
+              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-ed25519.wallet pc1_receiver 3 250000 1000 1\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "submit") {
-        if (argc != 9) {
+        if (argc != 9 && argc != 10) {
             printUsage(argv[0]);
             return 1;
         }
@@ -233,7 +240,10 @@ int main(int argc, char** argv) {
         const std::string receiver_address = argv[5];
         const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
         const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
-        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[8]));
+        const auto fee = argc == 10
+            ? static_cast<std::uint64_t>(std::stoull(argv[8]))
+            : 0;
+        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[argc - 1]));
 
         primechain::wallet::MinerIdentity sender;
         std::string error;
@@ -247,7 +257,7 @@ int main(int argc, char** argv) {
         }
 
         const auto tx = makeAuthenticatedTransferTransaction(
-            sender, receiver_address, prime, amount, nonce, error);
+            sender, receiver_address, prime, amount, fee, nonce, error);
         if (!tx.has_value()) {
             std::cerr << "could not sign transaction: " << error << "\n";
             return 1;

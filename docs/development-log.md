@@ -472,3 +472,19 @@ failed collection attempt; `0` retains fail-fast behavior. A network test first
 locks one validator to a competing round-1 candidate, then proves that two
 validators authorize round 2, finalize a different candidate, converge, clear
 temporary state, and replay from the arithmetic record alone.
+
+## 2026-06-08: Operational Transaction Fees and Nonces
+
+Transaction replay now maintains a per-sender nonce, starting at `1` and
+requiring exact contiguous increments across and within arithmetic records.
+Inputs must equal outputs plus the declared fee for each prime asset, using
+integer micro-units with checked aggregation. After a batch executes, its fees
+are credited to that arithmetic record's authenticated proof provider without
+changing total supply.
+
+TCP mempool admission now checks signatures, current balances, ordered pending
+transactions, fees, and nonces. Conflicting sender nonces are rejected, stale
+transactions are pruned after append, tip replacement, or peer sync, and
+`GET_NONCE address` reports both confirmed and next locally usable values.
+`primechain-send submit` accepts an optional fee before the nonce while retaining
+the prior zero-fee command form.

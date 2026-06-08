@@ -145,14 +145,22 @@ FeeSpec {
 
 Validation rules:
 
-- `amount_den > 0`.
-- `amount_num > 0` for every non-empty transfer amount.
+- input and output amounts use positive integer micro-units: `amount_den = 1`
+  and `amount_num > 0`.
+- a fee uses integer micro-units: `amount_den = 1`; zero remains valid for
+  compatibility, while a non-zero fee must name a valid prime asset.
 - all referenced `prime` values must already have finalized prime records.
 - sender must have sufficient unspent ownership for every input and fee.
 - sum of outputs plus fee must equal sum of inputs for each prime.
+- each sender starts at nonce `1`; every later transaction must use exactly the
+  previous confirmed or earlier-in-batch nonce plus one.
+- after the complete batch is applied, its fees are credited by prime asset to
+  the authenticated proof provider of the arithmetic record. A transaction in
+  the same batch cannot spend those newly collected fees.
+- amount aggregation must reject unsigned 64-bit overflow.
 - no floating-point arithmetic is allowed.
 
-Authenticated TCP transactions use Ed25519. The sender address must equal `pc1_` plus the first 40 hexadecimal characters of `SHA3-256(sender_public_key)`. The signature payload is the canonical transaction serialized with `signature` encoded as an empty byte string, wrapped in the domain `primechain-transaction-signature-v1`. Any change to inputs, outputs, fee, nonce, sender address, or public key invalidates the signature. Legacy `pcdev1_` transaction signatures are accepted only by unanchored offline development-chain tooling.
+Authenticated TCP transactions use version `1` and Ed25519. The sender address must equal `pc1_` plus the first 40 hexadecimal characters of `SHA3-256(sender_public_key)`. The signature payload is the canonical transaction serialized with `signature` encoded as an empty byte string, wrapped in the domain `primechain-transaction-signature-v1`. Any change to inputs, outputs, fee, nonce, sender address, or public key invalidates the signature. Legacy version-`0` `pcdev1_` transaction signatures are accepted only by unanchored offline development-chain tooling.
 
 ## 4. Transaction Batch
 

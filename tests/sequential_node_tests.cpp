@@ -304,17 +304,30 @@ int main(int argc, char** argv) {
     auto transfer_record = makeCompositeRecord(tx_node.status(), *tx_proof4);
     primechain::protocol::TransactionV0 transfer;
     transfer.version = 0;
-    transfer.inputs.push_back({3, {250000, 1}});
+    transfer.inputs.push_back({3, {251000, 1}});
     transfer.outputs.push_back({3, {250000, 1}, alice_address});
-    transfer.fee = {3, {0, 1}};
+    transfer.fee = {3, {1000, 1}};
     transfer.nonce = 1;
     transfer.sender_address = miner_address;
     transfer.sender_public_key = miner_public_key;
     transfer.signature = primechain::protocol::developmentTransactionSignature(transfer);
     transfer_record.transactions.push_back(transfer);
+    auto second_transfer = transfer;
+    second_transfer.inputs = {{3, {101000, 1}}};
+    second_transfer.outputs = {{3, {100000, 1}, alice_address}};
+    second_transfer.signature = primechain::protocol::developmentTransactionSignature(second_transfer);
+    transfer_record.transactions.push_back(second_transfer);
     primechain::protocol::applyDevelopmentFinalization(transfer_record);
     error.clear();
-    if (!expect(tx_node.appendComposite(transfer_record, error), "append tx transfer in composite 4")) {
+    if (!expect(!tx_node.appendComposite(transfer_record, error), "reject duplicate sender nonce")) {
+        return 1;
+    }
+    second_transfer.nonce = 2;
+    second_transfer.signature = primechain::protocol::developmentTransactionSignature(second_transfer);
+    transfer_record.transactions.back() = second_transfer;
+    primechain::protocol::applyDevelopmentFinalization(transfer_record);
+    error.clear();
+    if (!expect(tx_node.appendComposite(transfer_record, error), "append fee-paying tx batch in composite 4")) {
         std::cerr << error << "\n";
         return 1;
     }
@@ -325,10 +338,17 @@ int main(int argc, char** argv) {
         std::cerr << error << "\n";
         return 1;
     }
-    if (!expect(tx_reloaded.balanceMicroUnits(alice_address, 3) == 250000, "alice received prime 3 units")) {
+    if (!expect(tx_reloaded.balanceMicroUnits(alice_address, 3) == 350000, "alice received prime 3 units")) {
         return 1;
     }
-    if (!expect(tx_reloaded.balanceMicroUnits(miner_address, 3) == 750000, "miner spent prime 3 units")) {
+    if (!expect(tx_reloaded.balanceMicroUnits(miner_address, 3) == 648000, "miner paid transfers and fees")) {
+        return 1;
+    }
+    if (!expect(tx_reloaded.balanceMicroUnits("pcdev1_composite_miner", 3) == 2000,
+                "record producer received transaction fees")) {
+        return 1;
+    }
+    if (!expect(tx_reloaded.accountNonce(miner_address) == 2, "sender nonce reconstructs during replay")) {
         return 1;
     }
     if (!expect(tx_reloaded.totalSupplyMicroUnits(3) == primechain::node::kAssetMicroUnits, "tx replay preserves supply")) {
