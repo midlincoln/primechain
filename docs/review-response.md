@@ -106,7 +106,7 @@ Several points are worth distinguishing.
 
 ## 6.1 Signatures
 
-ECDSA or RSA fail under Shor's algorithm. The protocol will adopt NIST-standard post-quantum signatures such as Dilithium.
+ECDSA and RSA fail under Shor's algorithm. The prototype now uses NIST ML-DSA-65 for authenticated protocol identities.
 
 ## 6.2 Composite Proofs
 

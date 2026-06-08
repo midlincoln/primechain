@@ -116,7 +116,14 @@ bool writeAll(int fd, const std::string& message) {
     return true;
 }
 
-std::optional<std::string> readLine(int fd) {
+bool writeCommand(int fd, std::string command) {
+    if (!command.empty() && command.back() == '\n') command.pop_back();
+    if (command.size() <= 4096) return writeAll(fd, command + "\n");
+    return writeAll(fd, "FRAME " + std::to_string(command.size()) + "\n") &&
+        writeAll(fd, command);
+}
+
+std::optional<std::string> readRawLine(int fd) {
     std::string line;
     char ch = '\0';
     while (true) {
@@ -131,12 +138,34 @@ std::optional<std::string> readLine(int fd) {
     }
 }
 
+std::optional<std::string> readLine(int fd) {
+    auto line = readRawLine(fd);
+    if (!line.has_value() || line->rfind("FRAME ", 0) != 0) return line;
+
+    std::istringstream in(*line);
+    std::string tag, extra;
+    std::size_t size = 0;
+    in >> tag >> size;
+    if (!in || tag != "FRAME" || size == 0 || size > 1024 * 1024 || (in >> extra)) {
+        return std::nullopt;
+    }
+    std::string payload(size, '\0');
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t received = recv(fd, payload.data() + offset, size - offset, 0);
+        if (received < 0 && errno == EINTR) continue;
+        if (received <= 0) return std::nullopt;
+        offset += static_cast<std::size_t>(received);
+    }
+    return payload;
+}
+
 std::optional<std::string> requestLine(const std::string& host, int port, const std::string& request) {
     auto socket = connectToNode(host, port);
     if (!socket.has_value()) {
         return std::nullopt;
     }
-    if (!writeAll(socket->fd(), request)) {
+    if (!writeCommand(socket->fd(), request)) {
         return std::nullopt;
     }
     shutdown(socket->fd(), SHUT_WR);

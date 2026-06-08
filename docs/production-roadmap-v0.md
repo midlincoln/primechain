@@ -73,7 +73,7 @@ Deliverables:
 - signed proof submissions,
 - signed validator votes,
 - signed transactions,
-- later: ML-DSA/Dilithium or equivalent PQ signature scheme.
+- NIST ML-DSA-65 signatures for authenticated protocol identities.
 
 ## Stage 6: Transaction State And Wallet Ownership
 

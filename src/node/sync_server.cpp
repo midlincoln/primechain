@@ -41,6 +41,8 @@ namespace {
 constexpr int kDefaultPort = 18889;
 constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 constexpr std::size_t kMaxLineBytes = 8192;
+constexpr std::size_t kFrameThresholdBytes = 4096;
+constexpr std::size_t kMaxFrameBytes = 1024 * 1024;
 constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
 constexpr std::size_t kMaxCompositeCommitments = 1024;
@@ -223,7 +225,14 @@ bool writeAll(int fd, const std::string& message) {
     return true;
 }
 
-std::optional<std::string> readLine(int fd) {
+bool writeCommand(int fd, std::string command) {
+    if (!command.empty() && command.back() == '\n') command.pop_back();
+    if (command.size() <= kFrameThresholdBytes) return writeAll(fd, command + "\n");
+    return writeAll(fd, "FRAME " + std::to_string(command.size()) + "\n") &&
+        writeAll(fd, command);
+}
+
+std::optional<std::string> readRawLine(int fd) {
     std::string line;
     char ch = '\0';
     while (true) {
@@ -245,6 +254,34 @@ std::optional<std::string> readLine(int fd) {
         }
         line.push_back(ch);
     }
+}
+
+std::optional<std::string> readFrame(int fd, const std::string& header) {
+    std::istringstream in(header);
+    std::string tag;
+    std::size_t size = 0;
+    std::string extra;
+    in >> tag >> size;
+    if (!in || tag != "FRAME" || size == 0 || size > kMaxFrameBytes || (in >> extra)) {
+        return std::nullopt;
+    }
+    std::string payload(size, '\0');
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t received = recv(fd, payload.data() + offset, size - offset, 0);
+        if (received < 0 && errno == EINTR) continue;
+        if (received <= 0) return std::nullopt;
+        offset += static_cast<std::size_t>(received);
+    }
+    return payload;
+}
+
+std::optional<std::string> readLine(int fd) {
+    auto line = readRawLine(fd);
+    if (line.has_value() && line->rfind("FRAME ", 0) == 0) {
+        return readFrame(fd, *line);
+    }
+    return line;
 }
 
 bool isWriteCommand(const std::string& line) {
@@ -640,7 +677,7 @@ std::optional<PeerStatus> requestPeerStatus(const std::string& host, int port, s
         error = "could not connect to peer";
         return std::nullopt;
     }
-    if (!writeAll(socket->fd(), "GET_STATUS\n")) {
+    if (!writeCommand(socket->fd(), "GET_STATUS\n")) {
         error = "could not request peer status";
         return std::nullopt;
     }
@@ -682,7 +719,7 @@ std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port, std
         error = "could not connect to peer";
         return {};
     }
-    if (!writeAll(socket->fd(), "GET_PEERS\n")) {
+    if (!writeCommand(socket->fd(), "GET_PEERS\n")) {
         error = "could not request peer list";
         return {};
     }
@@ -744,7 +781,7 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
         error = "could not connect to peer";
         return {};
     }
-    if (!writeAll(socket->fd(), "GET_COMMITMENTS " + std::to_string(integer) + "\n")) {
+    if (!writeCommand(socket->fd(), "GET_COMMITMENTS " + std::to_string(integer) + "\n")) {
         error = "could not request peer commitments";
         return {};
     }
@@ -830,7 +867,7 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
         error = "could not connect to peer";
         return {};
     }
-    if (!writeAll(socket->fd(), "GET_PHASE_VOTES " + std::to_string(integer) + "\n")) {
+    if (!writeCommand(socket->fd(), "GET_PHASE_VOTES " + std::to_string(integer) + "\n")) {
         error = "could not request peer phase votes";
         return {};
     }
@@ -894,7 +931,7 @@ std::optional<primechain::protocol::ValidatorVoteV0> requestRecordFinalizationVo
             << bytesToHex(proposer_vote.public_key) << " "
             << primechain::crypto::toHex(proposer_vote.record_hash) << " "
             << proposer_vote.round << " " << bytesToHex(proposer_vote.signature) << "\n";
-    if (!writeAll(socket->fd(), command.str())) { error = "could not submit candidate to validator"; return std::nullopt; }
+    if (!writeCommand(socket->fd(), command.str())) { error = "could not submit candidate to validator"; return std::nullopt; }
     shutdown(socket->fd(), SHUT_WR);
     const auto response = readLine(socket->fd());
     if (!response.has_value()) { error = "validator did not return finalization vote"; return std::nullopt; }
@@ -926,7 +963,7 @@ std::optional<primechain::protocol::RoundChangeVoteV1> requestRoundChangeVote(
             << proposer_vote.validator_address << " "
             << bytesToHex(proposer_vote.public_key) << " "
             << bytesToHex(proposer_vote.signature) << "\n";
-    if (!writeAll(socket->fd(), command.str())) { error = "could not submit round change"; return std::nullopt; }
+    if (!writeCommand(socket->fd(), command.str())) { error = "could not submit round change"; return std::nullopt; }
     shutdown(socket->fd(), SHUT_WR);
     const auto response = readLine(socket->fd());
     if (!response.has_value()) { error = "validator did not return round-change vote"; return std::nullopt; }
@@ -960,7 +997,7 @@ bool downloadRecordRange(
 
     std::ostringstream command;
     command << "GET_RECORD_RANGE " << start << " " << end << "\n";
-    if (!writeAll(socket->fd(), command.str())) {
+    if (!writeCommand(socket->fd(), command.str())) {
         error = "could not request peer record range";
         return false;
     }
@@ -1022,7 +1059,7 @@ bool submitTransactionToPeer(
     }
 
     const auto bytes = primechain::protocol::serializeTransaction(tx, true);
-    if (!writeAll(socket->fd(), "SUBMIT_TX " + bytesToHex(bytes) + "\n")) {
+    if (!writeCommand(socket->fd(), "SUBMIT_TX " + bytesToHex(bytes) + "\n")) {
         error = "could not submit transaction to peer";
         return false;
     }
@@ -1062,7 +1099,7 @@ bool submitCommitToPeer(
                 << bytesToHex(commitment.public_key) << " "
                 << bytesToHex(commitment.signature) << "\n";
     }
-    if (!writeAll(socket->fd(), command.str())) {
+    if (!writeCommand(socket->fd(), command.str())) {
         error = "could not submit commitment to peer";
         return false;
     }
@@ -1091,7 +1128,7 @@ bool submitRecordToPeer(
         return false;
     }
 
-    if (!writeAll(socket->fd(), submitRecordLine(record))) {
+    if (!writeCommand(socket->fd(), submitRecordLine(record))) {
         error = "could not submit record to peer";
         return false;
     }
@@ -1188,7 +1225,7 @@ public:
     void handleClient(int fd) {
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
-        while (const auto line = readLine(fd)) {
+        while (auto line = readLine(fd)) {
             ++command_count;
             if (command_count > kMaxCommandsPerConnection) {
                 writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
@@ -1790,7 +1827,7 @@ private:
             writeAll(fd, "NOT_FOUND " + std::to_string(integer) + "\n");
             return;
         }
-        writeAll(fd, recordLine(*record));
+        writeCommand(fd, recordLine(*record));
     }
 
     void sendRecordRange(int fd, const std::string& line) const {
@@ -1825,7 +1862,7 @@ private:
         header << "RECORD_RANGE " << start << " " << end << " " << records.size() << "\n";
         writeAll(fd, header.str());
         for (const auto& record : records) {
-            writeAll(fd, recordLine(record));
+            writeCommand(fd, recordLine(record));
         }
         writeAll(fd, "END_RECORD_RANGE\n");
     }
@@ -2397,7 +2434,7 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        writeAll(fd, "ROUND_CHANGE_VOTE "
+        writeCommand(fd, "ROUND_CHANGE_VOTE "
             + primechain::crypto::toHex(local.previous_record_hash) + " "
             + std::to_string(local.integer) + " " + std::to_string(local.new_round) + " "
             + local.validator_address + " " + bytesToHex(local.public_key) + " "
@@ -2429,7 +2466,7 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        writeAll(fd, "FINALIZATION_VOTE " + vote.validator_address + " "
+        writeCommand(fd, "FINALIZATION_VOTE " + vote.validator_address + " "
             + bytesToHex(vote.public_key) + " "
             + primechain::crypto::toHex(vote.record_hash) + " "
             + std::to_string(vote.round) + " " + bytesToHex(vote.signature) + "\n");
@@ -2697,7 +2734,7 @@ private:
                 << primechain::crypto::toHex(vote.snapshot_hash) << " "
                 << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
                 << bytesToHex(vote.signature) << "\n";
-        if (!writeAll(socket->fd(), command.str())) {
+        if (!writeCommand(socket->fd(), command.str())) {
             error = "could not submit phase vote";
             return false;
         }
@@ -2890,7 +2927,7 @@ private:
         for (const auto& entry : phase_votes_) {
             if (entry.first.first != integer) continue;
             const auto& vote = entry.second;
-            writeAll(fd, "PHASE_VOTE " + std::to_string(integer) + " "
+            writeCommand(fd, "PHASE_VOTE " + std::to_string(integer) + " "
                 + primechain::crypto::toHex(vote.snapshot_hash) + " "
                 + vote.validator_address + " " + bytesToHex(vote.public_key) + " "
                 + bytesToHex(vote.signature) + "\n");
@@ -2991,20 +3028,20 @@ private:
             return;
         }
         const auto& proposal = epoch_votes_.begin()->second;
-        std::ostringstream out;
-        out << "EPOCH_VOTES " << epoch_votes_.size() << " "
+        std::ostringstream header;
+        header << "EPOCH_VOTES " << epoch_votes_.size() << " "
             << primechain::crypto::toHex(proposal.previous_record_hash) << " "
             << proposal.record_integer << " " << proposal.epoch << " "
             << proposal.activation_integer;
-        for (const auto& validator : proposal.next_validator_set) out << " " << validator;
-        out << "\n";
+        for (const auto& validator : proposal.next_validator_set) header << " " << validator;
+        header << "\n";
+        writeCommand(fd, header.str());
         for (const auto& entry : epoch_votes_) {
             const auto& vote = entry.second.vote;
-            out << "EPOCH_VOTE " << vote.validator_address << " "
-                << bytesToHex(vote.public_key) << " " << bytesToHex(vote.signature) << "\n";
+            writeCommand(fd, "EPOCH_VOTE " + vote.validator_address + " "
+                + bytesToHex(vote.public_key) + " " + bytesToHex(vote.signature) + "\n");
         }
-        out << "END_EPOCH_VOTES\n";
-        writeAll(fd, out.str());
+        writeAll(fd, "END_EPOCH_VOTES\n");
     }
 
     bool submitEpochVoteToPeer(
@@ -3020,7 +3057,7 @@ private:
         for (const auto& validator : record.next_validator_set) command << " " << validator;
         command << " " << record.vote.validator_address << " "
                 << bytesToHex(record.vote.public_key) << " " << bytesToHex(record.vote.signature) << "\n";
-        if (!writeAll(socket->fd(), command.str())) { error = "could not submit epoch vote"; return false; }
+        if (!writeCommand(socket->fd(), command.str())) { error = "could not submit epoch vote"; return false; }
         shutdown(socket->fd(), SHUT_WR);
         const auto response = readLine(socket->fd());
         if (response.has_value() &&
@@ -3305,7 +3342,7 @@ private:
                 continue;
             }
             const auto& commitment = entry.second;
-            writeAll(fd, "COMMITMENT " + std::to_string(integer) + " "
+            writeCommand(fd, "COMMITMENT " + std::to_string(integer) + " "
                 + primechain::crypto::toHex(commitment.commitment_hash) + " "
                 + commitment.provider_address + " "
                 + (commitment.public_key.empty() ? "-" : bytesToHex(commitment.public_key)) + " "
@@ -3786,7 +3823,7 @@ private:
         writeAll(fd, header.str());
         for (const auto& tx : mempool_) {
             const auto bytes = primechain::protocol::serializeTransaction(tx, true);
-            writeAll(fd, "TX "
+            writeCommand(fd, "TX "
                 + primechain::crypto::toHex(primechain::protocol::transactionHash(tx))
                 + " "
                 + std::to_string(bytes.size())

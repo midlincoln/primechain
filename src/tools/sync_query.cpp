@@ -82,6 +82,51 @@ bool writeAll(int fd, const std::string& message) {
     return true;
 }
 
+bool writeCommand(int fd, std::string command) {
+    if (!command.empty() && command.back() == '\n') command.pop_back();
+    if (command.size() <= 4096) return writeAll(fd, command + "\n");
+    return writeAll(fd, "FRAME " + std::to_string(command.size()) + "\n") &&
+        writeAll(fd, command);
+}
+
+std::optional<std::string> readRawLine(int fd) {
+    std::string line;
+    char ch = '\0';
+    while (true) {
+        const ssize_t received = recv(fd, &ch, 1, 0);
+        if (received == 0) return line.empty() ? std::nullopt : std::optional(line);
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            return std::nullopt;
+        }
+        if (ch == '\n') return line;
+        if (line.size() >= 1024 * 1024) return std::nullopt;
+        line.push_back(ch);
+    }
+}
+
+std::optional<std::string> readMessage(int fd) {
+    auto line = readRawLine(fd);
+    if (!line.has_value() || line->rfind("FRAME ", 0) != 0) return line;
+
+    std::istringstream in(*line);
+    std::string tag, extra;
+    std::size_t size = 0;
+    in >> tag >> size;
+    if (!in || tag != "FRAME" || size == 0 || size > 1024 * 1024 || (in >> extra)) {
+        return std::nullopt;
+    }
+    std::string payload(size, '\0');
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t received = recv(fd, payload.data() + offset, size - offset, 0);
+        if (received < 0 && errno == EINTR) continue;
+        if (received <= 0) return std::nullopt;
+        offset += static_cast<std::size_t>(received);
+    }
+    return payload;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [host] [port] [command...]\n"
               << "example:\n"
@@ -107,32 +152,19 @@ int main(int argc, char** argv) {
         }
         command << argv[i];
     }
-    command << "\n";
 
     auto socket = connectToServer(host, port);
     if (!socket.has_value()) {
         return 1;
     }
-    if (!writeAll(socket->fd(), command.str())) {
+    if (!writeCommand(socket->fd(), command.str())) {
         std::cerr << "could not send command\n";
         return 1;
     }
     shutdown(socket->fd(), SHUT_WR);
 
-    char buffer[4096];
-    while (true) {
-        const ssize_t received = recv(socket->fd(), buffer, sizeof(buffer), 0);
-        if (received == 0) {
-            break;
-        }
-        if (received < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            std::cerr << "recv failed: " << std::strerror(errno) << "\n";
-            return 1;
-        }
-        std::cout.write(buffer, received);
+    while (const auto message = readMessage(socket->fd())) {
+        std::cout << *message << "\n";
     }
 
     return 0;

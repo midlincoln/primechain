@@ -2,7 +2,7 @@
 
 This repository is the implementation start for Prime Mining: a deterministic prime-chain proof-of-work protocol.
 
-The current code is a small C++ consensus prototype. It validates local blocks that advance from one prime to the next and require composite proofs for every integer between the previous frontier prime and the proposed next prime.
+The current code is a C++ consensus prototype for a sequential arithmetic-record chain. It validates one prime or composite classification per integer, authenticated mining submissions, transactions, controlled validator quorum, peer synchronization, and replay from an append-only store.
 
 ## Current Scope
 
@@ -10,11 +10,12 @@ Implemented:
 
 - CMake C++17 project structure
 - core protocol data types
-- development-only deterministic block hash
+- SHA3-256 consensus hashing
 - small-integer primality checks
 - composite proof generation and verification
 - TCP node listening on localhost
-- terminal miner that submits blocks to the TCP node
+- ML-DSA-65 miner, wallet, and validator identities
+- terminal miner that submits authenticated arithmetic records to the TCP node
 - append-only disk chain log for accepted test blocks
 - consensus validation for:
   - previous hash linkage
@@ -25,18 +26,17 @@ Implemented:
 
 Not implemented yet:
 
-- real SHA3-256
-- real ECPP or Pratt certificates
-- post-quantum signatures
-- commit-reveal persistence
-- wallet state and sparse fractional balances
-- Merkle state commitments
-- P2P networking
+- production-scale persistence and indexes
+- permissionless validator selection
+- authenticated/encrypted peer transport
+- ECPP or APR-CL certificate formats
+- unified mining client
 
 ## Build
 
 ```bash
 mkdir -p build
+git submodule update --init
 cd build
 cmake ..
 cmake --build .
@@ -275,7 +275,7 @@ Shortcut using `primechain-send`:
 
 `primechain-send` uses the sender wallet address as the prime miner address for this fresh generated test chain, so the sender owns prime `3` before record `4` spends it.
 
-Submit an authenticated Ed25519 transaction to a running TCP node:
+Submit an authenticated ML-DSA-65 transaction to a running TCP node:
 
 ```bash
 ./build/primechain-wallet new-miner ./wallets/sender.wallet
@@ -293,7 +293,7 @@ transferred prime; omitting it creates a zero-fee transaction. `GET_NONCE`
 returns `NONCE <address> <confirmed> <next>`, where `next` includes contiguous
 transactions already in the local mempool.
 
-The TCP node verifies the Ed25519 signature, key-derived sender address,
+The TCP node verifies the ML-DSA-65 signature, key-derived sender address,
 confirmed balance, fee conservation, and contiguous sender nonce before storing
 the transaction in its in-memory mempool. The input amount must equal outputs
 plus the fee for each prime asset. When an arithmetic record finalizes the
@@ -309,7 +309,7 @@ Create a cryptographic miner identity for signed composite mining:
 ./build/primechain-wallet miner-address ./wallets/composite-miner.wallet
 ```
 
-This creates an Ed25519 keypair and a key-derived `pc1_...` address. The private
+This creates an ML-DSA-65 keypair and a key-derived `pcpq1_...` address. The private
 key remains in the local identity file. Generate and submit signed messages:
 
 ```bash
@@ -329,7 +329,7 @@ SUBMIT_SIGNED_COMMIT g commitment_hash provider_address public_key signature
 SUBMIT_SIGNED_REVEAL g d e nonce provider_address public_key signature
 ```
 
-The node derives the address from the public key and verifies both Ed25519
+The node derives the address from the public key and verifies both ML-DSA-65
 signatures before accepting the commitment or reveal. The public key, nonce,
 and reveal signature are retained in the finalized composite record, allowing
 independent verification during chain replay and synchronization. Signed commitments retain their authentication evidence in the persistent commitment
@@ -345,14 +345,14 @@ The frontier miner can use the identity directly:
   --composite-identity ./wallets/composite-miner.wallet
 ```
 
-Ed25519 is a real classical signature scheme, but it is not post-quantum. This
-milestone establishes authenticated miner identity before the planned PQ
-replacement. Commitments, snapshots, records, addresses, and transaction roots now use SHA3-256.
+Authenticated protocol identities use NIST ML-DSA-65. Commitments, snapshots,
+records, addresses, and transaction roots use SHA3-256. Existing Ed25519-era
+wallets and chain stores are intentionally incompatible and must be regenerated.
 
 ### Controlled 2-of-3 Commit Phase
 
 Quorum mode is opt-in and intended for a controlled testnet. Create three
-Ed25519 identities and configure every validator with the same set. The node
+ML-DSA-65 identities and configure every validator with the same set. The node
 sorts the addresses canonically and commits them into version-1 genesis:
 
 ```bash
@@ -472,9 +472,7 @@ for existing tests. It does not provide proof-theft protection and must not be
 treated as the production miner entry point.
 
 Important limitation: commitments are persistent candidate records, but they
-are not finalized consensus records. The SHA3-256 implementation provides the
-protocol flow but is not production cryptography; SHA3-256 or another selected
-production hash must replace it before an adversarial testnet. This version
+are not finalized consensus records. This version
 prevents an ordinary peer that first learns the factors at reveal time from
 claiming the same reveal without a prior matching commitment. It does not establish that the selected commitment was globally earliest.
 The current lowest-hash rule gives deterministic convergence once nodes know
@@ -502,7 +500,7 @@ Signed prime wire format:
 SUBMIT_SIGNED_PRIME p witness factor_count factor_1 exponent_1 ... provider_address public_key signature
 ```
 
-The Ed25519 signature binds the previous finalized record hash, the prime, Pratt witness, complete `p - 1` factorization, and reward address. A peer that copies a Pratt certificate cannot replace the provider address or replay the signature at another frontier. Unsigned `SUBMIT_PRIME` is rejected by TCP nodes; it remains only as an internal offline-development representation.
+The ML-DSA-65 signature binds the previous finalized record hash, the prime, Pratt witness, complete `p - 1` factorization, and reward address. A peer that copies a Pratt certificate cannot replace the provider address or replay the signature at another frontier. Unsigned `SUBMIT_PRIME` is rejected by TCP nodes; it remains only as an internal offline-development representation.
 
 The current prototype accepts Pratt certificates only. Future protocol versions can add certificate-type fields for ECPP/APR-CL without changing the authentication rule. Successful submission returns `PRIME_ACCEPTED <p> <record_hash>`.
 
@@ -691,7 +689,8 @@ Do not expose development write commands on a public port unless the test is int
 Current TCP safety limits:
 
 ```text
-max line size: 8192 bytes
+max unframed line size: 8192 bytes
+max framed message size: 1048576 bytes
 max GET_RECORD_RANGE count: 10000 records
 max in-memory mempool: 1000 transactions
 max known peers: 32
@@ -714,15 +713,14 @@ On startup and during periodic sync, a node asks known peers for their peer list
 
 ### Current Identity Model
 
-The prototype does not yet identify TCP clients cryptographically.
+The protocol authenticates consensus objects, but not TCP sessions.
 
 Current identifiers are development-level only:
 
 - peers are known by IPv4 address and port, for example `127.0.0.1:18889`;
-- wallet addresses are development strings such as `pcdev1_...`;
-- miner and composite provider fields are address strings embedded in records;
-- TCP transactions use Ed25519 signatures and key-derived `pc1_` sender addresses;
-- peer messages are not signed, and nodes do not yet have persistent public-key identities.
+- offline fixtures may still use development strings such as `pcdev1_...`;
+- authenticated miners, senders, and validators use key-derived `pcpq1_` addresses;
+- peer transport is not encrypted or session-authenticated.
 
 This means the current rate-limit layer is intentionally simple:
 
@@ -730,7 +728,7 @@ This means the current rate-limit layer is intentionally simple:
 - per source address if added later;
 - global caps such as max mempool size and max known peers.
 
-Composite contributors, prime discoverers, transaction senders, and controlled-testnet validators use Ed25519 `pc1_` identities. Prime signatures bind the frontier and complete Pratt proof; transaction signatures bind the complete unsigned transaction. Legacy `pcdev1_` records remain supported only in explicitly unanchored development chains. Ed25519 is classical, so post-quantum migration remains required before a value-bearing public network.
+Composite contributors, prime discoverers, transaction senders, and controlled-testnet validators use NIST ML-DSA-65 `pcpq1_` identities. Prime signatures bind the frontier and complete Pratt proof; transaction signatures bind the complete unsigned transaction. Legacy `pcdev1_` records remain supported only in explicitly unanchored development chains.
 
 Terminal 2:
 
@@ -853,18 +851,18 @@ During replay, `SequentialNode` currently verifies:
 - prime records deserialize and satisfy the stored Pratt proof
 - embedded transaction lists match the record transaction count/root
 - transaction sender addresses derive from sender public keys
-- transaction signatures match the Ed25519 or explicit offline-development rule
+- transaction signatures match the ML-DSA-65 or explicit offline-development rule
 - transaction inputs equal outputs plus fees per prime asset
 - sender nonces are contiguous and fees are paid to the record proof provider
 - record payloads link to the previous record hash
 - single-node development records satisfy the deterministic development finalization rule
-- quorum records contain two or three canonical Ed25519 validator signatures over the candidate record hash
+- quorum records contain two or three canonical ML-DSA-65 validator signatures over the candidate record hash
 - every quorum signer belongs to the replay-derived active validator epoch
 - mining rewards reconstruct into the in-memory ledger state
 
 Startup and continuous peer sync use a temporary store before replacing the local store. If a hostile peer serves records whose payload hashes are correct but whose arithmetic is invalid, the temporary replay fails and the real local store is left unchanged. This prevents partial poisoning of the local chain during sync.
 
-Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-ed25519-v1`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer and round. The sidecar is cleared after the finalized record arrives.
+Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-mldsa65-v2`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer and round. The sidecar is cleared after the finalized record arrives.
 
 Enable controlled round recovery with:
 
@@ -898,7 +896,7 @@ Development wallet/address tools:
 ./build/primechain-balance ./data/sequential-500.dat pcdev1_prime_miner
 ```
 
-Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Live TCP transactions use Ed25519; deterministic development signatures remain only for unanchored offline fixtures.
+Wallet addresses are local and are not recorded on-chain when created. A key-derived address appears in the ledger only when a transaction or reward references it. Live TCP transactions use ML-DSA-65; deterministic development signatures remain only for unanchored offline fixtures.
 
 ## Recreate Current Prototype From GitHub
 
@@ -948,7 +946,7 @@ A quorum node reports the exact target that validators must sign:
 # VALIDATOR_EPOCH <current_epoch> <next_integer> <current_tip_hash>
 ```
 
-Create the three replacement validator identities first, sort their `pc1_`
+Create the three replacement validator identities first, sort their `pcpq1_`
 addresses lexicographically, then have at least two validators from the current
 set independently sign the same proposal:
 
@@ -1005,17 +1003,18 @@ Completed prototype milestones:
 - genesis-anchored 2-of-3 validator quorum
 - signed validator epoch transitions embedded in version-2 arithmetic records
 - replay-derived active validator set with next-integer activation
-- Ed25519 2-of-3 signatures over complete prime and composite candidate records
+- ML-DSA-65 2-of-3 signatures over complete prime and composite candidate records
 - persistent validator anti-equivocation state in `.finalization` sidecars
 - signed 2-of-3 finalization round changes with embedded replay evidence
 - optional timeout-driven retry through `--finalization-timeout-ms`
+- operational transaction fees and contiguous sender nonces
+- NIST ML-DSA-65 signatures for transactions, miners, validators, epochs, and round changes
+- framed TCP messages for PQ-sized keys, signatures, and records
 
 Next milestones:
 
-1. Add transaction nonce/replay policy and operational fee rules.
-2. Add the planned post-quantum signature migration after consensus stabilizes.
-3. Harden persistence, indexing, resource limits, and adversarial network tests.
-4. Build a unified mining client around the stabilized protocol formats.
+1. Harden persistence, indexing, resource limits, and adversarial network tests.
+2. Build a unified mining client around the stabilized protocol formats.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 

@@ -168,6 +168,13 @@ bool writeAll(int fd, const std::string& message) {
     return true;
 }
 
+bool writeCommand(int fd, std::string command) {
+    if (!command.empty() && command.back() == '\n') command.pop_back();
+    if (command.size() <= 4096) return writeAll(fd, command + "\n");
+    return writeAll(fd, "FRAME " + std::to_string(command.size()) + "\n") &&
+        writeAll(fd, command);
+}
+
 primechain::protocol::TransactionV0 makeTransferTransaction(
     const DevWallet& sender,
     const std::string& receiver_address,
@@ -267,7 +274,7 @@ int main(int argc, char** argv) {
         if (!socket.has_value()) {
             return 1;
         }
-        if (!writeAll(socket->fd(), "SUBMIT_TX " + tx_hex + "\n")) {
+        if (!writeCommand(socket->fd(), "SUBMIT_TX " + tx_hex)) {
             std::cerr << "could not send transaction\n";
             return 1;
         }

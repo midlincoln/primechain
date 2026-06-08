@@ -488,3 +488,21 @@ transactions are pruned after append, tip replacement, or peer sync, and
 `GET_NONCE address` reports both confirmed and next locally usable values.
 `primechain-send submit` accepts an optional fee before the nonce while retaining
 the prior zero-fee command form.
+
+## 2026-06-08: ML-DSA-65 Protocol Migration
+
+Added a generic signature interface and a portable `mldsa-native` ML-DSA-65
+backend pinned as a git submodule. Authenticated transactions, prime proofs,
+composite commitments and reveals, phase votes, validator epochs, record
+finalization, and round changes now use NIST ML-DSA-65 with `pcpq1_` addresses
+and domain-separated v2 payloads. Ed25519 remains available only through the
+generic crypto API for compatibility tests; it is no longer the live protocol
+algorithm.
+
+The migration intentionally changes wallet, address, transaction, record, and
+sidecar formats. Existing development wallets and chain databases must be
+regenerated. Because ML-DSA public keys and signatures exceed the original line
+transport limit, TCP commands and responses now use a bounded `FRAME <size>`
+envelope above 4096 bytes, with a one-megabyte maximum. Record sync, mempool
+exchange, quorum votes, validator epochs, and mining tools decode frames as one
+logical protocol message.

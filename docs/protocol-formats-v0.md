@@ -21,8 +21,8 @@ The v0 chain is intentionally small-number and development-focused:
 
 - integers use unsigned 64-bit values,
 - all consensus-critical hashing uses SHA3-256,
-- composite contributors and controlled-testnet validators use Ed25519 signatures,
-- TCP transactions and prime-provider rewards use Ed25519 `pc1_` identities,
+- composite contributors and controlled-testnet validators use NIST ML-DSA-65 signatures,
+- TCP transactions and prime-provider rewards use ML-DSA-65 `pcpq1_` identities,
 - Pratt certificates are the target prime-proof format for test-sized integers,
 - validator voting is authenticated but remains a controlled 2-of-3 mechanism, not permissionless consensus.
 
@@ -85,13 +85,14 @@ Rules:
 - must begin with `pcdev1_`,
 - labels are not cryptographic identities.
 
-Target production address format:
+Authenticated protocol address format:
 
 ```text
-pc1_<encoded_hash_of_public_key>
+pcpq1_<first_20_bytes_of_sha3_256_public_key>
 ```
 
-Production address encoding is deferred until the signature scheme is selected.
+ML-DSA-65 public keys are 1952 bytes, private keys are 4032 bytes, and
+signatures are 3309 bytes.
 
 ## 3. Transaction Format
 
@@ -160,7 +161,7 @@ Validation rules:
 - amount aggregation must reject unsigned 64-bit overflow.
 - no floating-point arithmetic is allowed.
 
-Authenticated TCP transactions use version `1` and Ed25519. The sender address must equal `pc1_` plus the first 40 hexadecimal characters of `SHA3-256(sender_public_key)`. The signature payload is the canonical transaction serialized with `signature` encoded as an empty byte string, wrapped in the domain `primechain-transaction-signature-v1`. Any change to inputs, outputs, fee, nonce, sender address, or public key invalidates the signature. Legacy version-`0` `pcdev1_` transaction signatures are accepted only by unanchored offline development-chain tooling.
+Authenticated TCP transactions use version `2` and ML-DSA-65. The sender address must equal `pcpq1_` plus the first 40 hexadecimal characters of `SHA3-256(sender_public_key)`. The signature payload is the canonical transaction serialized with `signature` encoded as an empty byte string, wrapped in the domain `primechain-transaction-signature-mldsa65-v2`. Any change to inputs, outputs, fee, nonce, sender address, or public key invalidates the signature. Legacy version-`0` `pcdev1_` transaction signatures are accepted only by unanchored offline development-chain tooling.
 
 ## 4. Transaction Batch
 
@@ -273,9 +274,9 @@ PrattPrimeProof {
 Validation rules:
 
 - `p >= 2`.
-- `provider_address` is a key-derived Ed25519 `pc1_` address for every non-genesis network submission.
-- `signature` packs the 32-byte public key followed by the 64-byte Ed25519 signature.
-- the signature payload uses domain `primechain-prime-proof-signature-v1` and binds `previous_record_hash`, `p`, `witness`, every `(prime, exponent)` factor pair, and `provider_address`.
+- `provider_address` is a key-derived ML-DSA-65 `pcpq1_` address for every non-genesis network submission.
+- `signature` packs the 1952-byte public key followed by the 3309-byte ML-DSA-65 signature.
+- the signature payload uses domain `primechain-prime-proof-signature-mldsa65-v2` and binds `previous_record_hash`, `p`, `witness`, every `(prime, exponent)` factor pair, and `provider_address`.
 - `factors_of_p_minus_1` multiply exactly to `p - 1`.
 - every `prime` in `factors_of_p_minus_1` has an earlier finalized prime record.
 - `witness > 1` and `witness < p`.
@@ -363,13 +364,13 @@ Rules:
 
 ```text
 fixed-2-of-3-dev
-fixed-2-of-3-ed25519-v1
-fixed-2-of-3-ed25519-rounds-v2
+fixed-2-of-3-mldsa65-v2
+fixed-2-of-3-mldsa65-rounds-v3
 ```
 
 `fixed-2-of-3-dev` is restricted to unanchored single-node development records
 and deterministic genesis construction. Validator-anchored round-1 records use
-`fixed-2-of-3-ed25519-v1`; later rounds use the certificate-bearing v2 rule.
+`fixed-2-of-3-mldsa65-v2`; later rounds use the certificate-bearing v3 rule.
 
 ```text
 ValidatorVote {
@@ -385,7 +386,7 @@ The signed payload is:
 
 ```text
 Encode(
-    "primechain-record-finalization-v1",
+    "primechain-record-finalization-mldsa65-v2",
     candidate_record_hash,
     round,
     validator_address
@@ -394,12 +395,12 @@ Encode(
 
 Validation rules:
 
-- the active validator set contains exactly three canonical `pc1_` addresses,
+- the active validator set contains exactly three canonical `pcpq1_` addresses,
 - two or three distinct active validators sign the identical candidate hash,
 - the public key derives the claimed validator address,
 - votes are sorted by validator address,
-- round 1 uses `fixed-2-of-3-ed25519-v1` and has no round-change votes,
-- later rounds use `fixed-2-of-3-ed25519-rounds-v2`,
+- round 1 uses `fixed-2-of-3-mldsa65-v2` and has no round-change votes,
+- later rounds use `fixed-2-of-3-mldsa65-rounds-v3`,
 - validators persist one signed candidate per `(frontier integer, round)` to prevent equivocation across restart.
 
 The proposing validator signs first and sends the complete candidate record, an empty vote list, and its authorization vote to validator peers. A peer rejects requests not authorized by an active validator, then independently validates arithmetic, certificates, transactions, rewards, epoch changes, tip linkage, and any embedded round-change certificate before signing. The finalized record includes the collected votes and has a different finalized record hash.
@@ -424,7 +425,7 @@ The signed payload is:
 
 ```text
 Encode(
-    "primechain-finalization-round-change-v1",
+    "primechain-finalization-round-change-mldsa65-v2",
     previous_record_hash,
     integer,
     new_round,
@@ -464,27 +465,27 @@ The `finalized_by` field is included in the record hash unless a later version e
 
 For validator voting, validators vote on the candidate record hash with `finalized_by` encoded as an empty vote list. The finalized record hash then commits to the actual vote set.
 
-## 9.1 Ed25519 Composite Contributor Authentication
+## 9.1 ML-DSA-65 Composite Contributor Authentication
 
 Authenticated composite mining uses key-derived addresses:
 
 ```text
-address = pc1_ || first_20_bytes(Hash(public_key))
+address = pcpq1_ || first_20_bytes(Hash(public_key))
 ```
 
-The current implementation uses Ed25519 keys and domain-separated canonical
+The current implementation uses ML-DSA-65 keys and domain-separated canonical
 payloads:
 
 ```text
 CommitSignaturePayload = Encode(
-    "primechain-composite-commit-signature-v1",
+    "primechain-composite-commit-signature-mldsa65-v2",
     integer,
     commitment_hash,
     provider_address
 )
 
 RevealSignaturePayload = Encode(
-    "primechain-composite-reveal-signature-v1",
+    "primechain-composite-reveal-signature-mldsa65-v2",
     integer,
     d,
     e,
@@ -493,11 +494,10 @@ RevealSignaturePayload = Encode(
 )
 ```
 
-A finalized `pc1_` composite proof stores the 32-byte public key, 8-byte nonce,
-and 64-byte Ed25519 reveal signature in its proof signature field. Replay must
+A finalized `pcpq1_` composite proof stores the 1952-byte public key, 8-byte nonce,
+and 3309-byte ML-DSA-65 reveal signature in its proof signature field. Replay must
 verify the address derivation and reveal signature before assigning contributor
-credit. Ed25519 is an interim classical scheme, not the planned post-quantum
-signature layer.
+credit.
 
 ## 10. Commit-Reveal Candidate Messages
 
@@ -566,7 +566,7 @@ OPEN -> CLOSING -> CLOSED
 
 The snapshot hash commits to the integer and the canonical ordered list of full
 commitment records, including miner authentication data. Validator signatures
-use the domain `primechain-commit-phase-vote-v1` and bind the integer, snapshot
+use the domain `primechain-commit-phase-vote-mldsa65-v2` and bind the integer, snapshot
 hash, and validator address.
 
 ```text
@@ -597,7 +597,7 @@ state, not required blockchain history.
 
 A controlled quorum chain uses prime record version 1 at height 0. Its
 `GenesisConfigV1` contains exactly three distinct, lexicographically sorted
-Ed25519 `pc1_` validator addresses. The genesis record hash commits to this set.
+ML-DSA-65 `pcpq1_` validator addresses. The genesis record hash commits to this set.
 
 During append, peer synchronization, and replay, every version-1 composite
 certificate must contain exactly the validator set authorized by genesis. A
@@ -630,7 +630,7 @@ integer, canonical next set, and voter address. The transition is valid only whe
 
 - the epoch is exactly the current epoch plus one;
 - activation is exactly the containing record integer plus one;
-- the next set contains three distinct sorted Ed25519 `pc1_` addresses;
+- the next set contains three distinct sorted ML-DSA-65 `pcpq1_` addresses;
 - two or three distinct members of the current set provide valid signatures.
 
 The containing record is authorized by the old set. The new set becomes active
