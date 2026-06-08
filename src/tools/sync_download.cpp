@@ -188,7 +188,7 @@ std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::stri
     if (payload->size() != payload_size) {
         return std::nullopt;
     }
-    if (primechain::crypto::devHash256(*payload) != *hash) {
+    if (primechain::crypto::sha3_256(*payload) != *hash) {
         return std::nullopt;
     }
 

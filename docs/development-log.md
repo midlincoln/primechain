@@ -410,3 +410,17 @@ validator epoch. This permits a newly rotated-in validator to start with the
 original genesis set plus its new active identity. The TCP integration test covers
 vote persistence across restart, quorum completion, prime-record finalization,
 epoch activation, sidecar cleanup, and startup by the replacement validator.
+
+## 2026-06-08: SHA3-256 Consensus Hash Migration
+
+Replaced the development FNV-derived hash with OpenSSL SHA3-256 across canonical
+record hashes, transaction hashes and roots, commit snapshots, composite
+commitments, address derivation, record-store verification, synchronization, and
+conflict ordering. Standard SHA3-256 vectors for the empty string and `abc` are
+now part of the protocol tests.
+
+This is an intentional pre-testnet format break: existing `.dat`, `.commitments`,
+`.phases`, `.epochs`, and Ed25519 identity/address test artifacts created under
+the former hash must be regenerated. The remaining cryptographic milestone is
+replacing synthetic development finalization votes with validator signatures over
+the complete candidate record hash.

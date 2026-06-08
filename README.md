@@ -329,7 +329,7 @@ The frontier miner can use the identity directly:
 
 Ed25519 is a real classical signature scheme, but it is not post-quantum. This
 milestone establishes authenticated miner identity before the planned PQ
-replacement. The current commitment and snapshot hashes remain `devHash256`; they are not production-ready.
+replacement. Commitments, snapshots, records, addresses, and transaction roots now use SHA3-256.
 
 ### Controlled 2-of-3 Commit Phase
 
@@ -454,7 +454,7 @@ for existing tests. It does not provide proof-theft protection and must not be
 treated as the production miner entry point.
 
 Important limitation: commitments are persistent candidate records, but they
-are not finalized consensus records. The current `devHash256` implementation tests the
+are not finalized consensus records. The SHA3-256 implementation provides the
 protocol flow but is not production cryptography; SHA3-256 or another selected
 production hash must replace it before an adversarial testnet. This version
 prevents an ordinary peer that first learns the factors at reveal time from
@@ -974,7 +974,7 @@ Completed prototype milestones:
 
 Next milestones:
 
-1. Replace development finalization and hashes with production consensus primitives.
+1. Replace development finalization votes with authenticated validator signatures.
 2. Authenticate prime submissions and production transaction signatures.
 3. Harden persistence, indexing, resource limits, and adversarial network tests.
 4. Add the planned post-quantum signature migration after consensus stabilizes.

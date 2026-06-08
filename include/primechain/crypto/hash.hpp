@@ -8,8 +8,8 @@
 
 namespace primechain::crypto {
 
-Hash256 devHash256(const std::vector<std::uint8_t>& bytes);
-Hash256 developmentCompositeCommitment(
+Hash256 sha3_256(const std::vector<std::uint8_t>& bytes);
+Hash256 compositeCommitment(
     PrimeValue g,
     PrimeValue d,
     PrimeValue e,

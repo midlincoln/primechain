@@ -59,7 +59,7 @@ std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRec
     constexpr PrimeValue integer = 4;
     constexpr PrimeValue divisor = 2;
     constexpr std::uint64_t nonce = 77;
-    const Hash256 commitment_hash = crypto::developmentCompositeCommitment(
+    const Hash256 commitment_hash = crypto::compositeCommitment(
         integer, divisor, divisor, nonce, miner_address);
     const auto commitment_signature = crypto::ed25519Sign(
         miner->private_key,
@@ -135,6 +135,20 @@ std::optional<primechain::protocol::CompositeRecordV0> makeCertifiedCompositeRec
 int main() {
     using primechain::crypto::toHex;
     using namespace primechain::protocol;
+
+    if (!expect(
+            toHex(primechain::crypto::sha3_256({})) ==
+                "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "SHA3-256 empty-string test vector")) {
+        return 1;
+    }
+    const std::vector<std::uint8_t> abc{'a', 'b', 'c'};
+    if (!expect(
+            toHex(primechain::crypto::sha3_256(abc)) ==
+                "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+            "SHA3-256 abc test vector")) {
+        return 1;
+    }
 
     if (!expect(isDevelopmentAddress("pcdev1_alice"), "valid dev address")) {
         return 1;

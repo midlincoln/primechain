@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
         const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[4]));
         const std::string provider = argv[5];
         std::cout << primechain::crypto::toHex(
-            primechain::crypto::developmentCompositeCommitment(g, d, e, nonce, provider))
+            primechain::crypto::compositeCommitment(g, d, e, nonce, provider))
                   << "\n";
         return 0;
     }
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
     primechain::crypto::Bytes payload;
     primechain::Hash256 commitment{};
     if (std::string(argv[1]) == "sign-commit") {
-        commitment = primechain::crypto::developmentCompositeCommitment(
+        commitment = primechain::crypto::compositeCommitment(
             g, d, e, nonce, identity.address);
         payload = primechain::crypto::compositeCommitSigningPayload(
             g, commitment, identity.address);

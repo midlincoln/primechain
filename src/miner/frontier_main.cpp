@@ -192,7 +192,7 @@ std::string compositeCommitSubmission(
     const primechain::CompositeProof& proof,
     std::uint64_t nonce,
     const std::string& provider) {
-    const auto commitment = primechain::crypto::developmentCompositeCommitment(
+    const auto commitment = primechain::crypto::compositeCommitment(
         proof.m, proof.d, proof.e, nonce, provider);
     std::ostringstream out;
     out << "SUBMIT_COMMIT "
@@ -221,7 +221,7 @@ std::optional<std::string> signedCompositeCommitSubmission(
     std::uint64_t nonce,
     const primechain::wallet::MinerIdentity& identity,
     std::string& error) {
-    const auto commitment = primechain::crypto::developmentCompositeCommitment(
+    const auto commitment = primechain::crypto::compositeCommitment(
         proof.m, proof.d, proof.e, nonce, identity.address);
     const auto signature = primechain::crypto::ed25519Sign(
         identity.private_key,

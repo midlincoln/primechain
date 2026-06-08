@@ -1,9 +1,11 @@
 #include "primechain/crypto/hash.hpp"
 
-#include <array>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
+
+#include <openssl/evp.h>
 
 namespace primechain::crypto {
 namespace {
@@ -21,50 +23,36 @@ void appendString(std::vector<std::uint8_t>& out, std::string_view value) {
 
 } // namespace
 
-Hash256 devHash256(const std::vector<std::uint8_t>& bytes) {
-    // Development-only deterministic hash. Replace with SHA3-256 before testnet.
-    constexpr std::uint64_t kOffset = 14695981039346656037ull;
-    constexpr std::uint64_t kPrime = 1099511628211ull;
-
-    std::array<std::uint64_t, 4> lanes{
-        kOffset,
-        kOffset ^ 0x9e3779b97f4a7c15ull,
-        kOffset ^ 0xbf58476d1ce4e5b9ull,
-        kOffset ^ 0x94d049bb133111ebull,
-    };
-
-    for (std::uint8_t byte : bytes) {
-        for (std::uint64_t& lane : lanes) {
-            lane ^= byte;
-            lane *= kPrime;
-            lane ^= lane >> 32;
-        }
-    }
-
+Hash256 sha3_256(const std::vector<std::uint8_t>& bytes) {
     Hash256 out{};
-    for (std::size_t i = 0; i < lanes.size(); ++i) {
-        std::uint64_t lane = lanes[i];
-        for (std::size_t j = 0; j < 8; ++j) {
-            out[(i * 8) + j] = static_cast<std::uint8_t>((lane >> (j * 8)) & 0xffu);
-        }
+    unsigned int size = 0;
+    EVP_MD_CTX* context = EVP_MD_CTX_new();
+    if (context == nullptr ||
+        EVP_DigestInit_ex(context, EVP_sha3_256(), nullptr) != 1 ||
+        EVP_DigestUpdate(context, bytes.data(), bytes.size()) != 1 ||
+        EVP_DigestFinal_ex(context, out.data(), &size) != 1 ||
+        size != out.size()) {
+        if (context != nullptr) EVP_MD_CTX_free(context);
+        throw std::runtime_error("SHA3-256 digest failure");
     }
+    EVP_MD_CTX_free(context);
     return out;
 }
 
-Hash256 developmentCompositeCommitment(
+Hash256 compositeCommitment(
     PrimeValue g,
     PrimeValue d,
     PrimeValue e,
     std::uint64_t nonce,
     const Address& provider_address) {
     std::vector<std::uint8_t> bytes;
-    appendString(bytes, "primechain-composite-commit-v0");
+    appendString(bytes, "primechain-composite-commit-v1");
     appendUint64(bytes, g);
     appendUint64(bytes, d);
     appendUint64(bytes, e);
     appendUint64(bytes, nonce);
     appendString(bytes, provider_address);
-    return devHash256(bytes);
+    return sha3_256(bytes);
 }
 
 std::string toHex(const Hash256& hash) {

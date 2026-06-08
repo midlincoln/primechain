@@ -54,7 +54,7 @@ bool RecordStore::append(const StoredRecord& record, std::string& error) const {
         error = "record payload is empty";
         return false;
     }
-    const Hash256 payload_hash = crypto::devHash256(record.payload);
+    const Hash256 payload_hash = crypto::sha3_256(record.payload);
     if (payload_hash != record.record_hash) {
         error = "record hash does not match payload";
         return false;
@@ -101,7 +101,7 @@ bool RecordStore::replaceTip(
         error = "replacement payload is empty";
         return false;
     }
-    if (crypto::devHash256(replacement.payload) != replacement.record_hash) {
+    if (crypto::sha3_256(replacement.payload) != replacement.record_hash) {
         error = "replacement hash does not match payload";
         return false;
     }
@@ -186,7 +186,7 @@ std::vector<StoredRecord> RecordStore::loadAll(std::string& error) const {
             return {};
         }
 
-        const Hash256 payload_hash = crypto::devHash256(record.payload);
+        const Hash256 payload_hash = crypto::sha3_256(record.payload);
         if (payload_hash != record.record_hash) {
             error = "record payload hash mismatch at height " + std::to_string(record.height);
             return {};

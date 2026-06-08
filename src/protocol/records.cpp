@@ -451,7 +451,7 @@ bool isProtocolAddress(const Address& address) {
 }
 
 Address developmentAddressFromPublicKey(const Bytes& public_key) {
-    const Hash256 hash = crypto::devHash256(public_key);
+    const Hash256 hash = crypto::sha3_256(public_key);
     return "pcdev1_" + crypto::toHex(hash).substr(0, 32);
 }
 
@@ -594,7 +594,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
 }
 
 Hash256 transactionHash(const TransactionV0& tx) {
-    return crypto::devHash256(serializeTransaction(tx, true));
+    return crypto::sha3_256(serializeTransaction(tx, true));
 }
 
 Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
@@ -607,7 +607,7 @@ Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
     for (const auto& tx : transactions) {
         appendHash(payload, transactionHash(tx));
     }
-    return crypto::devHash256(payload);
+    return crypto::sha3_256(payload);
 }
 
 void updateTransactionBatch(CompositeRecordV0& record) {
@@ -621,19 +621,19 @@ void updateTransactionBatch(PrimeRecordV0& record) {
 }
 
 Hash256 candidateRecordHash(const CompositeRecordV0& record) {
-    return crypto::devHash256(serializeCompositeRecordInternal(record, false));
+    return crypto::sha3_256(serializeCompositeRecordInternal(record, false));
 }
 
 Hash256 candidateRecordHash(const PrimeRecordV0& record) {
-    return crypto::devHash256(serializePrimeRecordInternal(record, false));
+    return crypto::sha3_256(serializePrimeRecordInternal(record, false));
 }
 
 Hash256 finalizedRecordHash(const CompositeRecordV0& record) {
-    return crypto::devHash256(serializeCompositeRecord(record));
+    return crypto::sha3_256(serializeCompositeRecord(record));
 }
 
 Hash256 finalizedRecordHash(const PrimeRecordV0& record) {
-    return crypto::devHash256(serializePrimeRecord(record));
+    return crypto::sha3_256(serializePrimeRecord(record));
 }
 
 Hash256 commitPhaseSnapshotHash(
@@ -646,7 +646,7 @@ Hash256 commitPhaseSnapshotHash(
     for (const auto& commitment : commitments) {
         appendCommitCertificateEntry(payload, commitment);
     }
-    return crypto::devHash256(payload);
+    return crypto::sha3_256(payload);
 }
 
 bool verifyCommitPhaseCertificate(
@@ -875,7 +875,7 @@ Bytes developmentVoteSignature(const Address& validator_address, const Hash256& 
     appendHash(payload, record_hash);
     appendUint64(payload, round);
 
-    const Hash256 hash = crypto::devHash256(payload);
+    const Hash256 hash = crypto::sha3_256(payload);
     return Bytes(hash.begin(), hash.end());
 }
 
@@ -894,7 +894,7 @@ Bytes developmentTransactionSignature(const TransactionV0& tx) {
     appendBytes(payload, tx.sender_public_key);
     const auto unsigned_tx = serializeTransaction(tx, false);
     appendBytes(payload, unsigned_tx);
-    const Hash256 hash = crypto::devHash256(payload);
+    const Hash256 hash = crypto::sha3_256(payload);
     return Bytes(hash.begin(), hash.end());
 }
 

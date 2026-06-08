@@ -61,7 +61,7 @@ std::vector<std::uint8_t> randomBytes(std::size_t size) {
     }
 
     const std::vector<std::uint8_t> seed{'p', 'r', 'i', 'm', 'e', 'c', 'h', 'a', 'i', 'n'};
-    const auto fallback = primechain::crypto::devHash256(seed);
+    const auto fallback = primechain::crypto::sha3_256(seed);
     for (std::size_t i = 0; i < out.size(); ++i) {
         out[i] = fallback[i % fallback.size()];
     }
@@ -115,7 +115,7 @@ bool loadWallet(const std::string& path, DevWallet& wallet) {
 DevWallet createWallet() {
     DevWallet wallet;
     wallet.private_key = randomBytes(32);
-    const auto public_hash = primechain::crypto::devHash256(wallet.private_key);
+    const auto public_hash = primechain::crypto::sha3_256(wallet.private_key);
     wallet.public_key.assign(public_hash.begin(), public_hash.end());
     wallet.address = primechain::protocol::developmentAddressFromPublicKey(wallet.public_key);
     return wallet;

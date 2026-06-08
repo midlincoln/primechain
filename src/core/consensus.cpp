@@ -41,7 +41,7 @@ Hash256 blockHash(const BlockHeader& header) {
     appendHash(bytes, header.state_commitment_root);
     appendUint64(bytes, header.timestamp);
     appendString(bytes, header.miner_address);
-    return crypto::devHash256(bytes);
+    return crypto::sha3_256(bytes);
 }
 
 bool ConsensusEngine::validateBlock(const Block& block, const ChainState& previous, std::string& error) const {

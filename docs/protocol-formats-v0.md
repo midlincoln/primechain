@@ -20,7 +20,7 @@ Each finalized arithmetic record may also commit to a batch of transactions.
 The v0 chain is intentionally small-number and development-focused:
 
 - integers use unsigned 64-bit values,
-- hashing uses the current development hash until SHA3-256 is introduced,
+- all consensus-critical hashing uses SHA3-256,
 - signatures are placeholder fields until a real signature layer is added,
 - Pratt certificates are the target prime-proof format for test-sized integers,
 - validator voting is specified structurally but not yet a production consensus mechanism.
@@ -63,13 +63,7 @@ UTF-8 bytes
 
 32-byte hash.
 
-v0 development hash:
-
-```text
-devHash256(canonical_bytes)
-```
-
-Target production hash:
+Consensus hash:
 
 ```text
 SHA3-256(canonical_bytes)

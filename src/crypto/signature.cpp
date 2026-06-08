@@ -124,7 +124,7 @@ bool ed25519Verify(
 }
 
 Address addressFromEd25519PublicKey(const Bytes& public_key) {
-    const Hash256 hash = devHash256(public_key);
+    const Hash256 hash = sha3_256(public_key);
     return "pc1_" + toHex(hash).substr(0, 40);
 }
 
@@ -254,7 +254,7 @@ bool packedCompositeRevealMatchesCommitment(
     for (int i = 0; i < 8; ++i) {
         nonce |= static_cast<std::uint64_t>(packed_proof[32 + i]) << (i * 8);
     }
-    if (developmentCompositeCommitment(integer, d, e, nonce, provider_address) !=
+    if (compositeCommitment(integer, d, e, nonce, provider_address) !=
         expected_commitment) {
         error = "composite reveal does not match selected commitment";
         return false;

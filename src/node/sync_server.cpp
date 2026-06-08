@@ -352,7 +352,7 @@ std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::stri
     if (!kind.has_value() || !hash.has_value() || payload.empty()) {
         return std::nullopt;
     }
-    if (payload.size() != payload_size || primechain::crypto::devHash256(payload) != *hash) {
+    if (payload.size() != payload_size || primechain::crypto::sha3_256(payload) != *hash) {
         return std::nullopt;
     }
 
@@ -2807,7 +2807,7 @@ private:
             writeAll(fd, "ERROR signed reveal key differs from commitment key\n");
             return;
         }
-        const auto revealed = primechain::crypto::developmentCompositeCommitment(
+        const auto revealed = primechain::crypto::compositeCommitment(
             g, d, e, nonce, provider_address);
         if (revealed != existing->second.commitment_hash) {
             writeAll(fd, "ERROR reveal does not match prior commitment\n");
@@ -2862,7 +2862,7 @@ private:
             writeAll(fd, "ERROR no prior commitment for reveal\n");
             return;
         }
-        const auto revealed = primechain::crypto::developmentCompositeCommitment(
+        const auto revealed = primechain::crypto::compositeCommitment(
             g, d, e, nonce, provider_address);
         if (revealed != existing->second.commitment_hash) {
             writeAll(fd, "ERROR reveal does not match prior commitment\n");
