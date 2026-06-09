@@ -37,6 +37,7 @@ add_library(primechain_core
     src/storage/finalization_store.cpp
     src/storage/phase_store.cpp
     src/storage/record_store.cpp
+    src/storage/replay_snapshot_store.cpp
     src/storage/round_change_store.cpp
     src/storage/validator_epoch_store.cpp
     src/wallet/miner_identity.cpp

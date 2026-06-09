@@ -543,3 +543,24 @@ temp is discarded. A corrupt primary remains a hard error and cannot be hidden
 by a valid temp. Format-level tests apply this sequence independently to all
 five sidecars, while multi-node tests continue to cover restart, propagation,
 epoch activation, and finalization round recovery.
+
+## 2026-06-09: Replay Snapshots And Pruning Boundary
+
+Added an atomic `.snapshot` replay cache beside each canonical record store. It
+contains the full ledger reconstruction state and active validator epoch at an
+exact height, integer, and finalized record hash. Files carry a SHA3-256
+checksum and use synchronized temporary-file replacement. A valid orphan temp
+is recoverable after an interrupted rename.
+
+Startup verifies the snapshot anchor against the indexed chain and checks state
+invariants before restoring it. It then reads and validates only records after
+the anchor. Missing, stale, malformed, checksum-invalid, or invariant-invalid
+snapshots are discarded and rebuilt through full replay. Tests cover suffix
+replay from a stale snapshot, corruption fallback, and interrupted-temp
+recovery.
+
+This is a local acceleration cache, not a consensus checkpoint. Historical
+record pruning remains disabled because `state_root` is not yet enforced and
+the arithmetic proof history is needed by miners. Safe pruning requires a
+separate protocol milestone for deterministic state commitments, verifiable
+checkpoints, and proof-history retention.

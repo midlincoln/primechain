@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <string>
@@ -34,6 +35,13 @@ bool expect(bool condition, const std::string& name) {
         return false;
     }
     return true;
+}
+
+bool copyFile(const std::string& source, const std::string& destination) {
+    std::ifstream in(source, std::ios::binary);
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    out << in.rdbuf();
+    return static_cast<bool>(in) && static_cast<bool>(out);
 }
 
 primechain::protocol::PrimeRecordV0 makePrimeRecord(
@@ -109,6 +117,17 @@ int main(int argc, char** argv) {
         std::cerr << error << "\n";
         return 1;
     }
+    primechain::node::SequentialNode checkpoint_node(argv[1]);
+    error.clear();
+    if (!expect(checkpoint_node.load(error), "checkpoint node after prime 3")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    const std::string stale_snapshot = std::string(argv[1]) + ".stale-snapshot";
+    if (!expect(copyFile(std::string(argv[1]) + ".snapshot", stale_snapshot),
+                "save stale replay snapshot")) {
+        return 1;
+    }
 
     const auto proof4 = primechain::math::makeCompositeProof(4, "pcdev1_composite_miner");
     if (!expect(proof4.has_value(), "make composite proof for 4")) {
@@ -143,6 +162,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!expect(copyFile(stale_snapshot, std::string(argv[1]) + ".snapshot"),
+                "restore stale replay snapshot")) {
+        return 1;
+    }
     primechain::node::SequentialNode reloaded(argv[1]);
     error.clear();
     if (!expect(reloaded.load(error), "reload node")) {
@@ -158,6 +181,9 @@ int main(int argc, char** argv) {
     if (!expect(reloaded.status().frontier_integer == 5, "reloaded frontier 5")) {
         return 1;
     }
+    if (!expect(reloaded.loadedFromSnapshot(), "stale snapshot replays only later records")) {
+        return 1;
+    }
     if (!expect(reloaded.totalSupplyMicroUnits(3) == primechain::node::kAssetMicroUnits, "prime 3 supply conserved")) {
         return 1;
     }
@@ -171,6 +197,40 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!expect(reloaded.balanceMicroUnits("pcdev1_composite_miner", 5) == 500000, "prime 5 reward to composite miner")) {
+        return 1;
+    }
+
+    {
+        std::fstream snapshot(std::string(argv[1]) + ".snapshot",
+            std::ios::binary | std::ios::in | std::ios::out);
+        char byte = 0;
+        snapshot.read(&byte, 1);
+        byte ^= 0x01;
+        snapshot.seekp(0);
+        snapshot.write(&byte, 1);
+    }
+    primechain::node::SequentialNode corruption_fallback(argv[1]);
+    error.clear();
+    if (!expect(corruption_fallback.load(error), "corrupt snapshot falls back to full replay") ||
+        !expect(!corruption_fallback.loadedFromSnapshot(), "corrupt snapshot was not trusted") ||
+        !expect(corruption_fallback.status().frontier_integer == 5,
+            "full replay after corrupt snapshot preserves frontier")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+
+    const std::string snapshot_path = std::string(argv[1]) + ".snapshot";
+    const std::string snapshot_temp_path = snapshot_path + ".tmp";
+    std::remove(snapshot_temp_path.c_str());
+    if (!expect(std::rename(snapshot_path.c_str(), snapshot_temp_path.c_str()) == 0,
+                "simulate interrupted snapshot rename")) {
+        return 1;
+    }
+    primechain::node::SequentialNode recovered_snapshot(argv[1]);
+    error.clear();
+    if (!expect(recovered_snapshot.load(error), "recover valid orphan snapshot temp") ||
+        !expect(recovered_snapshot.loadedFromSnapshot(), "recovered snapshot was used")) {
+        std::cerr << error << "\n";
         return 1;
     }
 

@@ -337,7 +337,9 @@ Validation rules common to both:
 - `integer == previous_integer + 1`, except genesis.
 - `previous_record_hash` matches the canonical hash of the previous finalized record.
 - `tx_batch.transaction_merkle_root` matches included transactions.
-- `state_root` matches the state transition after applying transactions and rewards.
+- `state_root` is reserved in the current prototype record format. Consensus
+  does not yet compute or enforce it; implementations must not use it to justify
+  pruning historical records.
 
 Genesis:
 

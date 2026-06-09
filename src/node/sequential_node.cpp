@@ -258,14 +258,9 @@ bool validateStoredPrimePayload(
 } // namespace
 
 SequentialNode::SequentialNode(std::string record_store_path)
-    : store_(std::move(record_store_path)) {}
+    : store_(record_store_path), snapshot_store_(record_store_path + ".snapshot") {}
 
 bool SequentialNode::load(std::string& error) {
-    const auto records = store_.loadAll(error);
-    if (!error.empty()) {
-        return false;
-    }
-
     status_ = {};
     balances_.clear();
     total_supply_.clear();
@@ -273,13 +268,52 @@ bool SequentialNode::load(std::string& error) {
     pending_composite_providers_.clear();
     validator_set_.clear();
     validator_epoch_ = 0;
-    if (records.empty()) {
+    loaded_from_snapshot_ = false;
+
+    const auto latest = store_.latest(error);
+    if (!error.empty()) return false;
+    if (!latest.has_value()) {
+        snapshot_store_.discard();
         return true;
     }
 
     std::uint64_t expected_height = 0;
     PrimeValue expected_integer = 2;
     Hash256 expected_previous_hash{};
+    std::vector<storage::StoredRecord> records;
+
+    storage::ReplaySnapshot snapshot;
+    bool snapshot_found = false;
+    std::string snapshot_error;
+    if (!snapshot_store_.load(snapshot, snapshot_found, snapshot_error)) {
+        snapshot_store_.discard();
+        snapshot_found = false;
+    }
+    if (snapshot_found) {
+        std::string anchor_error;
+        const auto anchor = store_.findByInteger(snapshot.frontier_integer, anchor_error);
+        if (anchor_error.empty() && anchor.has_value() &&
+            anchor->height == snapshot.height &&
+            anchor->record_hash == snapshot.record_hash &&
+            snapshot.frontier_integer == snapshot.height + 2 &&
+            restoreSnapshot(snapshot)) {
+            loaded_from_snapshot_ = true;
+            expected_height = snapshot.height + 1;
+            expected_integer = snapshot.frontier_integer + 1;
+            expected_previous_hash = snapshot.record_hash;
+            if (latest->integer > snapshot.frontier_integer) {
+                records = store_.findRange(
+                    snapshot.frontier_integer + 1, latest->integer, error);
+                if (!error.empty()) return false;
+            }
+        } else {
+            snapshot_store_.discard();
+        }
+    }
+    if (!loaded_from_snapshot_) {
+        records = store_.loadAll(error);
+        if (!error.empty()) return false;
+    }
 
     for (const auto& record : records) {
         if (record.height != expected_height) {
@@ -353,11 +387,11 @@ bool SequentialNode::load(std::string& error) {
         ++expected_integer;
     }
 
-    const auto& latest = records.back();
     status_.has_genesis = true;
-    status_.height = latest.height;
-    status_.frontier_integer = latest.integer;
-    status_.latest_record_hash = latest.record_hash;
+    status_.height = latest->height;
+    status_.frontier_integer = latest->integer;
+    status_.latest_record_hash = latest->record_hash;
+    saveSnapshot(true);
     return true;
 }
 
@@ -385,6 +419,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
+    saveSnapshot(true);
     return true;
 }
 
@@ -487,6 +522,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
     }
+    saveSnapshot();
     return true;
 }
 
@@ -523,7 +559,61 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
     }
+    saveSnapshot();
     return true;
+}
+
+bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
+    std::map<PrimeValue, std::uint64_t> reconstructed_supply;
+    for (const auto& entry : snapshot.balances) {
+        if (!protocol::isProtocolAddress(entry.first.first) || entry.first.second < 2) return false;
+        if (entry.second > std::numeric_limits<std::uint64_t>::max() -
+                reconstructed_supply[entry.first.second]) return false;
+        reconstructed_supply[entry.first.second] += entry.second;
+    }
+    if (reconstructed_supply != snapshot.total_supply ||
+        (snapshot.validator_set.empty()
+            ? snapshot.validator_epoch != 0
+            : snapshot.validator_set.size() != 3) ||
+        !std::all_of(snapshot.pending_composite_providers.begin(),
+            snapshot.pending_composite_providers.end(), protocol::isProtocolAddress) ||
+        !std::all_of(snapshot.validator_set.begin(), snapshot.validator_set.end(),
+            crypto::isProtocolSignatureAddress) ||
+        !std::all_of(snapshot.account_nonces.begin(), snapshot.account_nonces.end(),
+            [](const auto& entry) { return protocol::isProtocolAddress(entry.first); }) ||
+        !std::is_sorted(snapshot.validator_set.begin(), snapshot.validator_set.end()) ||
+        std::adjacent_find(snapshot.validator_set.begin(), snapshot.validator_set.end()) !=
+            snapshot.validator_set.end()) return false;
+
+    status_.has_genesis = true;
+    status_.height = snapshot.height;
+    status_.frontier_integer = snapshot.frontier_integer;
+    status_.latest_record_hash = snapshot.record_hash;
+    balances_ = snapshot.balances;
+    total_supply_ = snapshot.total_supply;
+    account_nonces_ = snapshot.account_nonces;
+    pending_composite_providers_ = snapshot.pending_composite_providers;
+    validator_set_ = snapshot.validator_set;
+    validator_epoch_ = snapshot.validator_epoch;
+    return true;
+}
+
+void SequentialNode::saveSnapshot(bool force) const {
+    if (!status_.has_genesis) return;
+    constexpr std::uint64_t kSnapshotInterval = 256;
+    if (!force && status_.height % kSnapshotInterval != 0) return;
+    storage::ReplaySnapshot snapshot;
+    snapshot.height = status_.height;
+    snapshot.frontier_integer = status_.frontier_integer;
+    snapshot.record_hash = status_.latest_record_hash;
+    snapshot.balances = balances_;
+    snapshot.total_supply = total_supply_;
+    snapshot.account_nonces = account_nonces_;
+    snapshot.pending_composite_providers = pending_composite_providers_;
+    snapshot.validator_set = validator_set_;
+    snapshot.validator_epoch = validator_epoch_;
+    std::string ignored;
+    snapshot_store_.replace(snapshot, ignored);
 }
 
 std::uint64_t SequentialNode::balanceMicroUnits(const Address& address, PrimeValue prime) const {

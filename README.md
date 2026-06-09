@@ -26,7 +26,7 @@ Implemented:
 
 Not implemented yet:
 
-- snapshots, pruning, and production-scale database compaction
+- archival pruning and production-scale database compaction
 - permissionless validator selection
 - authenticated/encrypted peer transport
 - ECPP or APR-CL certificate formats
@@ -63,6 +63,19 @@ than consensus state: missing, stale, malformed, or inconsistent indexes are
 rebuilt from the hash-verified chain. Tip replacement and validated peer-sync
 installation write and synchronize a temporary chain before atomically renaming
 it over the live store. Builds use 64-bit file offsets on 32-bit Linux.
+
+`<record-store>.dat.snapshot` is an atomic, SHA3-checksummed replay cache. It
+stores balances, supply, nonces, pending composite contributors, and the active
+validator epoch at an exact record hash. A matching snapshot lets startup replay
+only later records. Missing, stale, malformed, or checksum-invalid snapshots are
+discarded and rebuilt by full replay. Snapshot write failure never changes chain
+acceptance because the canonical `.dat` file remains authoritative.
+
+Pruning is deliberately disabled. The current record `state_root` field is
+reserved but not yet consensus-enforced, and miners need historical arithmetic
+proofs. Nodes must retain the complete `.dat` chain. Deleting old records becomes
+safe only after deterministic state roots, independently verifiable checkpoints,
+and a separate proof-history retention policy are implemented.
 
 Temporary consensus coordination files (`.commitments`, `.phases`, `.epochs`,
 `.finalization`, and `.rounds`) use the same durable replacement rule. Their
@@ -1037,10 +1050,11 @@ Completed prototype milestones:
 - durable, automatically rebuilt integer-to-record-offset indexes
 - atomic tip replacement and peer-sync store installation
 - synchronized sidecar replacement and stale-temp recovery
+- atomic replay snapshots with stale/corrupt fallback and suffix-only replay
 
 Next milestones:
 
-1. Add replay snapshots and define a pruning policy.
+1. Enforce deterministic state roots and design verifiable archival pruning.
 2. Build a unified mining client around the stabilized protocol formats.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

@@ -9,6 +9,7 @@
 
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/storage/replay_snapshot_store.hpp"
 #include "primechain/types.hpp"
 
 namespace primechain::node {
@@ -45,6 +46,7 @@ public:
         std::string& error);
     const std::vector<Address>& validatorSet() const { return validator_set_; }
     std::uint64_t validatorEpoch() const { return validator_epoch_; }
+    bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:
     bool validateCommon(
@@ -58,10 +60,13 @@ private:
         std::string& error);
     bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
     bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);
+    bool restoreSnapshot(const storage::ReplaySnapshot& snapshot);
+    void saveSnapshot(bool force = false) const;
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
     bool debit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error);
 
     storage::RecordStore store_;
+    storage::ReplaySnapshotStore snapshot_store_;
     SequentialNodeStatus status_;
     std::map<std::pair<Address, PrimeValue>, std::uint64_t> balances_;
     std::map<PrimeValue, std::uint64_t> total_supply_;
@@ -69,6 +74,7 @@ private:
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
     std::uint64_t validator_epoch_{0};
+    bool loaded_from_snapshot_{false};
 };
 
 protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set = {});

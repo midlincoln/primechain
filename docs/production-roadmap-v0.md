@@ -6,8 +6,10 @@ The current code is a development/testnet prototype. The goal is to build a real
 
 ## Stage 1: Canonical Disk Records And Indexes
 
-Status: implemented for the canonical arithmetic-record store. Snapshots,
-pruning, factor indexes, and large-dataset compaction remain future work.
+Status: implemented for the canonical arithmetic-record store. Atomic local
+replay snapshots are implemented. Pruning remains prohibited until state roots
+are consensus-enforced; factor indexes and large-dataset compaction remain
+future work.
 Temporary coordination sidecars also use synchronized atomic replacement and
 validated stale-temp recovery.
 
@@ -23,6 +25,8 @@ Deliverables:
 - synchronized append with incomplete-tail recovery,
 - atomic tip replacement and validated peer-sync installation,
 - automatic index validation and rebuild,
+- checksummed replay snapshots anchored to an exact record hash,
+- suffix-only replay with full-replay fallback for stale or corrupt snapshots,
 - later: factor and prime indexes.
 
 Why first:
