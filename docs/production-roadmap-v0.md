@@ -143,9 +143,9 @@ Implement Stage 1 first. Everything else depends on durable canonical records.
 Status: first operator wrapper, local math workbench, and basic persistent
 workdir workflow implemented. The current `primechain-client` combines workdir
 initialization, peer sync, job status, authenticated frontier mining jobs,
-status, query, range sync, store inspection, miner identity creation, balance
-lookup, primality checks, divisor search, factorization from downloaded records,
+balance and reward reporting, status, query, range sync, store inspection,
+miner identity creation, primality checks, divisor search, factorization from downloaded records,
 and Pratt construction.
 
-Remaining work: reward monitoring, richer job scheduling, richer local proof
-indexes, and future Bitcoin-mapping experiments.
+Remaining work: richer job scheduling, richer reward history views, richer local
+proof indexes, and future Bitcoin-mapping experiments.

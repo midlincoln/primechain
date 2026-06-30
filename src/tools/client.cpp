@@ -17,6 +17,7 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/wallet/miner_identity.hpp"
 
 namespace {
 
@@ -306,6 +307,132 @@ bool ensureWallet(const std::string& argv0, const std::string& path) {
     return runTool(argv0, "primechain-wallet", {"new-miner", path}) == 0;
 }
 
+std::optional<primechain::Address> loadMinerAddress(const std::string& path) {
+    primechain::wallet::MinerIdentity identity;
+    std::string error;
+    if (!primechain::wallet::loadMinerIdentity(path, identity, error)) {
+        std::cerr << "could not load miner wallet " << path << ": " << error << "\n";
+        return std::nullopt;
+    }
+    return identity.address;
+}
+
+void printHoldings(
+    const std::string& label,
+    const primechain::Address& address,
+    const std::vector<std::pair<primechain::PrimeValue, std::uint64_t>>& holdings) {
+    std::uint64_t total_micro_units = 0;
+    for (const auto& holding : holdings) total_micro_units += holding.second;
+    std::cout << "WALLET " << label << " " << address << " holdings=" << holdings.size()
+              << " total_micro_units=" << total_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "HOLDING " << label << " " << holding.first << " " << holding.second << "\n";
+    }
+}
+
+int balancesWorkdir(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto prime_address = loadMinerAddress(primeWalletPath(workdir));
+    const auto composite_address = loadMinerAddress(compositeWalletPath(workdir));
+    if (!prime_address.has_value() || !composite_address.has_value()) return 1;
+
+    primechain::node::SequentialNode node(chainPath(workdir));
+    std::string error;
+    if (!node.load(error)) {
+        std::cerr << "could not load workdir chain: " << error << "\n";
+        return 1;
+    }
+
+    std::cout << "BALANCES " << workdir << "\n";
+    printHoldings("prime", *prime_address, node.holdingsForAddress(*prime_address));
+    printHoldings("composite", *composite_address, node.holdingsForAddress(*composite_address));
+    return 0;
+}
+
+struct RewardSummary {
+    std::uint64_t prime_records{0};
+    std::uint64_t composite_records{0};
+    std::uint64_t prime_micro_units{0};
+    std::uint64_t composite_micro_units{0};
+    std::uint64_t fee_micro_units{0};
+};
+
+std::uint64_t transactionFees(const std::vector<primechain::protocol::TransactionV0>& transactions) {
+    std::uint64_t total = 0;
+    for (const auto& tx : transactions) {
+        if (tx.fee.amount.denominator == 1) total += tx.fee.amount.numerator;
+    }
+    return total;
+}
+
+int rewardsWorkdir(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto prime_address = loadMinerAddress(primeWalletPath(workdir));
+    const auto composite_address = loadMinerAddress(compositeWalletPath(workdir));
+    if (!prime_address.has_value() || !composite_address.has_value()) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "could not load workdir chain: " << error << "\n";
+        return 1;
+    }
+
+    RewardSummary summary;
+    std::vector<primechain::Address> pending_composite_providers;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode composite record: " << error << "\n";
+                return 1;
+            }
+            if (record->proof.provider_address == *composite_address) ++summary.composite_records;
+            if (record->proof.provider_address == *composite_address) summary.fee_micro_units += transactionFees(record->transactions);
+            pending_composite_providers.push_back(record->proof.provider_address);
+            continue;
+        }
+
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode prime record: " << error << "\n";
+            return 1;
+        }
+        if (record->proof.provider_address == *prime_address) summary.fee_micro_units += transactionFees(record->transactions);
+        if (record->proof.provider_address == *prime_address) ++summary.prime_records;
+
+        if (pending_composite_providers.empty()) {
+            if (record->proof.provider_address == *prime_address) {
+                summary.prime_micro_units += primechain::node::kAssetMicroUnits;
+            }
+        } else {
+            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
+            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t per_composite = composite_pool / pending_composite_providers.size();
+            const std::uint64_t remainder = composite_pool % pending_composite_providers.size();
+            if (record->proof.provider_address == *prime_address) {
+                summary.prime_micro_units += prime_reward + remainder;
+            }
+            for (const auto& provider : pending_composite_providers) {
+                if (provider == *composite_address) summary.composite_micro_units += per_composite;
+            }
+        }
+        pending_composite_providers.clear();
+    }
+
+    std::cout << "REWARDS " << workdir << "\n";
+    std::cout << "PRIME_WALLET " << *prime_address << " records=" << summary.prime_records
+              << " reward_micro_units=" << summary.prime_micro_units << "\n";
+    std::cout << "COMPOSITE_WALLET " << *composite_address << " records=" << summary.composite_records
+              << " reward_micro_units=" << summary.composite_micro_units << "\n";
+    std::cout << "FEE_REWARDS micro_units=" << summary.fee_micro_units << "\n";
+    std::cout << "PENDING_COMPOSITE_RECORDS " << pending_composite_providers.size() << "\n";
+    return 0;
+}
+
 int initWorkdir(const char* argv0, int argc, char** argv) {
     if (argc != 3 && argc != 5) return 1;
     const std::string workdir = argv[2];
@@ -420,6 +547,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " sync-peer <workdir> [host port]\n"
               << "  " << argv0 << " job-status <workdir>\n"
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
+              << "  " << argv0 << " balances <workdir>\n"
+              << "  " << argv0 << " rewards <workdir>\n"
               << "  " << argv0 << " status <host> <port>\n"
               << "  " << argv0 << " query <host> <port> <command...>\n"
               << "  " << argv0 << " sync <host> <port> <start> <end> <output-store>\n"
@@ -459,6 +588,14 @@ int main(int argc, char** argv) {
     if (command == "mine-job") {
         if (argc != 5) { printUsage(argv[0]); return 1; }
         return mineJob(argv[0], argc, argv);
+    }
+    if (command == "balances") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return balancesWorkdir(argc, argv);
+    }
+    if (command == "rewards") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return rewardsWorkdir(argc, argv);
     }
     if (command == "status") {
         if (argc != 4) { printUsage(argv[0]); return 1; }

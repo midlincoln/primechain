@@ -602,3 +602,14 @@ chain copy.
 
 Integration tests cover syncing a fresh workdir from a loopback peer and mining
 a workdir-backed node to a target frontier while preserving simple job state.
+
+## 2026-06-30: Client Reward Reporting
+
+Added workdir `balances` and `rewards` commands to `primechain-client`.
+`balances` loads the workdir chain and reports holdings for the stored prime and
+composite miner wallets. `rewards` scans finalized records to attribute prime
+mining rewards, composite reward shares, fee rewards, and pending composite
+records to those wallets.
+
+The workdir mining integration test now verifies the expected reward split after
+mining through a prime/composite/prime sequence.
