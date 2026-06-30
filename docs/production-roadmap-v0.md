@@ -8,7 +8,7 @@ The current code is a development/testnet prototype. The goal is to build a real
 
 Status: implemented for the canonical arithmetic-record store. Atomic local
 replay snapshots are implemented. Pruning remains prohibited until state roots
-are consensus-enforced; factor indexes and large-dataset compaction remain
+are consensus-enforced; factor indexes, the expanded mining workbench, and large-dataset compaction remain
 future work.
 Temporary coordination sidecars also use synchronized atomic replacement and
 validated stale-temp recovery.
@@ -137,3 +137,14 @@ Deliverables:
 ## Current Priority
 
 Implement Stage 1 first. Everything else depends on durable canonical records.
+
+## Stage 8: Unified Mining Client
+
+Status: first operator wrapper implemented. The current `primechain-client`
+combines status, query, range sync, store inspection, miner identity creation,
+balance lookup, and frontier mining by dispatching to the existing tested tools.
+
+Remaining work: move mathematical workbench features into the client, including
+local divisor search, factorization from downloaded records, Pratt construction,
+resumable mining jobs, reward monitoring, and future Bitcoin-mapping
+experiments.

@@ -16,6 +16,7 @@ Implemented:
 - TCP node listening on localhost
 - ML-DSA-65 miner, wallet, and validator identities
 - terminal miner that submits authenticated arithmetic records to the TCP node
+- unified `primechain-client` wrapper for common operator workflows
 - crash-recoverable append-only chain store with a durable integer index
 - consensus validation for:
   - previous hash linkage
@@ -30,7 +31,6 @@ Not implemented yet:
 - permissionless validator selection
 - authenticated/encrypted peer transport
 - ECPP or APR-CL certificate formats
-- unified mining client
 
 ## Build
 
@@ -48,6 +48,26 @@ cmake --build .
 cd build
 ctest --output-on-failure
 ```
+
+## Primechain Client
+
+`primechain-client` is the operator-facing entry point for the common node,
+wallet, sync, inspection, and mining workflows. It wraps the lower-level tools
+that remain available for tests and protocol development.
+
+```bash
+./build/primechain-client status 127.0.0.1 18889
+./build/primechain-client new-miner ./wallets/prime.wallet
+./build/primechain-client new-miner ./wallets/composite.wallet
+./build/primechain-client mine 127.0.0.1 18889 20 \
+  --prime-identity ./wallets/prime.wallet \
+  --composite-identity ./wallets/composite.wallet
+./build/primechain-client sync 127.0.0.1 18889 2 20 ./data/downloaded.dat
+./build/primechain-client inspect ./data/downloaded.dat
+```
+
+The first client version is intentionally a thin dispatcher. Consensus, replay,
+network framing, and mining behavior still live in the existing tested tools.
 
 ## Record Store Durability
 
@@ -1051,11 +1071,12 @@ Completed prototype milestones:
 - atomic tip replacement and peer-sync store installation
 - synchronized sidecar replacement and stale-temp recovery
 - atomic replay snapshots with stale/corrupt fallback and suffix-only replay
+- first unified `primechain-client` for status, sync, inspection, identity creation, balances, and mining
 
 Next milestones:
 
-1. Enforce deterministic state roots and design verifiable archival pruning.
-2. Build a unified mining client around the stabilized protocol formats.
+1. Expand `primechain-client` with local factorization, divisor search, Pratt tooling, and resumable jobs.
+2. Enforce deterministic state roots and design verifiable archival pruning.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
 

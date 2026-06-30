@@ -564,3 +564,18 @@ record pruning remains disabled because `state_root` is not yet enforced and
 the arithmetic proof history is needed by miners. Safe pruning requires a
 separate protocol milestone for deterministic state commitments, verifiable
 checkpoints, and proof-history retention.
+
+## 2026-06-30: Unified Client Wrapper
+
+Added `primechain-client` as the first user-facing command for common operator
+workflows. It supports `status`, arbitrary `query`, range `sync`, local
+`inspect`, `new-miner`, `address`, `balance`, and signed frontier `mine`
+subcommands. The implementation deliberately dispatches to the existing tested
+tools instead of duplicating protocol logic, preserving the current consensus
+and network behavior.
+
+Integration tests cover miner identity creation, store inspection, remote status
+and sync, and mining a loopback node to a target frontier through the client.
+The remaining client work is the mathematical mining workbench: divisor search,
+factorization helpers, Pratt attempts, resumable jobs, and later Bitcoin mapping
+experiments.

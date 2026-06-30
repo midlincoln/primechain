@@ -164,6 +164,10 @@ add_executable(primechain-composite-commitment
     src/tools/composite_commitment.cpp
 )
 
+add_executable(primechain-client
+    src/tools/client.cpp
+)
+
 target_link_libraries(primechain-composite-commitment
     PRIVATE
         primechain_core
@@ -444,6 +448,30 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat ${CMAKE_CURRENT_BINARY_DIR}/balance-50.log && $<TARGET_FILE:primechain-sequential> 50 ${CMAKE_CURRENT_BINARY_DIR}/balance-50.log ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat >/dev/null && $<TARGET_FILE:primechain-balance> ${CMAKE_CURRENT_BINARY_DIR}/balance-50.dat pcdev1_prime_miner | grep -q '^3 1000000'"
+)
+add_test(
+    NAME client_new_miner_and_address
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-miner.wallet && $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-miner.wallet | grep -q '^pcpq1_' && $<TARGET_FILE:primechain-client> address ${CMAKE_CURRENT_BINARY_DIR}/client-miner.wallet | grep -q '^pcpq1_'"
+)
+add_test(
+    NAME client_inspect_store
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat >/dev/null && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat | grep -q 'frontier_integer: 20' && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat --range 18 20 | grep -q '^20 18 COMPOSITE '"
+)
+add_test(
+    NAME client_status_and_sync
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-sync-src.dat ${CMAKE_CURRENT_BINARY_DIR}/client-sync-src.log ${CMAKE_CURRENT_BINARY_DIR}/client-sync-downloaded.dat ${CMAKE_CURRENT_BINARY_DIR}/client-sync-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-sync-src.log ${CMAKE_CURRENT_BINARY_DIR}/client-sync-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19082 ${CMAKE_CURRENT_BINARY_DIR}/client-sync-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> status 127.0.0.1 19082 | grep -q '^STATUS 19 8 11 1 18 20 ' && $<TARGET_FILE:primechain-client> sync 127.0.0.1 19082 2 20 ${CMAKE_CURRENT_BINARY_DIR}/client-sync-downloaded.dat | grep -q 'frontier_integer: 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-sync-server.pid)"
+)
+add_test(
+    NAME client_mine_to_frontier
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-mine*; $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet >/dev/null && $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19083 ${CMAKE_CURRENT_BINARY_DIR}/client-mine.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> mine 127.0.0.1 19083 6 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet | grep -q 'frontier miner complete frontier=6' && $<TARGET_FILE:primechain-client> status 127.0.0.1 19083 | grep -q '^STATUS 5 3 2 1 4 6 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid)"
 )
 add_test(
     NAME sequential_custom_miner_address
