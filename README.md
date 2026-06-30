@@ -64,10 +64,15 @@ that remain available for tests and protocol development.
   --composite-identity ./wallets/composite.wallet
 ./build/primechain-client sync 127.0.0.1 18889 2 20 ./data/downloaded.dat
 ./build/primechain-client inspect ./data/downloaded.dat
+./build/primechain-client is-prime 97
+./build/primechain-client divisor 91
+./build/primechain-client factor ./data/downloaded.dat 84
+./build/primechain-client pratt ./data/downloaded.dat 97
 ```
 
-The first client version is intentionally a thin dispatcher. Consensus, replay,
-network framing, and mining behavior still live in the existing tested tools.
+The client wraps lower-level tools for network and mining operations, and now
+contains a small local math workbench for primality checks, divisor search,
+factorization from downloaded composite records, and Pratt proof construction.
 
 ## Record Store Durability
 
@@ -1071,11 +1076,11 @@ Completed prototype milestones:
 - atomic tip replacement and peer-sync store installation
 - synchronized sidecar replacement and stale-temp recovery
 - atomic replay snapshots with stale/corrupt fallback and suffix-only replay
-- first unified `primechain-client` for status, sync, inspection, identity creation, balances, and mining
+- first unified `primechain-client` for status, sync, inspection, identity creation, balances, mining, and local math workbench commands
 
 Next milestones:
 
-1. Expand `primechain-client` with local factorization, divisor search, Pratt tooling, and resumable jobs.
+1. Expand `primechain-client` with resumable mining jobs, reward monitoring, and Bitcoin mapping experiments.
 2. Enforce deterministic state roots and design verifiable archival pruning.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

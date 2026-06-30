@@ -579,3 +579,14 @@ and sync, and mining a loopback node to a target frontier through the client.
 The remaining client work is the mathematical mining workbench: divisor search,
 factorization helpers, Pratt attempts, resumable jobs, and later Bitcoin mapping
 experiments.
+
+## 2026-06-30: Client Math Workbench
+
+Extended `primechain-client` with local mathematical commands: `is-prime`,
+`divisor`, `factor`, and `pratt`. Factorization and Pratt construction load the
+local record store, extract verified composite proofs, and reuse the existing
+number-theory APIs rather than querying the node for expensive helper work.
+
+Tests cover direct primality checks, divisor discovery, factorization from a
+downloaded arithmetic history, Pratt construction for 97, and expected failure
+when the local proof history is insufficient.

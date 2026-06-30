@@ -168,6 +168,11 @@ add_executable(primechain-client
     src/tools/client.cpp
 )
 
+target_link_libraries(primechain-client
+    PRIVATE
+        primechain_core
+)
+
 target_link_libraries(primechain-composite-commitment
     PRIVATE
         primechain_core
@@ -472,6 +477,24 @@ add_test(
     COMMAND
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-mine*; $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet >/dev/null && $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19083 ${CMAKE_CURRENT_BINARY_DIR}/client-mine.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> mine 127.0.0.1 19083 6 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet | grep -q 'frontier miner complete frontier=6' && $<TARGET_FILE:primechain-client> status 127.0.0.1 19083 | grep -q '^STATUS 5 3 2 1 4 6 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid)"
+)
+add_test(
+    NAME client_math_workbench
+    COMMAND
+        /bin/sh -c
+        "$<TARGET_FILE:primechain-client> is-prime 97 | grep -q '^PRIME 97$' && $<TARGET_FILE:primechain-client> is-prime 99 | grep -q '^COMPOSITE 99$' && $<TARGET_FILE:primechain-client> divisor 91 | grep -q '^DIVISOR 91 7 13$'"
+)
+add_test(
+    NAME client_factor_and_pratt_workbench
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-math.dat ${CMAKE_CURRENT_BINARY_DIR}/client-math.log && $<TARGET_FILE:primechain-sequential> 100 ${CMAKE_CURRENT_BINARY_DIR}/client-math.log ${CMAKE_CURRENT_BINARY_DIR}/client-math.dat >/dev/null && $<TARGET_FILE:primechain-client> factor ${CMAKE_CURRENT_BINARY_DIR}/client-math.dat 84 | grep -q '^FACTOR 3 2^2 3^1 7^1$' && $<TARGET_FILE:primechain-client> pratt ${CMAKE_CURRENT_BINARY_DIR}/client-math.dat 97 | grep -q '^PRATT 97 witness=5 factors=2^5,3^1$'"
+)
+add_test(
+    NAME client_factor_requires_history
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-short.dat ${CMAKE_CURRENT_BINARY_DIR}/client-short.log && $<TARGET_FILE:primechain-sequential> 10 ${CMAKE_CURRENT_BINARY_DIR}/client-short.log ${CMAKE_CURRENT_BINARY_DIR}/client-short.dat >/dev/null && ! $<TARGET_FILE:primechain-client> factor ${CMAKE_CURRENT_BINARY_DIR}/client-short.dat 84 2>&1 | grep -q '^FACTOR '"
 )
 add_test(
     NAME sequential_custom_miner_address
