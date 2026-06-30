@@ -479,6 +479,18 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-mine*; $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet >/dev/null && $<TARGET_FILE:primechain-client> new-miner ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19083 ${CMAKE_CURRENT_BINARY_DIR}/client-mine.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> mine 127.0.0.1 19083 6 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-prime.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/client-mine-composite.wallet | grep -q 'frontier miner complete frontier=6' && $<TARGET_FILE:primechain-client> status 127.0.0.1 19083 | grep -q '^STATUS 5 3 2 1 4 6 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-mine-server.pid)"
 )
 add_test(
+    NAME client_workdir_sync_status
+    COMMAND
+        /bin/sh -c
+        "rm -rf ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-src.dat ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-src.log ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-src.log ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-src.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 19084 ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-src.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> init-workdir ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync 127.0.0.1 19084 | grep -q '^WORKDIR_INITIALIZED ' && $<TARGET_FILE:primechain-client> sync-peer ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync | grep -q '^SYNCED 2 20$' && $<TARGET_FILE:primechain-client> job-status ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync | grep -q '^LOCAL_FRONTIER 20$' && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync/data/chain.dat | grep -q 'frontier_integer: 20' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-sync-server.pid)"
+)
+add_test(
+    NAME client_workdir_mine_job
+    COMMAND
+        /bin/sh -c
+        "rm -rf ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine.dat ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine-server.log; ($<TARGET_FILE:primechain-sync-server> 19085 ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine.dat > ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-client> init-workdir ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine 127.0.0.1 19085 >/dev/null && $<TARGET_FILE:primechain-client> mine-job ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine --target 6 | grep -q 'frontier miner complete frontier=6' && $<TARGET_FILE:primechain-client> job-status ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine | grep -q '^MINE_TARGET 6$' && $<TARGET_FILE:primechain-client> job-status ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine | grep -q '^LOCAL_FRONTIER 6$' && $<TARGET_FILE:primechain-client> status 127.0.0.1 19085 | grep -q '^STATUS 5 3 2 1 4 6 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/client-workdir-mine-server.pid)"
+)
+add_test(
     NAME client_math_workbench
     COMMAND
         /bin/sh -c

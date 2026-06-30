@@ -56,6 +56,24 @@ wallet, sync, inspection, and mining workflows. It wraps the lower-level tools
 that remain available for tests and protocol development.
 
 ```bash
+./build/primechain-client init-workdir ./pc-work 127.0.0.1 18889
+./build/primechain-client sync-peer ./pc-work
+./build/primechain-client job-status ./pc-work
+./build/primechain-client mine-job ./pc-work --target 100
+./build/primechain-client inspect ./pc-work/data/chain.dat
+./build/primechain-client is-prime 97
+./build/primechain-client divisor 91
+./build/primechain-client factor ./pc-work/data/chain.dat 84
+./build/primechain-client pratt ./pc-work/data/chain.dat 97
+```
+
+A client workdir stores peer configuration, a local downloaded chain copy,
+prime and composite miner wallets, and simple mining job state. `mine-job`
+uses those wallets to run the authenticated frontier miner, then syncs the
+workdir chain from the peer. The lower-level direct commands remain available
+for tests and debugging:
+
+```bash
 ./build/primechain-client status 127.0.0.1 18889
 ./build/primechain-client new-miner ./wallets/prime.wallet
 ./build/primechain-client new-miner ./wallets/composite.wallet
@@ -63,15 +81,10 @@ that remain available for tests and protocol development.
   --prime-identity ./wallets/prime.wallet \
   --composite-identity ./wallets/composite.wallet
 ./build/primechain-client sync 127.0.0.1 18889 2 20 ./data/downloaded.dat
-./build/primechain-client inspect ./data/downloaded.dat
-./build/primechain-client is-prime 97
-./build/primechain-client divisor 91
-./build/primechain-client factor ./data/downloaded.dat 84
-./build/primechain-client pratt ./data/downloaded.dat 97
 ```
 
-The client wraps lower-level tools for network and mining operations, and now
-contains a small local math workbench for primality checks, divisor search,
+The client wraps lower-level tools for network and mining operations, and
+contains a local math workbench for primality checks, divisor search,
 factorization from downloaded composite records, and Pratt proof construction.
 
 ## Record Store Durability
@@ -1076,11 +1089,11 @@ Completed prototype milestones:
 - atomic tip replacement and peer-sync store installation
 - synchronized sidecar replacement and stale-temp recovery
 - atomic replay snapshots with stale/corrupt fallback and suffix-only replay
-- first unified `primechain-client` for status, sync, inspection, identity creation, balances, mining, and local math workbench commands
+- unified `primechain-client` for workdir setup, peer sync, job status, mining jobs, status, inspection, identity creation, balances, and local math workbench commands
 
 Next milestones:
 
-1. Expand `primechain-client` with resumable mining jobs, reward monitoring, and Bitcoin mapping experiments.
+1. Expand `primechain-client` with reward monitoring, richer job scheduling, and Bitcoin mapping experiments.
 2. Enforce deterministic state roots and design verifiable archival pruning.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.

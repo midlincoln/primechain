@@ -140,10 +140,12 @@ Implement Stage 1 first. Everything else depends on durable canonical records.
 
 ## Stage 8: Unified Mining Client
 
-Status: first operator wrapper and local math workbench implemented. The current
-`primechain-client` combines status, query, range sync, store inspection, miner
-identity creation, balance lookup, frontier mining, primality checks, divisor
-search, factorization from downloaded records, and Pratt construction.
+Status: first operator wrapper, local math workbench, and basic persistent
+workdir workflow implemented. The current `primechain-client` combines workdir
+initialization, peer sync, job status, authenticated frontier mining jobs,
+status, query, range sync, store inspection, miner identity creation, balance
+lookup, primality checks, divisor search, factorization from downloaded records,
+and Pratt construction.
 
-Remaining work: resumable mining jobs, reward monitoring, richer local proof
+Remaining work: reward monitoring, richer job scheduling, richer local proof
 indexes, and future Bitcoin-mapping experiments.

@@ -590,3 +590,15 @@ number-theory APIs rather than querying the node for expensive helper work.
 Tests cover direct primality checks, divisor discovery, factorization from a
 downloaded arithmetic history, Pratt construction for 97, and expected failure
 when the local proof history is insufficient.
+
+## 2026-06-30: Client Workdirs And Mine Jobs
+
+Extended `primechain-client` with a persistent workdir workflow. `init-workdir`
+creates the local directory structure, peer config, miner wallets, and chain
+location. `sync-peer` updates the local chain from the configured peer,
+`job-status` reports peer/local frontier/job target state, and `mine-job` runs
+the authenticated frontier miner from stored wallets before syncing the local
+chain copy.
+
+Integration tests cover syncing a fresh workdir from a loopback peer and mining
+a workdir-backed node to a target frontier while preserving simple job state.
