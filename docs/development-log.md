@@ -613,3 +613,16 @@ records to those wallets.
 
 The workdir mining integration test now verifies the expected reward split after
 mining through a prime/composite/prime sequence.
+
+## 2026-07-03: Client Job Scheduler
+
+Extended workdir mining from a one-shot `mine-job` command into persistent job
+commands. `add-mine-job` records the target frontier, `run-jobs` syncs before
+mining, skips work if the peer/local chain already reached the target, runs the
+authenticated frontier miner when needed, syncs afterward, and records
+pending/complete/failed state plus the last synced frontier. `clear-job` removes
+the local job state. `mine-job` remains as an add-and-run convenience wrapper.
+
+The workdir mining integration test now verifies the pending state, completed
+state, last synced frontier, balances, and reward attribution after running the
+stored job.

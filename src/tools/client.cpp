@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -146,6 +147,35 @@ std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
     }
     return values;
 }
+
+bool writeKeyValueFile(const std::string& path, const std::map<std::string, std::string>& values) {
+    if (!ensureDirectory(directoryName(path))) return false;
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        std::cerr << "could not write " << path << "\n";
+        return false;
+    }
+    for (const auto& entry : values) {
+        out << entry.first << "=" << entry.second << "\n";
+    }
+    return static_cast<bool>(out);
+}
+
+std::string nowSeconds() {
+    return std::to_string(static_cast<unsigned long long>(std::time(nullptr)));
+}
+
+std::optional<primechain::PrimeValue> stateTarget(const std::map<std::string, std::string>& state) {
+    const auto found = state.find("target");
+    if (found == state.end() || found->second.empty()) return std::nullopt;
+    return static_cast<primechain::PrimeValue>(std::stoull(found->second));
+}
+
+bool writeMineState(const std::string& workdir, std::map<std::string, std::string> state) {
+    state["version"] = "primechain-mine-job-v1";
+    return writeKeyValueFile(mineStatePath(workdir), state);
+}
+
 
 bool ensureWorkdirLayout(const std::string& workdir) {
     return ensureDirectory(workdir) && ensureDirectory(dataDir(workdir)) && ensureDirectory(walletsDir(workdir))
@@ -500,13 +530,49 @@ int jobStatus(int argc, char** argv) {
     const auto state = readKeyValueFile(mineStatePath(workdir));
     const auto target = state.find("target");
     if (target != state.end()) std::cout << "MINE_TARGET " << target->second << "\n";
+    const auto status = state.find("status");
+    if (status != state.end()) std::cout << "JOB_STATUS " << status->second << "\n";
+    const auto started_at = state.find("started_at");
+    if (started_at != state.end()) std::cout << "JOB_STARTED_AT " << started_at->second << "\n";
+    const auto updated_at = state.find("updated_at");
+    if (updated_at != state.end()) std::cout << "JOB_UPDATED_AT " << updated_at->second << "\n";
+    const auto last_synced = state.find("last_synced_frontier");
+    if (last_synced != state.end()) std::cout << "JOB_LAST_SYNCED_FRONTIER " << last_synced->second << "\n";
+    const auto result = state.find("last_result");
+    if (result != state.end()) std::cout << "JOB_LAST_RESULT " << result->second << "\n";
     return 0;
 }
 
-int mineJob(const char* argv0, int argc, char** argv) {
+int addMineJob(int argc, char** argv) {
     if (argc != 5 || std::string(argv[3]) != "--target") return 1;
     const std::string workdir = argv[2];
     const std::string target = argv[4];
+    if (!ensureWorkdirLayout(workdir)) return 1;
+    std::map<std::string, std::string> state;
+    state["target"] = target;
+    state["status"] = "pending";
+    state["created_at"] = nowSeconds();
+    state["updated_at"] = state["created_at"];
+    state["last_result"] = "created";
+    if (!writeMineState(workdir, state)) return 1;
+    std::cout << "MINE_JOB_ADDED " << workdir << " target=" << target << "\n";
+    return 0;
+}
+
+int clearJob(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string path = mineStatePath(argv[2]);
+    if (unlink(path.c_str()) != 0 && errno != ENOENT) {
+        std::cerr << "could not remove " << path << ": " << std::strerror(errno) << "\n";
+        return 1;
+    }
+    std::cout << "JOB_CLEARED " << argv[2] << "\n";
+    return 0;
+}
+
+int runJobs(const char* argv0, int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
     const auto peer = readPeerConfig(workdir);
     if (!peer.has_value()) {
         std::cerr << "no peer configured; run init-workdir with host and port first\n";
@@ -514,25 +580,95 @@ int mineJob(const char* argv0, int argc, char** argv) {
     }
     if (!ensureWorkdirLayout(workdir)) return 1;
     if (!ensureWallet(argv0, primeWalletPath(workdir)) || !ensureWallet(argv0, compositeWalletPath(workdir))) return 1;
-    {
-        std::ofstream out(mineStatePath(workdir), std::ios::trunc);
-        if (!out) {
-            std::cerr << "could not write " << mineStatePath(workdir) << "\n";
-            return 1;
-        }
-        out << "target=" << target << "\n";
+
+    auto state = readKeyValueFile(mineStatePath(workdir));
+    const auto target = stateTarget(state);
+    if (!target.has_value()) {
+        std::cerr << "no mine job configured; run add-mine-job first\n";
+        return 1;
     }
-    const int mined = runTool(argv0, "primechain-frontier-miner", {
+
+    if (state.find("started_at") == state.end()) state["started_at"] = nowSeconds();
+    state["status"] = "syncing";
+    state["updated_at"] = nowSeconds();
+    state["last_result"] = "syncing-before-mine";
+    if (!writeMineState(workdir, state)) return 1;
+
+    int rc = syncWorkdir(argv0, workdir, *peer);
+    if (rc != 0) {
+        state["status"] = "failed";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "sync-before-mine-failed";
+        writeMineState(workdir, state);
+        return rc;
+    }
+
+    auto local = loadLocalStatus(chainPath(workdir));
+    state["last_synced_frontier"] = std::to_string(local.frontier);
+    if (local.frontier >= *target) {
+        state["status"] = "complete";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "already-at-target";
+        if (!writeMineState(workdir, state)) return 1;
+        std::cout << "JOB_COMPLETE target=" << *target << " frontier=" << local.frontier << "\n";
+        return 0;
+    }
+
+    state["status"] = "running";
+    state["updated_at"] = nowSeconds();
+    state["last_result"] = "mining";
+    if (!writeMineState(workdir, state)) return 1;
+
+    rc = runTool(argv0, "primechain-frontier-miner", {
         peer->host,
         std::to_string(peer->port),
-        target,
+        std::to_string(*target),
         "--prime-identity",
         primeWalletPath(workdir),
         "--composite-identity",
         compositeWalletPath(workdir),
     });
-    if (mined != 0) return mined;
-    return syncWorkdir(argv0, workdir, *peer);
+    if (rc != 0) {
+        state["status"] = "failed";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "miner-failed";
+        writeMineState(workdir, state);
+        return rc;
+    }
+
+    state["status"] = "syncing";
+    state["updated_at"] = nowSeconds();
+    state["last_result"] = "syncing-after-mine";
+    if (!writeMineState(workdir, state)) return 1;
+
+    rc = syncWorkdir(argv0, workdir, *peer);
+    local = loadLocalStatus(chainPath(workdir));
+    state["last_synced_frontier"] = std::to_string(local.frontier);
+    state["updated_at"] = nowSeconds();
+    if (rc != 0) {
+        state["status"] = "failed";
+        state["last_result"] = "sync-after-mine-failed";
+        writeMineState(workdir, state);
+        return rc;
+    }
+    if (local.frontier >= *target) {
+        state["status"] = "complete";
+        state["last_result"] = "complete";
+    } else {
+        state["status"] = "pending";
+        state["last_result"] = "frontier-below-target";
+    }
+    if (!writeMineState(workdir, state)) return 1;
+    std::cout << (local.frontier >= *target ? "JOB_COMPLETE" : "JOB_PENDING")
+              << " target=" << *target << " frontier=" << local.frontier << "\n";
+    return local.frontier >= *target ? 0 : 1;
+}
+
+int mineJob(const char* argv0, int argc, char** argv) {
+    if (argc != 5 || std::string(argv[3]) != "--target") return 1;
+    const int added = addMineJob(argc, argv);
+    if (added != 0) return added;
+    return runJobs(argv0, 3, argv);
 }
 
 std::vector<std::string> tail(int argc, char** argv, int first) {
@@ -546,6 +682,9 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " init-workdir <workdir> [host port]\n"
               << "  " << argv0 << " sync-peer <workdir> [host port]\n"
               << "  " << argv0 << " job-status <workdir>\n"
+              << "  " << argv0 << " add-mine-job <workdir> --target <integer>\n"
+              << "  " << argv0 << " run-jobs <workdir>\n"
+              << "  " << argv0 << " clear-job <workdir>\n"
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
               << "  " << argv0 << " balances <workdir>\n"
               << "  " << argv0 << " rewards <workdir>\n"
@@ -584,6 +723,18 @@ int main(int argc, char** argv) {
     if (command == "job-status") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return jobStatus(argc, argv);
+    }
+    if (command == "add-mine-job") {
+        if (argc != 5) { printUsage(argv[0]); return 1; }
+        return addMineJob(argc, argv);
+    }
+    if (command == "run-jobs") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return runJobs(argv[0], argc, argv);
+    }
+    if (command == "clear-job") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return clearJob(argc, argv);
     }
     if (command == "mine-job") {
         if (argc != 5) { printUsage(argv[0]); return 1; }

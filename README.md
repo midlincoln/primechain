@@ -58,8 +58,10 @@ that remain available for tests and protocol development.
 ```bash
 ./build/primechain-client init-workdir ./pc-work 127.0.0.1 18889
 ./build/primechain-client sync-peer ./pc-work
+./build/primechain-client add-mine-job ./pc-work --target 100
 ./build/primechain-client job-status ./pc-work
-./build/primechain-client mine-job ./pc-work --target 100
+./build/primechain-client run-jobs ./pc-work
+./build/primechain-client job-status ./pc-work
 ./build/primechain-client balances ./pc-work
 ./build/primechain-client rewards ./pc-work
 ./build/primechain-client inspect ./pc-work/data/chain.dat
@@ -70,11 +72,13 @@ that remain available for tests and protocol development.
 ```
 
 A client workdir stores peer configuration, a local downloaded chain copy,
-prime and composite miner wallets, and simple mining job state. `mine-job`
-uses those wallets to run the authenticated frontier miner, then syncs the
-workdir chain from the peer. `balances` reports current wallet holdings from
-replay, and `rewards` summarizes prime-miner, composite-miner, fee, and pending
-composite reward attribution from the local chain. The lower-level direct commands remain available
+prime and composite miner wallets, and persistent mining job state.
+`add-mine-job` records the target frontier, `run-jobs` syncs before mining,
+runs the authenticated frontier miner only when the target is still ahead, then
+syncs again and records pending/complete/failed state. `mine-job` remains a
+convenience wrapper for add-and-run. `balances` reports current wallet holdings
+from replay, and `rewards` summarizes prime-miner, composite-miner, fee, and
+pending composite reward attribution from the local chain. The lower-level direct commands remain available
 for tests and debugging:
 
 ```bash
@@ -1093,11 +1097,11 @@ Completed prototype milestones:
 - atomic tip replacement and peer-sync store installation
 - synchronized sidecar replacement and stale-temp recovery
 - atomic replay snapshots with stale/corrupt fallback and suffix-only replay
-- unified `primechain-client` for workdir setup, peer sync, job status, mining jobs, reward reporting, status, inspection, identity creation, balances, and local math workbench commands
+- unified `primechain-client` for workdir setup, peer sync, persistent mining jobs, reward reporting, status, inspection, identity creation, balances, and local math workbench commands
 
 Next milestones:
 
-1. Expand `primechain-client` with richer job scheduling, richer reward history views, and Bitcoin mapping experiments.
+1. Expand `primechain-client` with richer reward history views, local proof indexes, and Bitcoin mapping experiments.
 2. Enforce deterministic state roots and design verifiable archival pruning.
 
 The first engineering principle is simple: keep consensus small, explicit, and testable before adding network complexity.
