@@ -6,6 +6,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -66,6 +67,34 @@ public:
 private:
     std::map<primechain::PrimeValue, primechain::CompositeProof> proofs_;
 };
+
+primechain::CompositeProof toCompositeProof(const primechain::protocol::CompositeProofV0& proof) {
+    primechain::CompositeProof out;
+    out.m = proof.g;
+    out.d = proof.d;
+    out.e = proof.e;
+    out.provider_address = proof.provider_address;
+    out.signature = proof.signature;
+    return out;
+}
+
+bool loadProofStore(const std::string& path, MapProofIndex& proofs, std::string& error) {
+    primechain::storage::RecordStore store(path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) return false;
+    for (const auto& stored : records) {
+        if (stored.kind != primechain::storage::StoredRecordKind::Composite) continue;
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) return false;
+        const auto proof = toCompositeProof(decoded->proof);
+        if (!primechain::math::verifyCompositeProof(proof)) {
+            error = "proof store contains invalid composite proof";
+            return false;
+        }
+        proofs.add(proof);
+    }
+    return true;
+}
 
 struct Status {
     std::uint64_t record_count{0};
@@ -362,10 +391,14 @@ int main(int argc, char** argv) {
     std::string composite_miner = kDefaultCompositeMiner;
     std::optional<primechain::wallet::MinerIdentity> prime_identity;
     std::optional<primechain::wallet::MinerIdentity> composite_identity;
+    std::optional<std::string> proof_store_path;
     int argument = 4;
     while (argument < argc) {
         const std::string option = argv[argument++];
-        if (option == "--prime-identity" || option == "--composite-identity") {
+        if (option == "--proof-store") {
+            if (argument >= argc) { printUsage(argv[0]); return 1; }
+            proof_store_path = argv[argument++];
+        } else if (option == "--prime-identity" || option == "--composite-identity") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             primechain::wallet::MinerIdentity identity;
             std::string error;
@@ -391,6 +424,13 @@ int main(int argc, char** argv) {
     }
 
     MapProofIndex proofs;
+    if (proof_store_path.has_value()) {
+        std::string error;
+        if (!loadProofStore(*proof_store_path, proofs, error)) {
+            std::cerr << "could not load proof store: " << error << "\n";
+            return 1;
+        }
+    }
     std::size_t submitted = 0;
 
     while (true) {

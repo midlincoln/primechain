@@ -580,7 +580,8 @@ Submit authenticated prime proofs with the frontier miner:
 ./build/primechain-wallet new-miner ./wallets/miner.wallet
 ./build/primechain-frontier-miner 127.0.0.1 18889 20 \
   --prime-identity ./wallets/miner.wallet \
-  --composite-identity ./wallets/miner.wallet
+  --composite-identity ./wallets/miner.wallet \
+  --proof-store ./data/frontier-node.dat
 ```
 
 Signed prime wire format:
@@ -638,7 +639,8 @@ Run the prototype frontier miner loop against a TCP sync node:
 ./build/primechain-wallet new-miner ./wallets/miner.wallet
 ./build/primechain-frontier-miner 127.0.0.1 18889 20 \
   --prime-identity ./wallets/miner.wallet \
-  --composite-identity ./wallets/miner.wallet
+  --composite-identity ./wallets/miner.wallet \
+  --proof-store ./data/frontier-node.dat
 ```
 
 The frontier miner repeatedly:
@@ -649,7 +651,7 @@ The frontier miner repeatedly:
 - submits `SUBMIT_SIGNED_PRIME` with an authenticated Pratt proof when the next integer is prime;
 - stops when the node frontier reaches the requested limit.
 
-This is the first real mining flow for the sequential arithmetic chain. It is still a prototype: it keeps its composite proof index locally during the run, so it works best from a fresh node or a node whose needed composite proofs were mined by this same process.
+This is the first real mining flow for the sequential arithmetic chain. The optional `--proof-store` argument bootstraps the miner's local composite-proof index from an existing downloaded chain, so a miner can continue from a previously synced frontier instead of needing to start from genesis in the same process. `primechain-client run-jobs` passes the workdir chain as the proof store automatically.
 
 When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 

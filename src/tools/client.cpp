@@ -962,6 +962,8 @@ int runJobs(const char* argv0, int argc, char** argv) {
         primeWalletPath(workdir),
         "--composite-identity",
         compositeWalletPath(workdir),
+        "--proof-store",
+        chainPath(workdir),
     });
     if (rc != 0) {
         state["status"] = "failed";

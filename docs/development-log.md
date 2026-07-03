@@ -649,3 +649,16 @@ the output to recent events for operator use.
 
 The workdir mining integration test now verifies full reward history and recent
 reward slicing after mining through a prime/composite/prime sequence.
+
+## 2026-07-03: Frontier Miner Proof Store Bootstrap
+
+Added optional `--proof-store <chain.dat>` support to `primechain-frontier-miner`.
+The miner now loads verified composite proofs from an existing local chain before
+entering the mining loop. This fixes the case where a workdir synced from a
+public node at frontier 20 could mine composites up to 28 but fail to construct
+the Pratt proof for 29 because earlier composite proofs were not present in the
+miner's in-memory index.
+
+`primechain-client run-jobs` now passes the workdir chain as the proof store
+automatically. A regression test starts from a synced frontier-20 workdir and
+mines through prime 29 to frontier 30.
