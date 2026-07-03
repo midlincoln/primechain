@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "primechain/crypto/hash.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
@@ -217,6 +218,123 @@ void printPrattProof(const primechain::math::PrattProof& proof) {
         std::cout << factor.prime << "^" << factor.exponent;
     }
     std::cout << "\n";
+}
+
+
+const char* kindName(primechain::storage::StoredRecordKind kind) {
+    switch (kind) {
+        case primechain::storage::StoredRecordKind::Composite:
+            return "COMPOSITE";
+        case primechain::storage::StoredRecordKind::Prime:
+            return "PRIME";
+    }
+    return "UNKNOWN";
+}
+
+void printHashField(const char* name, const primechain::Hash256& hash) {
+    std::cout << name << ": " << primechain::crypto::toHex(hash) << "\n";
+}
+
+void printTransactionSummary(const primechain::protocol::TransactionBatchV0& batch, std::size_t actual_count) {
+    std::cout << "transactions: " << actual_count << "\n";
+    std::cout << "tx_batch_count: " << batch.transaction_count << "\n";
+    printHashField("tx_merkle_root", batch.transaction_merkle_root);
+}
+
+void printFinalizationSummary(const primechain::protocol::FinalizationProofV0& proof) {
+    std::cout << "finalization_rule: " << proof.rule << "\n";
+    std::cout << "finalization_votes: " << proof.votes.size() << "\n";
+    std::cout << "round_changes: " << proof.round_changes.size() << "\n";
+    if (!proof.votes.empty()) {
+        std::cout << "finalization_round: " << proof.votes.front().round << "\n";
+    }
+}
+
+void printValidatorEpochSummary(const primechain::protocol::ValidatorEpochTransitionV1& transition) {
+    if (transition.epoch == 0 && transition.activation_integer == 0 &&
+        transition.next_validator_set.empty() && transition.votes.empty()) {
+        std::cout << "validator_epoch_transition: none\n";
+        return;
+    }
+    std::cout << "validator_epoch_transition: present\n";
+    std::cout << "validator_epoch: " << transition.epoch << "\n";
+    std::cout << "activation_integer: " << transition.activation_integer << "\n";
+    std::cout << "next_validators: " << transition.next_validator_set.size() << "\n";
+    std::cout << "epoch_votes: " << transition.votes.size() << "\n";
+}
+
+int decodeRecord(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const primechain::PrimeValue integer = std::stoull(argv[3]);
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto stored = store.findByInteger(integer, error);
+    if (!error.empty()) {
+        std::cerr << "record_store_error: " << error << "\n";
+        return 1;
+    }
+    if (!stored.has_value()) {
+        std::cerr << "record_not_found: " << integer << "\n";
+        return 1;
+    }
+
+    std::cout << "DECODE_RECORD " << stored->integer << "\n";
+    std::cout << "store_path: " << store_path << "\n";
+    std::cout << "kind: " << kindName(stored->kind) << "\n";
+    std::cout << "height: " << stored->height << "\n";
+    std::cout << "integer: " << stored->integer << "\n";
+    printHashField("record_hash", stored->record_hash);
+    std::cout << "payload_bytes: " << stored->payload.size() << "\n";
+
+    if (stored->kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored->payload, error);
+        if (!record.has_value()) {
+            std::cerr << "decode_error: " << error << "\n";
+            return 1;
+        }
+        std::cout << "version: " << record->version << "\n";
+        printHashField("previous_hash", record->previous_record_hash);
+        printHashField("candidate_hash", primechain::protocol::candidateRecordHash(*record));
+        std::cout << "provider: " << record->proof.provider_address << "\n";
+        std::cout << "composite_integer: " << record->proof.g << "\n";
+        std::cout << "divisor: " << record->proof.d << "\n";
+        std::cout << "cofactor: " << record->proof.e << "\n";
+        std::cout << "proof_signature_bytes: " << record->proof.signature.size() << "\n";
+        std::cout << "commit_phase_integer: " << record->commit_phase.integer << "\n";
+        std::cout << "commitments: " << record->commit_phase.commitments.size() << "\n";
+        std::cout << "commit_phase_votes: " << record->commit_phase.votes.size() << "\n";
+        std::cout << "commit_phase_validators: " << record->commit_phase.validator_set.size() << "\n";
+        printHashField("state_root", record->state_root);
+        printTransactionSummary(record->tx_batch, record->transactions.size());
+        printValidatorEpochSummary(record->validator_epoch);
+        printFinalizationSummary(record->finalized_by);
+        return 0;
+    }
+
+    const auto record = primechain::protocol::deserializePrimeRecord(stored->payload, error);
+    if (!record.has_value()) {
+        std::cerr << "decode_error: " << error << "\n";
+        return 1;
+    }
+    std::cout << "version: " << record->version << "\n";
+    printHashField("previous_hash", record->previous_record_hash);
+    printHashField("candidate_hash", primechain::protocol::candidateRecordHash(*record));
+    std::cout << "provider: " << record->proof.provider_address << "\n";
+    std::cout << "prime: " << record->proof.p << "\n";
+    std::cout << "pratt_witness: " << record->proof.witness << "\n";
+    std::cout << "factors_of_p_minus_1: " << record->proof.factors_of_p_minus_1.size();
+    for (const auto& factor : record->proof.factors_of_p_minus_1) {
+        std::cout << " " << factor.prime << "^" << factor.exponent;
+    }
+    std::cout << "\n";
+    std::cout << "proof_signature_bytes: " << record->proof.signature.size() << "\n";
+    std::cout << "genesis_validators: " << record->genesis_config.validator_set.size() << "\n";
+    printHashField("state_root", record->state_root);
+    printTransactionSummary(record->tx_batch, record->transactions.size());
+    printValidatorEpochSummary(record->validator_epoch);
+    printFinalizationSummary(record->finalized_by);
+    return 0;
 }
 
 std::string directoryName(const std::string& path) {
@@ -1035,6 +1153,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " sync <host> <port> <start> <end> <output-store>\n"
               << "  " << argv0 << " inspect <record-store> [integer]\n"
               << "  " << argv0 << " inspect <record-store> --range <start> <end>\n"
+              << "  " << argv0 << " decode-record <record-store> <integer>\n"
               << "  " << argv0 << " new-miner <wallet-file>\n"
               << "  " << argv0 << " address <wallet-file>\n"
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
@@ -1125,6 +1244,10 @@ int main(int argc, char** argv) {
     if (command == "inspect") {
         if (argc < 3) { printUsage(argv[0]); return 1; }
         return runTool(argv[0], "primechain-store-inspect", tail(argc, argv, 2));
+    }
+    if (command == "decode-record") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return decodeRecord(argc, argv);
     }
     if (command == "new-miner") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

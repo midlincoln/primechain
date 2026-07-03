@@ -464,7 +464,7 @@ add_test(
     NAME client_inspect_store
     COMMAND
         /bin/sh -c
-        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat >/dev/null && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat | grep -q 'frontier_integer: 20' && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat --range 18 20 | grep -q '^20 18 COMPOSITE '"
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat >/dev/null && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat | grep -q 'frontier_integer: 20' && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat --range 18 20 | grep -q '^20 18 COMPOSITE ' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 19 | grep -q '^factors_of_p_minus_1: 2 2^1 3^2$' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 20 | grep -q '^divisor: 2$' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 20 | grep -q '^cofactor: 10$'"
 )
 add_test(
     NAME client_status_and_sync

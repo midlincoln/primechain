@@ -662,3 +662,13 @@ miner's in-memory index.
 `primechain-client run-jobs` now passes the workdir chain as the proof store
 automatically. A regression test starts from a synced frontier-20 workdir and
 mines through prime 29 to frontier 30.
+
+## 2026-07-03: Client Record Decoder
+
+Added `primechain-client decode-record <record-store> <integer>` for readable
+local blockchain inspection. The decoder prints record kind, height, hashes,
+prime or composite proof details, transaction batch summary, validator epoch
+transition summary, and finalization summary without exposing the raw wire hex.
+
+Client tests now cover decoding a prime record's Pratt factorization and a
+composite record's divisor/cofactor fields.
