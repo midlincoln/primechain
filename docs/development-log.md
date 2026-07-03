@@ -626,3 +626,15 @@ the local job state. `mine-job` remains as an add-and-run convenience wrapper.
 The workdir mining integration test now verifies the pending state, completed
 state, last synced frontier, balances, and reward attribution after running the
 stored job.
+
+## 2026-07-03: Client Composite Proof Index
+
+Added a rebuildable workdir proof index at `indexes/composite-proofs.idx`.
+`update-indexes` scans the local `.dat` chain and writes verified composite
+proofs plus chain metadata. `index-status` reports the cached frontier and proof
+count. `factor-workdir` and `pratt-workdir` load the cache for factorization and
+Pratt construction instead of rescanning the full chain.
+
+The index is not consensus state. If it is missing or invalid, it can be rebuilt
+from the canonical record store. Client tests now cover index creation, status,
+cached factorization, and cached Pratt construction from a synced workdir.

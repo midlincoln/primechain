@@ -37,6 +37,9 @@ struct StatusLine {
     std::string latest_hash;
 };
 
+std::string directoryName(const std::string& path);
+bool ensureDirectory(const std::string& path);
+
 class StoreProofIndex final : public primechain::math::CompositeProofIndex {
 public:
     void add(const primechain::CompositeProof& proof) {
@@ -48,6 +51,9 @@ public:
         if (found == proofs_.end()) return std::nullopt;
         return found->second;
     }
+
+    const std::map<primechain::PrimeValue, primechain::CompositeProof>& proofs() const { return proofs_; }
+    std::size_t size() const { return proofs_.size(); }
 
 private:
     std::map<primechain::PrimeValue, primechain::CompositeProof> proofs_;
@@ -77,6 +83,120 @@ bool loadProofIndex(const std::string& store_path, StoreProofIndex& index, std::
             return false;
         }
         index.add(proof);
+    }
+    return true;
+}
+
+std::string bytesToHex(const std::vector<std::uint8_t>& bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        out.push_back(kHex[byte >> 4]);
+        out.push_back(kHex[byte & 0x0f]);
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> hexToBytes(const std::string& hex) {
+    auto value = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return 10 + ch - 'a';
+        if (ch >= 'A' && ch <= 'F') return 10 + ch - 'A';
+        return -1;
+    };
+    if (hex.size() % 2 != 0) return {};
+    std::vector<std::uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int high = value(hex[i]);
+        const int low = value(hex[i + 1]);
+        if (high < 0 || low < 0) return {};
+        out.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    return out;
+}
+
+bool loadProofIndexFile(const std::string& path, StoreProofIndex& index, std::map<std::string, std::string>& metadata, std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "proof index is missing; run update-indexes";
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        if (line.rfind("PROOF ", 0) != 0) {
+            const auto eq = line.find('=');
+            if (eq != std::string::npos) metadata[line.substr(0, eq)] = line.substr(eq + 1);
+            continue;
+        }
+        std::istringstream proof_in(line);
+        std::string tag;
+        std::string signature_hex;
+        primechain::CompositeProof proof;
+        proof_in >> tag >> proof.m >> proof.d >> proof.e >> proof.provider_address >> signature_hex;
+        if (!proof_in || tag != "PROOF") {
+            error = "malformed proof index line";
+            return false;
+        }
+        if (signature_hex == "-") {
+            proof.signature.clear();
+        } else {
+            proof.signature = hexToBytes(signature_hex);
+        }
+        if (!primechain::math::verifyCompositeProof(proof)) {
+            error = "proof index contains invalid composite proof";
+            return false;
+        }
+        index.add(proof);
+    }
+    if (metadata["version"] != "primechain-composite-proof-index-v1") {
+        error = "unsupported proof index version";
+        return false;
+    }
+    return true;
+}
+
+bool writeProofIndexFile(
+    const std::string& path,
+    const StoreProofIndex& index,
+    const StatusLine& status,
+    std::uint64_t prime_records,
+    std::uint64_t composite_records,
+    std::string& error) {
+    if (!ensureDirectory(directoryName(path))) {
+        error = "could not create index directory";
+        return false;
+    }
+    const std::string tmp_path = path + ".tmp";
+    {
+        std::ofstream out(tmp_path, std::ios::trunc);
+        if (!out) {
+            error = "could not write proof index temp file";
+            return false;
+        }
+        out << "version=primechain-composite-proof-index-v1\n";
+        out << "chain_frontier=" << status.frontier << "\n";
+        out << "chain_height=" << status.height << "\n";
+        out << "prime_records=" << prime_records << "\n";
+        out << "composite_records=" << composite_records << "\n";
+        out << "proof_count=" << index.size() << "\n";
+        for (const auto& entry : index.proofs()) {
+            const auto& proof = entry.second;
+            out << "PROOF " << proof.m << " " << proof.d << " " << proof.e << " "
+                << proof.provider_address << " "
+                << (proof.signature.empty() ? std::string("-") : bytesToHex(proof.signature)) << "\n";
+        }
+        if (!out) {
+            error = "could not finish proof index temp file";
+            return false;
+        }
+    }
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+        error = std::string("could not install proof index: ") + std::strerror(errno);
+        unlink(tmp_path.c_str());
+        return false;
     }
     return true;
 }
@@ -131,10 +251,12 @@ std::string dataDir(const std::string& workdir) { return joinPath(workdir, "data
 std::string walletsDir(const std::string& workdir) { return joinPath(workdir, "wallets"); }
 std::string jobsDir(const std::string& workdir) { return joinPath(workdir, "jobs"); }
 std::string logsDir(const std::string& workdir) { return joinPath(workdir, "logs"); }
+std::string indexesDir(const std::string& workdir) { return joinPath(workdir, "indexes"); }
 std::string chainPath(const std::string& workdir) { return joinPath(dataDir(workdir), "chain.dat"); }
 std::string primeWalletPath(const std::string& workdir) { return joinPath(walletsDir(workdir), "prime.wallet"); }
 std::string compositeWalletPath(const std::string& workdir) { return joinPath(walletsDir(workdir), "composite.wallet"); }
 std::string mineStatePath(const std::string& workdir) { return joinPath(jobsDir(workdir), "mine.state"); }
+std::string compositeProofIndexPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "composite-proofs.idx"); }
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
     std::map<std::string, std::string> values;
@@ -179,7 +301,7 @@ bool writeMineState(const std::string& workdir, std::map<std::string, std::strin
 
 bool ensureWorkdirLayout(const std::string& workdir) {
     return ensureDirectory(workdir) && ensureDirectory(dataDir(workdir)) && ensureDirectory(walletsDir(workdir))
-        && ensureDirectory(jobsDir(workdir)) && ensureDirectory(logsDir(workdir));
+        && ensureDirectory(jobsDir(workdir)) && ensureDirectory(logsDir(workdir)) && ensureDirectory(indexesDir(workdir));
 }
 
 bool writeConfig(const std::string& workdir, const std::optional<PeerConfig>& peer) {
@@ -463,6 +585,117 @@ int rewardsWorkdir(int argc, char** argv) {
     return 0;
 }
 
+int updateIndexes(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!ensureWorkdirLayout(workdir)) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "could not load workdir chain: " << error << "\n";
+        return 1;
+    }
+
+    StoreProofIndex index;
+    StatusLine status;
+    std::uint64_t prime_records = 0;
+    std::uint64_t composite_records = 0;
+    for (const auto& stored : records) {
+        status.has_genesis = true;
+        status.height = stored.height;
+        status.frontier = stored.integer;
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            ++composite_records;
+            const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!decoded.has_value()) {
+                std::cerr << "could not decode composite record: " << error << "\n";
+                return 1;
+            }
+            const auto proof = toCompositeProof(decoded->proof);
+            if (!primechain::math::verifyCompositeProof(proof)) {
+                std::cerr << "stored composite proof is invalid\n";
+                return 1;
+            }
+            index.add(proof);
+        } else {
+            ++prime_records;
+        }
+    }
+
+    if (!writeProofIndexFile(compositeProofIndexPath(workdir), index, status, prime_records, composite_records, error)) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    std::cout << "INDEX_UPDATED " << workdir << " frontier=" << status.frontier
+              << " proofs=" << index.size() << " path=" << compositeProofIndexPath(workdir) << "\n";
+    return 0;
+}
+
+int indexStatus(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const std::string path = compositeProofIndexPath(workdir);
+    if (!pathExists(path)) {
+        std::cout << "INDEX_MISSING " << workdir << " path=" << path << "\n";
+        return 0;
+    }
+    StoreProofIndex index;
+    std::map<std::string, std::string> metadata;
+    std::string error;
+    if (!loadProofIndexFile(path, index, metadata, error)) {
+        std::cout << "INDEX_INVALID " << workdir << " error=" << error << "\n";
+        return 1;
+    }
+    std::cout << "INDEX_STATUS " << workdir
+              << " frontier=" << metadata["chain_frontier"]
+              << " height=" << metadata["chain_height"]
+              << " proofs=" << index.size()
+              << " path=" << path << "\n";
+    return 0;
+}
+
+bool loadWorkdirProofIndex(const std::string& workdir, StoreProofIndex& index) {
+    std::map<std::string, std::string> metadata;
+    std::string error;
+    if (!loadProofIndexFile(compositeProofIndexPath(workdir), index, metadata, error)) {
+        std::cerr << "could not load proof index: " << error << "\n";
+        return false;
+    }
+    return true;
+}
+
+int factorWorkdir(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const primechain::PrimeValue n = std::stoull(argv[3]);
+    StoreProofIndex index;
+    if (!loadWorkdirProofIndex(workdir, index)) return 1;
+    const auto factorization = primechain::math::factorizeFromProofIndex(n, index);
+    if (!factorization.has_value()) {
+        std::cerr << "factorization unavailable for " << n << "\n";
+        return 1;
+    }
+    printFactorization(*factorization);
+    return 0;
+}
+
+int prattWorkdir(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const primechain::PrimeValue p = std::stoull(argv[3]);
+    StoreProofIndex index;
+    if (!loadWorkdirProofIndex(workdir, index)) return 1;
+    const auto proof = primechain::math::makePrattProof(p, index);
+    if (!proof.has_value()) {
+        std::cerr << "Pratt proof unavailable for " << p << "\n";
+        return 1;
+    }
+    printPrattProof(*proof);
+    return 0;
+}
+
 int initWorkdir(const char* argv0, int argc, char** argv) {
     if (argc != 3 && argc != 5) return 1;
     const std::string workdir = argv[2];
@@ -688,6 +921,10 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
               << "  " << argv0 << " balances <workdir>\n"
               << "  " << argv0 << " rewards <workdir>\n"
+              << "  " << argv0 << " update-indexes <workdir>\n"
+              << "  " << argv0 << " index-status <workdir>\n"
+              << "  " << argv0 << " factor-workdir <workdir> <n>\n"
+              << "  " << argv0 << " pratt-workdir <workdir> <prime>\n"
               << "  " << argv0 << " status <host> <port>\n"
               << "  " << argv0 << " query <host> <port> <command...>\n"
               << "  " << argv0 << " sync <host> <port> <start> <end> <output-store>\n"
@@ -747,6 +984,22 @@ int main(int argc, char** argv) {
     if (command == "rewards") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return rewardsWorkdir(argc, argv);
+    }
+    if (command == "update-indexes") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return updateIndexes(argc, argv);
+    }
+    if (command == "index-status") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return indexStatus(argc, argv);
+    }
+    if (command == "factor-workdir") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return factorWorkdir(argc, argv);
+    }
+    if (command == "pratt-workdir") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return prattWorkdir(argc, argv);
     }
     if (command == "status") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
