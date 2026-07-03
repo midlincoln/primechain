@@ -5,7 +5,7 @@ project(primechain
     LANGUAGES C CXX
 )
 
-add_compile_definitions(_FILE_OFFSET_BITS=64)
+add_definitions(-D_FILE_OFFSET_BITS=64)
 
 find_package(OpenSSL REQUIRED)
 
