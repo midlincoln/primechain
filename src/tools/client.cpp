@@ -585,6 +585,108 @@ int rewardsWorkdir(int argc, char** argv) {
     return 0;
 }
 
+struct PendingCompositeReward {
+    primechain::Address provider;
+    primechain::PrimeValue source_integer{0};
+};
+
+int rewardHistoryWorkdir(int argc, char** argv) {
+    if (argc != 3 && argc != 5) return 1;
+    const std::string workdir = argv[2];
+    std::optional<std::size_t> last;
+    if (argc == 5) {
+        if (std::string(argv[3]) != "--last") return 1;
+        last = static_cast<std::size_t>(std::stoull(argv[4]));
+    }
+
+    const auto prime_address = loadMinerAddress(primeWalletPath(workdir));
+    const auto composite_address = loadMinerAddress(compositeWalletPath(workdir));
+    if (!prime_address.has_value() || !composite_address.has_value()) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "could not load workdir chain: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<PendingCompositeReward> pending;
+    std::vector<std::string> events;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode composite record: " << error << "\n";
+                return 1;
+            }
+            const auto fees = transactionFees(record->transactions);
+            if (fees != 0 && record->proof.provider_address == *composite_address) {
+                std::ostringstream event;
+                event << "REWARD fee integer=" << record->integer << " amount=" << fees
+                      << " role=record-provider record_height=" << record->height;
+                events.push_back(event.str());
+            }
+            pending.push_back({record->proof.provider_address, record->integer});
+            continue;
+        }
+
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode prime record: " << error << "\n";
+            return 1;
+        }
+        const auto fees = transactionFees(record->transactions);
+        if (fees != 0 && record->proof.provider_address == *prime_address) {
+            std::ostringstream event;
+            event << "REWARD fee integer=" << record->integer << " amount=" << fees
+                  << " role=record-provider record_height=" << record->height;
+            events.push_back(event.str());
+        }
+        if (pending.empty()) {
+            if (record->proof.provider_address == *prime_address) {
+                std::ostringstream event;
+                event << "REWARD prime integer=" << record->integer
+                      << " amount=" << primechain::node::kAssetMicroUnits
+                      << " role=prime-miner record_height=" << record->height;
+                events.push_back(event.str());
+            }
+        } else {
+            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
+            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t per_composite = composite_pool / pending.size();
+            const std::uint64_t remainder = composite_pool % pending.size();
+            if (record->proof.provider_address == *prime_address) {
+                std::ostringstream event;
+                event << "REWARD prime integer=" << record->integer
+                      << " amount=" << (prime_reward + remainder)
+                      << " role=prime-miner record_height=" << record->height;
+                events.push_back(event.str());
+            }
+            for (const auto& provider : pending) {
+                if (provider.provider == *composite_address) {
+                    std::ostringstream event;
+                    event << "REWARD composite integer=" << record->integer
+                          << " amount=" << per_composite
+                          << " role=composite-provider source=" << provider.source_integer
+                          << " record_height=" << record->height;
+                    events.push_back(event.str());
+                }
+            }
+        }
+        pending.clear();
+    }
+
+    std::size_t start = 0;
+    if (last.has_value() && *last < events.size()) start = events.size() - *last;
+    std::cout << "REWARD_HISTORY " << workdir << " events=" << (events.size() - start) << "\n";
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    std::cout << "PENDING_COMPOSITE_RECORDS " << pending.size() << "\n";
+    return 0;
+}
+
 int updateIndexes(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string workdir = argv[2];
@@ -921,6 +1023,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
               << "  " << argv0 << " balances <workdir>\n"
               << "  " << argv0 << " rewards <workdir>\n"
+              << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -984,6 +1087,10 @@ int main(int argc, char** argv) {
     if (command == "rewards") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return rewardsWorkdir(argc, argv);
+    }
+    if (command == "reward-history") {
+        if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
+        return rewardHistoryWorkdir(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

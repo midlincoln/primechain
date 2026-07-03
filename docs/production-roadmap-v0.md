@@ -144,10 +144,11 @@ Status: first operator wrapper, local math workbench, persistent workdir
 workflow, resumable mining job state, and a rebuildable composite-proof index
 implemented. The current `primechain-client` combines workdir initialization,
 peer sync, add/run/clear mining jobs, job status with pending/complete/failed
-state, authenticated frontier mining, balance and reward reporting, cached
-factorization and Pratt construction from downloaded records, status, query,
+state, authenticated frontier mining, balance reporting, reward totals and
+per-record reward history, cached factorization and Pratt construction from
+downloaded records, status, query,
 range sync, store inspection, miner identity creation, primality checks, and
 divisor search.
 
-Remaining work: richer reward history views, broader local indexes, and future
+Remaining work: reward filtering/export, broader local indexes, and future
 Bitcoin-mapping experiments.

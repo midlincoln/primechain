@@ -638,3 +638,14 @@ Pratt construction instead of rescanning the full chain.
 The index is not consensus state. If it is missing or invalid, it can be rebuilt
 from the canonical record store. Client tests now cover index creation, status,
 cached factorization, and cached Pratt construction from a synced workdir.
+
+## 2026-07-03: Client Reward History
+
+Added workdir `reward-history` reporting to `primechain-client`. The command
+scans the local finalized chain and emits per-record reward events attributable
+to the workdir prime and composite wallets, including prime-miner rewards,
+composite-provider shares, and record-provider fee rewards. `--last N` limits
+the output to recent events for operator use.
+
+The workdir mining integration test now verifies full reward history and recent
+reward slicing after mining through a prime/composite/prime sequence.
