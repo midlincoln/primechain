@@ -106,6 +106,11 @@ struct Status {
     std::string latest_hash;
 };
 
+struct PeerEndpoint {
+    std::string host;
+    int port{0};
+};
+
 std::optional<Socket> connectToNode(const std::string& host, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -199,6 +204,104 @@ std::optional<std::string> requestLine(const std::string& host, int port, const 
     }
     shutdown(socket->fd(), SHUT_WR);
     return readLine(socket->fd());
+}
+
+std::vector<std::string> requestLines(const std::string& host, int port, const std::string& request) {
+    std::vector<std::string> lines;
+    auto socket = connectToNode(host, port);
+    if (!socket.has_value()) {
+        return lines;
+    }
+    if (!writeCommand(socket->fd(), request)) {
+        return lines;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+    while (true) {
+        auto line = readLine(socket->fd());
+        if (!line.has_value()) break;
+        lines.push_back(*line);
+    }
+    return lines;
+}
+
+std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port) {
+    std::vector<PeerEndpoint> peers;
+    const auto lines = requestLines(host, port, "GET_PEERS\n");
+    if (lines.empty()) {
+        return peers;
+    }
+    std::istringstream header(lines.front());
+    std::string tag;
+    std::size_t expected = 0;
+    header >> tag >> expected;
+    if (!header || tag != "PEERS") {
+        return peers;
+    }
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i] == "END_PEERS") break;
+        std::istringstream in(lines[i]);
+        PeerEndpoint peer;
+        in >> tag >> peer.host >> peer.port;
+        if (in && tag == "PEER" && peer.port > 0) {
+            peers.push_back(std::move(peer));
+        }
+    }
+    if (peers.size() > expected) {
+        peers.resize(expected);
+    }
+    return peers;
+}
+
+std::size_t phaseVoteCount(const std::string& response) {
+    const auto marker = response.find("votes=");
+    if (marker == std::string::npos) return 0;
+    try {
+        return static_cast<std::size_t>(std::stoull(response.substr(marker + 6)));
+    } catch (...) {
+        return 0;
+    }
+}
+
+bool remoteQuorumEnabled(const std::string& host, int port) {
+    const auto response = requestLine(host, port, "GET_VALIDATORS\n");
+    if (!response.has_value()) return false;
+    std::istringstream in(*response);
+    std::string tag;
+    std::size_t count = 0;
+    in >> tag >> count;
+    return in && tag == "VALIDATORS" && count == 3;
+}
+
+bool closeCommitPhaseQuorum(const std::string& host, int port, primechain::PrimeValue integer) {
+    std::vector<PeerEndpoint> peers{{host, port}};
+    for (const auto& peer : requestPeerList(host, port)) {
+        bool known = false;
+        for (const auto& existing : peers) {
+            if (existing.host == peer.host && existing.port == peer.port) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) peers.push_back(peer);
+    }
+
+    std::size_t best_votes = 0;
+    for (const auto& peer : peers) {
+        std::ostringstream command;
+        command << "CLOSE_COMMIT_PHASE " << integer << "\n";
+        const auto response = requestLine(peer.host, peer.port, command.str());
+        if (!response.has_value()) {
+            std::cerr << "commit phase close warning from " << peer.host << ":"
+                      << peer.port << ": no response\n";
+            continue;
+        }
+        std::cout << *response << "\n";
+        best_votes = std::max(best_votes, phaseVoteCount(*response));
+        if (best_votes >= 2) {
+            return true;
+        }
+    }
+    return best_votes >= 2;
 }
 
 std::optional<Status> getStatus(const std::string& host, int port) {
@@ -512,6 +615,12 @@ int main(int argc, char** argv) {
             std::cout << *commit_response << "\n";
             if (commit_response->rfind("COMMIT_ACCEPTED ", 0) != 0 &&
                 commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0) {
+                return 1;
+            }
+            if (composite_identity.has_value() && remoteQuorumEnabled(host, port) &&
+                !closeCommitPhaseQuorum(host, port, next)) {
+                std::cerr << "could not close commit phase for " << next
+                          << " with validator quorum\n";
                 return 1;
             }
         }
