@@ -745,3 +745,12 @@ winner, commitment count, active finalization round, validator count, and known
 peer count. This is the first step toward clients coordinating across all
 validators from one consistent mining view instead of inferring state from
 several separate commands.
+## 2026-07-12: Mining View Client Coordination
+
+The frontier miner now consumes `GET_MINING_VIEW` from all discovered quorum
+validators before submitting a composite commitment and again after commitment
+warmup before requesting phase-close votes. A closed phase with a different
+winner causes the miner to clear pending composite state and back off; a closing
+phase causes it to retry after syncing instead of adding another competing
+commitment. Added a two-workdir quorum race regression test so concurrent
+clients must both reach the same target without wedging validator sidecars.

@@ -515,6 +515,15 @@ add_test(
 )
 
 add_test(
+    NAME quorum_two_client_workdirs_race_to_same_target
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/quorum_two_client_workdir_race.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/quorum-two-client-workdir-race
+)
+
+add_test(
     NAME client_workdir_mines_from_synced_history
     COMMAND
         /bin/sh -c

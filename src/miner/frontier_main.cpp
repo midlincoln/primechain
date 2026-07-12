@@ -122,6 +122,22 @@ struct CommitPhaseStatus {
     std::string winner;
 };
 
+struct MiningView {
+    PeerEndpoint peer;
+    primechain::PrimeValue frontier{0};
+    primechain::PrimeValue target{0};
+    bool has_genesis{false};
+    std::string latest_hash;
+    std::string phase_state;
+    std::size_t phase_votes{0};
+    std::string snapshot_hash;
+    std::string winner;
+    std::size_t commitment_count{0};
+    std::uint64_t finalization_round{0};
+    std::size_t validator_count{0};
+    std::size_t peer_count{0};
+};
+
 struct PendingComposite {
     primechain::PrimeValue integer{0};
     primechain::PrimeValue d{0};
@@ -345,6 +361,71 @@ std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
         if (!known) peers.push_back(peer);
     }
     return peers;
+}
+
+int phaseRank(const std::string& state) {
+    if (state == "CLOSED") return 3;
+    if (state == "CLOSING") return 2;
+    if (state == "OPEN") return 1;
+    return 0;
+}
+
+std::optional<MiningView> requestMiningView(
+    const PeerEndpoint& peer,
+    primechain::PrimeValue integer) {
+    std::ostringstream command;
+    command << "GET_MINING_VIEW " << integer << "\n";
+    const auto response = requestLine(peer.host, peer.port, command.str());
+    if (!response.has_value()) return std::nullopt;
+
+    std::istringstream in(*response);
+    std::string tag;
+    std::uint64_t has_genesis = 0;
+    MiningView view;
+    view.peer = peer;
+    in >> tag
+       >> view.frontier
+       >> view.target
+       >> has_genesis
+       >> view.latest_hash
+       >> view.phase_state
+       >> view.phase_votes
+       >> view.snapshot_hash
+       >> view.winner
+       >> view.commitment_count
+       >> view.finalization_round
+       >> view.validator_count
+       >> view.peer_count;
+    if (!in || tag != "MINING_VIEW" || view.target != integer ||
+        phaseRank(view.phase_state) == 0) {
+        return std::nullopt;
+    }
+    view.has_genesis = has_genesis != 0;
+    return view;
+}
+
+std::vector<MiningView> requestMiningViews(
+    const std::vector<PeerEndpoint>& peers,
+    primechain::PrimeValue integer) {
+    std::vector<MiningView> views;
+    for (const auto& peer : peers) {
+        const auto view = requestMiningView(peer, integer);
+        if (view.has_value()) views.push_back(*view);
+    }
+    return views;
+}
+
+std::optional<MiningView> strongestMiningView(const std::vector<MiningView>& views) {
+    std::optional<MiningView> best;
+    for (const auto& view : views) {
+        if (!best.has_value() ||
+            phaseRank(view.phase_state) > phaseRank(best->phase_state) ||
+            (phaseRank(view.phase_state) == phaseRank(best->phase_state) &&
+             view.phase_votes > best->phase_votes)) {
+            best = view;
+        }
+    }
+    return best;
 }
 
 std::optional<CommitPhaseStatus> requestCommitPhase(
@@ -785,8 +866,41 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        const auto local_provider = composite_identity.has_value()
+            ? composite_identity->address : composite_miner;
 
-        if (commit_request.has_value()) {
+        auto adoptMiningView = [&](const MiningView& view, bool can_reveal_local) -> std::optional<bool> {
+            if (view.phase_state == "CLOSED") {
+                if (view.winner == local_provider && can_reveal_local) {
+                    reveal_peer = view.peer;
+                    return true;
+                }
+                if (view.winner != local_provider) {
+                    clearPendingComposite(pending_composite_path);
+                }
+                if (retryCurrentInteger("commit phase already won by " + view.winner)) return false;
+                return std::nullopt;
+            }
+            if (view.phase_state == "CLOSING") {
+                if (retryCurrentInteger("commit phase is closing on " + view.peer.host + ":" +
+                                        std::to_string(view.peer.port))) return false;
+                return std::nullopt;
+            }
+            return true;
+        };
+
+        if (needs_quorum_phase) {
+            const auto views = requestMiningViews(quorum_peers, next);
+            const auto strongest = strongestMiningView(views);
+            if (strongest.has_value()) {
+                const auto decision = adoptMiningView(*strongest, reused_pending_composite);
+                if (!decision.has_value()) return 1;
+                if (!*decision) continue;
+            }
+        }
+
+        bool local_commit_available = reused_pending_composite;
+        if (commit_request.has_value() && !reveal_peer.has_value()) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
@@ -800,12 +914,20 @@ int main(int argc, char** argv) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
             }
-            const auto local_provider = composite_identity.has_value()
-                ? composite_identity->address : composite_miner;
             if (needs_quorum_phase && !phase_already_closed) {
                 warmQuorumCommitments(quorum_peers, *commit_request);
             }
-            if (needs_quorum_phase) {
+            local_commit_available = true;
+            if (needs_quorum_phase && !phase_already_closed) {
+                const auto views = requestMiningViews(quorum_peers, next);
+                const auto strongest = strongestMiningView(views);
+                if (strongest.has_value() && strongest->phase_state != "OPEN") {
+                    const auto decision = adoptMiningView(*strongest, local_commit_available);
+                    if (!decision.has_value()) return 1;
+                    if (!*decision) continue;
+                }
+            }
+            if (needs_quorum_phase && !reveal_peer.has_value()) {
                 auto useClosedPhase = [&](const CommitPhaseStatus& closed) -> bool {
                     if (closed.winner == local_provider) {
                         reveal_peer = closed.peer;
