@@ -763,3 +763,16 @@ first sync does not advance. It records `waiting-for-race-winner`, polls and
 syncs briefly for the winning finalized record, then continues once the local
 frontier advances. This lets the losing client in a two-workdir public-demo race
 finish automatically after the winning client finalizes the integer.
+
+## 2026-07-12: Commit-Phase Timeout Recovery
+
+Three concurrent public-demo clients exposed a liveness gap before record
+finalization: validators could close or partially close a commit phase for a
+winning commitment, while the winning client failed to reveal and finalize the
+record. Added a domain-separated ML-DSA commit-phase timeout vote and
+`TIMEOUT_COMMIT_PHASE`. Any client can request the timeout, but validators only
+clear temporary commitments and phase votes for the current frontier after two
+validator signatures certify abandoning the stalled phase. `run-jobs` now calls
+this timeout path after waiting for a race winner that never propagates. This is
+a controlled-testnet liveness mechanism; embedding commit-timeout evidence into
+final records remains a future auditability improvement.

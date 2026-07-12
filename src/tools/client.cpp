@@ -1121,8 +1121,22 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["updated_at"] = nowSeconds();
             state["last_result"] = "waiting-for-race-winner";
             if (!writeMineState(workdir, state)) return 1;
-            const auto advanced = waitForFrontierAdvance(
+            auto advanced = waitForFrontierAdvance(
                 argv0, workdir, *peer, before_mine.frontier, *target);
+            if (!advanced.has_value()) {
+                const auto timeout_target = before_mine.frontier + 1;
+                state["last_result"] = "requesting-commit-phase-timeout";
+                state["updated_at"] = nowSeconds();
+                if (!writeMineState(workdir, state)) return 1;
+                runTool(argv0, "primechain-sync-query", {
+                    peer->host,
+                    std::to_string(peer->port),
+                    "TIMEOUT_COMMIT_PHASE",
+                    std::to_string(timeout_target),
+                });
+                advanced = waitForFrontierAdvance(
+                    argv0, workdir, *peer, before_mine.frontier, *target);
+            }
             if (advanced.has_value()) {
                 local = *advanced;
                 state["last_synced_frontier"] = std::to_string(local.frontier);

@@ -846,6 +846,16 @@ add_test(
 
 
 add_test(
+    NAME commit_phase_timeout_reopens_stalled_phase
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/commit_phase_timeout_tests.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        $<TARGET_FILE:primechain-composite-commitment>
+        ${CMAKE_CURRENT_BINARY_DIR}/commit-phase-timeout
+)
+
+add_test(
     NAME quorum_commit_phase_requires_two_signed_votes
     COMMAND
         /bin/sh -c

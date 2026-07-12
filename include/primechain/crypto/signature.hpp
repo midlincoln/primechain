@@ -91,6 +91,11 @@ Bytes commitPhaseVoteSigningPayload(
     PrimeValue integer,
     const Hash256& snapshot_hash,
     const Address& validator_address);
+Bytes commitPhaseTimeoutSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    std::uint64_t new_round,
+    const Address& validator_address);
 Bytes validatorEpochVoteSigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

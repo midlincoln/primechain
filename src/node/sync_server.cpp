@@ -62,6 +62,15 @@ struct PeerEndpoint {
     int port{0};
 };
 
+struct CommitPhaseTimeoutVote {
+    primechain::Address validator_address;
+    std::vector<std::uint8_t> public_key;
+    primechain::Hash256 previous_record_hash{};
+    primechain::PrimeValue integer{0};
+    std::uint64_t new_round{0};
+    std::vector<std::uint8_t> signature;
+};
+
 bool samePeer(const PeerEndpoint& left, const PeerEndpoint& right) {
     return left.host == right.host && left.port == right.port;
 }
@@ -296,6 +305,8 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
            line.rfind("SIGN_ROUND_CHANGE ", 0) == 0 ||
+           line.rfind("SIGN_COMMIT_PHASE_TIMEOUT ", 0) == 0 ||
+           line.rfind("TIMEOUT_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SIGN_RECORD_CANDIDATE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
@@ -984,6 +995,39 @@ std::optional<primechain::protocol::RoundChangeVoteV1> requestRoundChangeVote(
     return vote;
 }
 
+std::optional<CommitPhaseTimeoutVote> requestCommitPhaseTimeoutVote(
+    const PeerEndpoint& peer,
+    const CommitPhaseTimeoutVote& proposer_vote,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) { error = "could not connect to validator peer"; return std::nullopt; }
+    std::ostringstream command;
+    command << "SIGN_COMMIT_PHASE_TIMEOUT "
+            << primechain::crypto::toHex(proposer_vote.previous_record_hash) << " "
+            << proposer_vote.integer << " " << proposer_vote.new_round << " "
+            << proposer_vote.validator_address << " "
+            << bytesToHex(proposer_vote.public_key) << " "
+            << bytesToHex(proposer_vote.signature) << "\n";
+    if (!writeCommand(socket->fd(), command.str())) { error = "could not submit commit-phase timeout"; return std::nullopt; }
+    shutdown(socket->fd(), SHUT_WR);
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) { error = "validator did not return commit-phase timeout vote"; return std::nullopt; }
+    std::istringstream in(*response);
+    std::string tag, previous_hex, public_hex, signature_hex, extra;
+    CommitPhaseTimeoutVote vote;
+    in >> tag >> previous_hex >> vote.integer >> vote.new_round
+       >> vote.validator_address >> public_hex >> signature_hex;
+    const auto previous = parseHash(previous_hex);
+    if (!in || tag != "COMMIT_PHASE_TIMEOUT_VOTE" || !previous.has_value() || (in >> extra)) {
+        error = *response;
+        return std::nullopt;
+    }
+    vote.previous_record_hash = *previous;
+    vote.public_key = hexToBytes(public_hex);
+    vote.signature = hexToBytes(signature_hex);
+    return vote;
+}
+
 bool downloadRecordRange(
     const std::string& host,
     int port,
@@ -1338,6 +1382,14 @@ public:
             }
             if (line->rfind("SIGN_ROUND_CHANGE ", 0) == 0) {
                 signRoundChange(fd, *line);
+                continue;
+            }
+            if (line->rfind("SIGN_COMMIT_PHASE_TIMEOUT ", 0) == 0) {
+                signCommitPhaseTimeout(fd, *line);
+                continue;
+            }
+            if (line->rfind("TIMEOUT_COMMIT_PHASE ", 0) == 0) {
+                timeoutCommitPhase(fd, *line);
                 continue;
             }
             if (line->rfind("SIGN_RECORD_CANDIDATE ", 0) == 0) {
@@ -2406,6 +2458,208 @@ private:
             return false;
         }
         return true;
+    }
+
+    std::size_t commitPhaseTimeoutVoteCount(
+        primechain::PrimeValue integer,
+        std::uint64_t new_round) const {
+        std::size_t count = 0;
+        for (const auto& entry : commit_phase_timeouts_) {
+            if (std::get<0>(entry.first) == integer && std::get<1>(entry.first) == new_round) ++count;
+        }
+        return count;
+    }
+
+    bool commitPhaseStarted(primechain::PrimeValue integer) const {
+        if (phaseFrozen(integer)) return true;
+        for (const auto& entry : commitments_) {
+            if (entry.first.first == integer) return true;
+        }
+        return false;
+    }
+
+    bool verifyCommitPhaseTimeoutVote(
+        const CommitPhaseTimeoutVote& vote,
+        std::string& error) const {
+        error.clear();
+        if (!quorumEnabled()) { error = "validator quorum is not configured"; return false; }
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        const auto target = node.status().frontier_integer + 1;
+        if (vote.integer != target || vote.previous_record_hash != node.status().latest_record_hash ||
+            vote.new_round != 2 ||
+            !commitPhaseStarted(vote.integer) ||
+            !std::binary_search(validator_set_.begin(), validator_set_.end(), vote.validator_address) ||
+            vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
+            error = "invalid commit-phase timeout vote target";
+            return false;
+        }
+        return primechain::crypto::verifyProtocolMessageSignature(
+            vote.public_key,
+            primechain::crypto::commitPhaseTimeoutSigningPayload(
+                vote.previous_record_hash, vote.integer, vote.new_round, vote.validator_address),
+            vote.signature, error);
+    }
+
+    bool acceptCommitPhaseTimeoutVote(
+        const CommitPhaseTimeoutVote& vote,
+        std::string& error) {
+        if (!verifyCommitPhaseTimeoutVote(vote, error)) return false;
+        const auto key = std::make_tuple(vote.integer, vote.new_round, vote.validator_address);
+        const auto existing = commit_phase_timeouts_.find(key);
+        if (existing != commit_phase_timeouts_.end()) {
+            if (existing->second.public_key == vote.public_key) return true;
+            error = "validator already submitted a different commit-phase timeout vote";
+            return false;
+        }
+        commit_phase_timeouts_[key] = vote;
+        return true;
+    }
+
+    CommitPhaseTimeoutVote makeLocalCommitPhaseTimeoutVote(
+        const primechain::Hash256& previous_hash,
+        primechain::PrimeValue integer,
+        std::uint64_t new_round,
+        std::string& error) const {
+        CommitPhaseTimeoutVote vote;
+        if (!validator_identity_.has_value()) { error = "this node has no validator identity"; return vote; }
+        vote.validator_address = validator_identity_->address;
+        vote.public_key = validator_identity_->public_key;
+        vote.previous_record_hash = previous_hash;
+        vote.integer = integer;
+        vote.new_round = new_round;
+        const auto signature = primechain::crypto::signProtocolMessage(
+            validator_identity_->private_key,
+            primechain::crypto::commitPhaseTimeoutSigningPayload(
+                previous_hash, integer, new_round, vote.validator_address), error);
+        if (signature.has_value()) vote.signature = *signature;
+        return vote;
+    }
+
+    bool clearCommitPhaseForTimeout(primechain::PrimeValue integer, std::string& error) {
+        bool commitments_changed = false;
+        for (auto it = commitments_.begin(); it != commitments_.end();) {
+            if (it->first.first == integer) { it = commitments_.erase(it); commitments_changed = true; }
+            else ++it;
+        }
+        bool phases_changed = false;
+        for (auto it = phase_votes_.begin(); it != phase_votes_.end();) {
+            if (it->first.first == integer) { it = phase_votes_.erase(it); phases_changed = true; }
+            else ++it;
+        }
+        bool timeout_changed = false;
+        for (auto it = commit_phase_timeouts_.begin(); it != commit_phase_timeouts_.end();) {
+            if (std::get<0>(it->first) == integer) { it = commit_phase_timeouts_.erase(it); timeout_changed = true; }
+            else ++it;
+        }
+        (void)timeout_changed;
+        if (commitments_changed && !persistCommitments(error)) return false;
+        if (phases_changed && !persistPhaseVotes(error)) return false;
+        return true;
+    }
+
+    bool applyCommitPhaseTimeoutIfCertified(
+        primechain::PrimeValue integer,
+        std::uint64_t new_round,
+        std::string& error) {
+        if (commitPhaseTimeoutVoteCount(integer, new_round) < 2) return true;
+        return clearCommitPhaseForTimeout(integer, error);
+    }
+
+    void timeoutCommitPhase(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, extra;
+        primechain::PrimeValue integer = 0;
+        in >> command >> integer;
+        if (!in || command != "TIMEOUT_COMMIT_PHASE" || (in >> extra)) {
+            writeAll(fd, "ERROR invalid TIMEOUT_COMMIT_PHASE\n");
+            return;
+        }
+        if (!validator_identity_.has_value()) {
+            writeAll(fd, "ERROR this node has no validator identity\n");
+            return;
+        }
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (integer != node.status().frontier_integer + 1) {
+            writeAll(fd, "ERROR commit-phase timeout must target next integer "
+                + std::to_string(node.status().frontier_integer + 1) + "\n");
+            return;
+        }
+        if (!advanceCommitPhaseRound(node.status().latest_record_hash, integer, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeAll(fd, "COMMIT_PHASE_TIMED_OUT " + std::to_string(integer) + "\n");
+    }
+
+    void signCommitPhaseTimeout(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, previous_hex, proposer_public_hex, proposer_signature_hex, extra;
+        CommitPhaseTimeoutVote proposer;
+        in >> command >> previous_hex >> proposer.integer >> proposer.new_round
+           >> proposer.validator_address >> proposer_public_hex >> proposer_signature_hex;
+        const auto previous = parseHash(previous_hex);
+        if (!in || command != "SIGN_COMMIT_PHASE_TIMEOUT" || !previous.has_value() || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SIGN_COMMIT_PHASE_TIMEOUT\n");
+            return;
+        }
+        proposer.previous_record_hash = *previous;
+        proposer.public_key = hexToBytes(proposer_public_hex);
+        proposer.signature = hexToBytes(proposer_signature_hex);
+        std::string error;
+        if (!acceptCommitPhaseTimeoutVote(proposer, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        auto local = makeLocalCommitPhaseTimeoutVote(
+            proposer.previous_record_hash, proposer.integer, proposer.new_round, error);
+        if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!applyCommitPhaseTimeoutIfCertified(proposer.integer, proposer.new_round, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeCommand(fd, "COMMIT_PHASE_TIMEOUT_VOTE "
+            + primechain::crypto::toHex(local.previous_record_hash) + " "
+            + std::to_string(local.integer) + " " + std::to_string(local.new_round) + " "
+            + local.validator_address + " " + bytesToHex(local.public_key) + " "
+            + bytesToHex(local.signature) + "\n");
+    }
+
+    bool advanceCommitPhaseRound(
+        const primechain::Hash256& previous_hash,
+        primechain::PrimeValue integer,
+        std::string& error) {
+        constexpr std::uint64_t next_round = 2;
+        auto local = makeLocalCommitPhaseTimeoutVote(previous_hash, integer, next_round, error);
+        if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) return false;
+        for (const auto& peer : peers_) {
+            if (commitPhaseTimeoutVoteCount(integer, next_round) >= 2) break;
+            std::string peer_error;
+            const auto vote = requestCommitPhaseTimeoutVote(peer, local, peer_error);
+            if (!vote.has_value()) {
+                std::cerr << "commit-phase timeout warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
+            if (!acceptCommitPhaseTimeoutVote(*vote, peer_error)) {
+                std::cerr << "commit-phase timeout rejected from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
+        }
+        if (commitPhaseTimeoutVoteCount(integer, next_round) < 2) {
+            error = "could not collect two validator commit-phase timeout signatures";
+            return false;
+        }
+        return clearCommitPhaseForTimeout(integer, error);
     }
 
     primechain::protocol::RoundChangeVoteV1 makeLocalRoundChangeVote(
@@ -3744,6 +3998,13 @@ private:
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
+                std::string timeout_error;
+                if (finalization_timeout_ms_ > 0 &&
+                    advanceCommitPhaseRound(record.previous_record_hash, record.integer, timeout_error)) {
+                    writeAll(fd, "ERROR commit phase timed out; retry integer "
+                        + std::to_string(record.integer) + "\n");
+                    return;
+                }
                 writeAll(fd, "ERROR could not finalize composite record: " + error + "\n");
                 return;
             }
@@ -4238,6 +4499,8 @@ private:
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
         primechain::protocol::RoundChangeVoteV1> round_changes_;
+    std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
+        CommitPhaseTimeoutVote> commit_phase_timeouts_;
 };
 
 struct Options {
