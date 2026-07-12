@@ -610,6 +610,7 @@ int main(int argc, char** argv) {
         const primechain::PrimeValue next = effective_frontier + 1;
         std::string request;
         std::optional<std::string> commit_request;
+        bool reused_pending_composite = false;
         if (primechain::math::isPrime(next)) {
             const auto proof = primechain::math::makePrattProof(next, proofs);
             if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
@@ -652,6 +653,7 @@ int main(int argc, char** argv) {
                     pending->provider == (composite_identity.has_value() ? composite_identity->address : composite_miner) &&
                     pending->d == proof->d && pending->e == proof->e) {
                     nonce = pending->nonce;
+                    reused_pending_composite = true;
                 } else {
                     PendingComposite replacement;
                     replacement.integer = next;
@@ -699,8 +701,11 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << *commit_response << "\n";
+            const bool phase_already_closed =
+                commit_response->find("commit phase is closing or closed") != std::string::npos;
             if (commit_response->rfind("COMMIT_ACCEPTED ", 0) != 0 &&
-                commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0) {
+                commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0 &&
+                !(reused_pending_composite && phase_already_closed)) {
                 return 1;
             }
             if (needs_quorum_phase) {
