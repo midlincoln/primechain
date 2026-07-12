@@ -374,6 +374,7 @@ std::string chainPath(const std::string& workdir) { return joinPath(dataDir(work
 std::string primeWalletPath(const std::string& workdir) { return joinPath(walletsDir(workdir), "prime.wallet"); }
 std::string compositeWalletPath(const std::string& workdir) { return joinPath(walletsDir(workdir), "composite.wallet"); }
 std::string mineStatePath(const std::string& workdir) { return joinPath(jobsDir(workdir), "mine.state"); }
+std::string pendingCompositePath(const std::string& workdir) { return joinPath(jobsDir(workdir), "pending-composite.state"); }
 std::string compositeProofIndexPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "composite-proofs.idx"); }
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
@@ -1082,6 +1083,8 @@ int runJobs(const char* argv0, int argc, char** argv) {
         compositeWalletPath(workdir),
         "--proof-store",
         chainPath(workdir),
+        "--pending-composite",
+        pendingCompositePath(workdir),
     });
     if (rc != 0) {
         state["status"] = "failed";

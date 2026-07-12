@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -110,6 +111,55 @@ struct PeerEndpoint {
     std::string host;
     int port{0};
 };
+
+struct PendingComposite {
+    primechain::PrimeValue integer{0};
+    primechain::PrimeValue d{0};
+    primechain::PrimeValue e{0};
+    std::uint64_t nonce{0};
+    std::string provider;
+};
+
+std::optional<PendingComposite> loadPendingComposite(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) return std::nullopt;
+    PendingComposite pending;
+    std::string key;
+    while (in >> key) {
+        if (key == "integer") in >> pending.integer;
+        else if (key == "d") in >> pending.d;
+        else if (key == "e") in >> pending.e;
+        else if (key == "nonce") in >> pending.nonce;
+        else if (key == "provider") in >> pending.provider;
+        else {
+            std::string ignored;
+            in >> ignored;
+        }
+    }
+    if (!in.eof() || pending.integer < 2 || pending.d < 2 || pending.e < 2 ||
+        pending.nonce == 0 || pending.provider.empty()) {
+        return std::nullopt;
+    }
+    return pending;
+}
+
+bool writePendingComposite(const std::string& path, const PendingComposite& pending) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        std::cerr << "could not write pending composite state " << path << "\n";
+        return false;
+    }
+    out << "integer " << pending.integer << "\n"
+        << "d " << pending.d << "\n"
+        << "e " << pending.e << "\n"
+        << "nonce " << pending.nonce << "\n"
+        << "provider " << pending.provider << "\n";
+    return static_cast<bool>(out);
+}
+
+void clearPendingComposite(const std::optional<std::string>& path) {
+    if (path.has_value()) unlink(path->c_str());
+}
 
 std::optional<Socket> connectToNode(const std::string& host, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -498,12 +548,16 @@ int main(int argc, char** argv) {
     std::optional<primechain::wallet::MinerIdentity> prime_identity;
     std::optional<primechain::wallet::MinerIdentity> composite_identity;
     std::optional<std::string> proof_store_path;
+    std::optional<std::string> pending_composite_path;
     int argument = 4;
     while (argument < argc) {
         const std::string option = argv[argument++];
         if (option == "--proof-store") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             proof_store_path = argv[argument++];
+        } else if (option == "--pending-composite") {
+            if (argument >= argc) { printUsage(argv[0]); return 1; }
+            pending_composite_path = argv[argument++];
         } else if (option == "--prime-identity" || option == "--composite-identity") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             primechain::wallet::MinerIdentity identity;
@@ -591,7 +645,23 @@ int main(int argc, char** argv) {
                 return 1;
             }
             proofs.add(*proof);
-            const std::uint64_t nonce = randomNonce();
+            std::uint64_t nonce = randomNonce();
+            if (pending_composite_path.has_value()) {
+                const auto pending = loadPendingComposite(*pending_composite_path);
+                if (pending.has_value() && pending->integer == next &&
+                    pending->provider == (composite_identity.has_value() ? composite_identity->address : composite_miner) &&
+                    pending->d == proof->d && pending->e == proof->e) {
+                    nonce = pending->nonce;
+                } else {
+                    PendingComposite replacement;
+                    replacement.integer = next;
+                    replacement.d = proof->d;
+                    replacement.e = proof->e;
+                    replacement.nonce = nonce;
+                    replacement.provider = composite_identity.has_value() ? composite_identity->address : composite_miner;
+                    if (!writePendingComposite(*pending_composite_path, replacement)) return 1;
+                }
+            }
             if (composite_identity.has_value()) {
                 std::string error;
                 commit_request = signedCompositeCommitSubmission(
@@ -683,6 +753,9 @@ int main(int argc, char** argv) {
         }
         if (!submitted_ok) {
             return 1;
+        }
+        if (commit_request.has_value()) {
+            clearPendingComposite(pending_composite_path);
         }
         ++submitted;
     }
