@@ -288,9 +288,11 @@ bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_COMMIT_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
            line.rfind("CLOSE_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
            line.rfind("SIGN_ROUND_CHANGE ", 0) == 0 ||
@@ -1093,7 +1095,7 @@ bool submitCommitToPeer(
                 << primechain::crypto::toHex(commitment.commitment_hash) << " "
                 << commitment.provider_address << "\n";
     } else {
-        command << "SUBMIT_SIGNED_COMMIT " << commitment.integer << " "
+        command << "SUBMIT_SIGNED_COMMIT_PEER " << commitment.integer << " "
                 << primechain::crypto::toHex(commitment.commitment_hash) << " "
                 << commitment.provider_address << " "
                 << bytesToHex(commitment.public_key) << " "
@@ -1279,7 +1281,11 @@ public:
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0) {
-                submitSignedCommit(fd, *line);
+                submitSignedCommit(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_SIGNED_COMMIT_PEER ", 0) == 0) {
+                submitSignedCommit(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_COMMIT ", 0) == 0) {
@@ -1307,7 +1313,11 @@ public:
                 continue;
             }
             if (line->rfind("SUBMIT_PHASE_VOTE ", 0) == 0) {
-                submitPhaseVote(fd, *line);
+                submitPhaseVote(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0) {
+                submitPhaseVote(fd, *line, false);
                 continue;
             }
             if (*line == "GET_EPOCH_VOTES") {
@@ -1516,6 +1526,10 @@ public:
 
     bool hasKnownPeers() const {
         return !peers_.empty();
+    }
+
+    bool peerDiscoveryEnabled() const {
+        return !quorumEnabled();
     }
 
     bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) {
@@ -2427,14 +2441,27 @@ private:
         proposer.signature = hexToBytes(proposer_signature_hex);
         std::string error;
         if (!acceptRoundChangeVote(proposer, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
+            std::string sync_error;
+            if (!syncFromPeers(peers_, sync_error) || !acceptRoundChangeVote(proposer, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
         }
         auto local = makeLocalRoundChangeVote(
             proposer.previous_record_hash, proposer.integer, proposer.new_round, error);
         if (local.signature.empty() || !acceptRoundChangeVote(local, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
+            std::string sync_error;
+            if (!syncFromPeers(peers_, sync_error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            error.clear();
+            local = makeLocalRoundChangeVote(
+                proposer.previous_record_hash, proposer.integer, proposer.new_round, error);
+            if (local.signature.empty() || !acceptRoundChangeVote(local, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
         }
         writeCommand(fd, "ROUND_CHANGE_VOTE "
             + primechain::crypto::toHex(local.previous_record_hash) + " "
@@ -2465,8 +2492,16 @@ private:
         primechain::protocol::ValidatorVoteV0 vote;
         std::string error;
         if (!makeLocalFinalizationVote(*kind, payload, &proposer_vote, vote, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
+            std::string sync_error;
+            if (!syncFromPeers(peers_, sync_error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            error.clear();
+            if (!makeLocalFinalizationVote(*kind, payload, &proposer_vote, vote, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
         }
         writeCommand(fd, "FINALIZATION_VOTE " + vote.validator_address + " "
             + bytesToHex(vote.public_key) + " "
@@ -2525,9 +2560,17 @@ private:
             if (record.finalized_by.votes.size() >= 2) break;
             std::string peer_error;
             const auto vote = requestRecordFinalizationVote(peer, kind, payload, local_vote, peer_error);
-            if (!vote.has_value()) continue;
+            if (!vote.has_value()) {
+                std::cerr << "finalization vote warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
             if (!acceptFinalizationVote(*vote, candidate_hash, round,
-                    record.finalized_by.votes, peer_error)) continue;
+                    record.finalized_by.votes, peer_error)) {
+                std::cerr << "finalization vote rejected from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
         }
         std::sort(record.finalized_by.votes.begin(), record.finalized_by.votes.end(),
             [](const auto& left, const auto& right) {
@@ -2556,8 +2599,16 @@ private:
             if (certifiedRoundChanges(integer, new_round).size() >= 2) break;
             std::string peer_error;
             const auto vote = requestRoundChangeVote(peer, local, peer_error);
-            if (!vote.has_value()) continue;
-            if (!acceptRoundChangeVote(*vote, peer_error)) continue;
+            if (!vote.has_value()) {
+                std::cerr << "round-change warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
+            if (!acceptRoundChangeVote(*vote, peer_error)) {
+                std::cerr << "round-change rejected from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
         }
         if (certifiedRoundChanges(integer, new_round).size() < 2) {
             error = "could not collect two validator round-change signatures";
@@ -2581,11 +2632,22 @@ private:
         }
         if (collectFinalizationVotes(record, kind, round, error)) return true;
         if (finalization_timeout_ms_ <= 0) return false;
-        std::cerr << "finalization round " << round << " stalled for integer "
-                  << record.integer << "; waiting " << finalization_timeout_ms_
-                  << " ms before round change\n";
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(finalization_timeout_ms_));
+        const auto retry_delay = std::chrono::milliseconds(
+            std::max(25, std::min(250, finalization_timeout_ms_ / 10)));
+        const auto retry_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(finalization_timeout_ms_);
+        while (std::chrono::steady_clock::now() < retry_deadline) {
+            std::this_thread::sleep_for(retry_delay);
+            std::string retry_error;
+            if (collectFinalizationVotes(record, kind, round, retry_error)) return true;
+            if (!retry_error.empty()) error = retry_error;
+        }
+
+        std::cerr << "finalization round " << round << " stalled for integer "
+                  << record.integer << "; requesting round change after "
+                  << finalization_timeout_ms_ << " ms retry window\n";
+
         error.clear();
         const std::uint64_t next_round = round + 1;
         if (!advanceFinalizationRound(
@@ -2732,7 +2794,7 @@ private:
             return false;
         }
         std::ostringstream command;
-        command << "SUBMIT_PHASE_VOTE " << vote.integer << " "
+        command << "SUBMIT_PHASE_VOTE_PEER " << vote.integer << " "
                 << primechain::crypto::toHex(vote.snapshot_hash) << " "
                 << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
                 << bytesToHex(vote.signature) << "\n";
@@ -2869,14 +2931,14 @@ private:
             + " votes=" + std::to_string(phaseVoteCount(integer)) + "\n");
     }
 
-    void submitPhaseVote(int fd, const std::string& line) {
+    void submitPhaseVote(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
         std::string command, snapshot_hex, address, public_key_hex, signature_hex, extra;
         primechain::PrimeValue integer = 0;
         in >> command >> integer >> snapshot_hex >> address >> public_key_hex >> signature_hex;
         const auto snapshot = parseHash(snapshot_hex);
-        if (!in || command != "SUBMIT_PHASE_VOTE" || !snapshot.has_value() ||
-            (in >> extra)) {
+        if (!in || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER") ||
+            !snapshot.has_value() || (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_PHASE_VOTE\n");
             return;
         }
@@ -2888,7 +2950,7 @@ private:
         vote.signature = hexToBytes(signature_hex);
         const bool duplicate = phase_votes_.find(std::make_pair(integer, address)) != phase_votes_.end();
         std::string error;
-        if (!acceptPhaseVote(vote, error, true)) {
+        if (!acceptPhaseVote(vote, error, propagate)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
@@ -3156,7 +3218,7 @@ private:
         if (!persistEpochVotes(error)) std::cerr << "epoch vote cleanup warning: " << error << "\n";
     }
 
-    void submitSignedCommit(int fd, const std::string& line) {
+    void submitSignedCommit(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
         std::string command;
         primechain::PrimeValue g = 0;
@@ -3169,7 +3231,8 @@ private:
         const auto commitment_hash = parseHash(commitment_hex);
         const auto public_key = hexToBytes(public_key_hex);
         const auto signature = hexToBytes(signature_hex);
-        if (!in || command != "SUBMIT_SIGNED_COMMIT" || !commitment_hash.has_value() ||
+        if (!in || (command != "SUBMIT_SIGNED_COMMIT" && command != "SUBMIT_SIGNED_COMMIT_PEER") ||
+            !commitment_hash.has_value() ||
             public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
             signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) || (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_SIGNED_COMMIT\n");
@@ -3237,7 +3300,7 @@ private:
             writeAll(fd, "ERROR could not persist commitment: " + error + "\n");
             return;
         }
-        propagateCommit(stored);
+        if (propagate) propagateCommit(stored);
         writeAll(fd, "COMMIT_ACCEPTED " + std::to_string(g) + " " + commitment_hex + "\n");
     }
 
@@ -4283,7 +4346,9 @@ int main(int argc, char** argv) {
         validator_identity);
     if (!options.peers.empty()) {
         std::string error;
-        sync_server.discoverPeersFromKnown();
+        if (sync_server.peerDiscoveryEnabled()) {
+            sync_server.discoverPeersFromKnown();
+        }
         if (!sync_server.syncFromKnownPeers(error)) {
             std::cerr << "peer sync failed: " << error << "\n";
             return 1;
@@ -4351,7 +4416,9 @@ int main(int argc, char** argv) {
             return;
         }
         std::string error;
-        sync_server.discoverPeersFromKnown();
+        if (sync_server.peerDiscoveryEnabled()) {
+            sync_server.discoverPeersFromKnown();
+        }
         sync_server.syncFromKnownPeers(error);
         next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
     };

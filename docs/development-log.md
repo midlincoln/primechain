@@ -672,3 +672,20 @@ transition summary, and finalization summary without exposing the raw wire hex.
 
 Client tests now cover decoding a prime record's Pratt factorization and a
 composite record's divisor/cofactor fields.
+
+## 2026-07-12: Quorum Client Mining Stability
+
+Fixed the public-testnet client workflow that could mine a prime and one
+composite, then stop on the next composite with a stalled finalization or
+round-change error. The frontier miner now closes the commit phase across every
+known validator and reveals through a validator that has observed quorum, rather
+than stopping at the first node to report two phase votes.
+
+Quorum-side propagation now distinguishes public submissions from peer-forwarded
+commitments and phase votes, so validators store forwarded state without
+synchronously rebroadcasting it back through the same request path. Validators
+also retry candidate signing after a peer sync when their local chain is stale.
+Automatic peer-of-peer discovery remains enabled for non-quorum nodes, while
+quorum validator topology is explicit until node identity and advertised address
+handling are added. A three-validator workdir regression now mines from genesis
+to frontier 10 in one client run.

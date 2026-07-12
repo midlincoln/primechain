@@ -801,7 +801,7 @@ Peer discovery is first-pass and development-only. Nodes can list and add peers:
 ./build/primechain-sync-query 127.0.0.1 18889 ADD_PEER 127.0.0.1 18890
 ```
 
-On startup and during periodic sync, a node asks known peers for their peer lists and adds discovered peers up to the current cap.
+On startup and during periodic sync, a non-quorum node asks known peers for their peer lists and adds discovered peers up to the current cap. Validator quorum nodes currently use only explicitly configured peers; this avoids same-port self-discovery and synchronous rebroadcast loops until peer identities and advertised public addresses are formalized.
 
 ### Current Identity Model
 

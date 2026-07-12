@@ -340,6 +340,7 @@ std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
 std::optional<PeerEndpoint> closeCommitPhaseQuorum(
     const std::vector<PeerEndpoint>& peers,
     primechain::PrimeValue integer) {
+    std::optional<PeerEndpoint> quorum_peer;
     for (const auto& peer : peers) {
         std::ostringstream command;
         command << "CLOSE_COMMIT_PHASE " << integer << "\n";
@@ -351,10 +352,10 @@ std::optional<PeerEndpoint> closeCommitPhaseQuorum(
         }
         std::cout << *response << "\n";
         if (phaseVoteCount(*response) >= 2) {
-            return peer;
+            quorum_peer = peer;
         }
     }
-    return std::nullopt;
+    return quorum_peer;
 }
 
 std::optional<Status> getStatus(const std::string& host, int port) {
