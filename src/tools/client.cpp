@@ -960,7 +960,7 @@ std::optional<StatusLine> waitForFrontierAdvance(
     const PeerConfig& peer,
     primechain::PrimeValue previous_frontier,
     primechain::PrimeValue target) {
-    for (int attempt = 0; attempt < 8; ++attempt) {
+    for (int attempt = 0; attempt < 24; ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (syncWorkdir(argv0, workdir, peer) != 0) continue;
         const auto local = loadLocalStatus(chainPath(workdir));
@@ -1128,12 +1128,21 @@ int runJobs(const char* argv0, int argc, char** argv) {
                 state["last_result"] = "requesting-commit-phase-timeout";
                 state["updated_at"] = nowSeconds();
                 if (!writeMineState(workdir, state)) return 1;
-                runTool(argv0, "primechain-sync-query", {
+                const int timeout_rc = runTool(argv0, "primechain-sync-query", {
                     peer->host,
                     std::to_string(peer->port),
                     "TIMEOUT_COMMIT_PHASE",
                     std::to_string(timeout_target),
                 });
+                if (timeout_rc == 0) {
+                    local = loadLocalStatus(chainPath(workdir));
+                    state["last_synced_frontier"] = std::to_string(local.frontier);
+                    state["status"] = "running";
+                    state["updated_at"] = nowSeconds();
+                    state["last_result"] = "retrying-after-commit-phase-timeout";
+                    if (!writeMineState(workdir, state)) return 1;
+                    continue;
+                }
                 advanced = waitForFrontierAdvance(
                     argv0, workdir, *peer, before_mine.frontier, *target);
             }

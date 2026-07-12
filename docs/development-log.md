@@ -776,3 +776,11 @@ validator signatures certify abandoning the stalled phase. `run-jobs` now calls
 this timeout path after waiting for a race winner that never propagates. This is
 a controlled-testnet liveness mechanism; embedding commit-timeout evidence into
 final records remains a future auditability improvement.
+
+## 2026-07-12: Workdir Retry After Commit-Phase Timeout
+
+`run-jobs` now waits longer for a race winner to propagate before requesting a
+commit-phase timeout, and treats a successful `TIMEOUT_COMMIT_PHASE` as progress
+that reopens the same integer rather than waiting for the frontier to advance.
+After a timeout clears a stalled phase, the workdir immediately restarts the
+frontier miner and retries the same integer automatically.
