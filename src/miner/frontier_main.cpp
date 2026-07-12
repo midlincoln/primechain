@@ -272,7 +272,7 @@ bool remoteQuorumEnabled(const std::string& host, int port) {
     return in && tag == "VALIDATORS" && count == 3;
 }
 
-bool closeCommitPhaseQuorum(const std::string& host, int port, primechain::PrimeValue integer) {
+std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
     std::vector<PeerEndpoint> peers{{host, port}};
     for (const auto& peer : requestPeerList(host, port)) {
         bool known = false;
@@ -284,7 +284,10 @@ bool closeCommitPhaseQuorum(const std::string& host, int port, primechain::Prime
         }
         if (!known) peers.push_back(peer);
     }
+    return peers;
+}
 
+bool closeCommitPhaseQuorum(const std::vector<PeerEndpoint>& peers, primechain::PrimeValue integer) {
     std::size_t best_votes = 0;
     for (const auto& peer : peers) {
         std::ostringstream command;
@@ -606,6 +609,18 @@ int main(int argc, char** argv) {
             }
         }
 
+        std::vector<PeerEndpoint> quorum_peers;
+        const bool needs_quorum_phase = commit_request.has_value() &&
+            composite_identity.has_value() && remoteQuorumEnabled(host, port);
+        if (needs_quorum_phase) {
+            quorum_peers = quorumEndpoints(host, port);
+            if (quorum_peers.size() < 2) {
+                std::cerr << "quorum node did not advertise enough validator peers before commit; "
+                          << "try a validator with peers configured\n";
+                return 1;
+            }
+        }
+
         if (commit_request.has_value()) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
@@ -617,8 +632,7 @@ int main(int argc, char** argv) {
                 commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0) {
                 return 1;
             }
-            if (composite_identity.has_value() && remoteQuorumEnabled(host, port) &&
-                !closeCommitPhaseQuorum(host, port, next)) {
+            if (needs_quorum_phase && !closeCommitPhaseQuorum(quorum_peers, next)) {
                 std::cerr << "could not close commit phase for " << next
                           << " with validator quorum\n";
                 return 1;
