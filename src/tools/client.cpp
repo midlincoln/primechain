@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -952,6 +954,23 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
     return 0;
 }
 
+std::optional<StatusLine> waitForFrontierAdvance(
+    const char* argv0,
+    const std::string& workdir,
+    const PeerConfig& peer,
+    primechain::PrimeValue previous_frontier,
+    primechain::PrimeValue target) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (syncWorkdir(argv0, workdir, peer) != 0) continue;
+        const auto local = loadLocalStatus(chainPath(workdir));
+        if (local.frontier > previous_frontier || local.frontier >= target) {
+            return local;
+        }
+    }
+    return std::nullopt;
+}
+
 int syncPeer(const char* argv0, int argc, char** argv) {
     if (argc != 3 && argc != 5) return 1;
     const std::string workdir = argv[2];
@@ -1097,6 +1116,18 @@ int runJobs(const char* argv0, int argc, char** argv) {
         const int sync_rc = syncWorkdir(argv0, workdir, *peer);
         local = loadLocalStatus(chainPath(workdir));
         state["last_synced_frontier"] = std::to_string(local.frontier);
+        if (sync_rc == 0 && local.frontier <= before_mine.frontier) {
+            state["status"] = "syncing";
+            state["updated_at"] = nowSeconds();
+            state["last_result"] = "waiting-for-race-winner";
+            if (!writeMineState(workdir, state)) return 1;
+            const auto advanced = waitForFrontierAdvance(
+                argv0, workdir, *peer, before_mine.frontier, *target);
+            if (advanced.has_value()) {
+                local = *advanced;
+                state["last_synced_frontier"] = std::to_string(local.frontier);
+            }
+        }
         if (sync_rc != 0 || local.frontier <= before_mine.frontier) {
             state["status"] = "failed";
             state["updated_at"] = nowSeconds();

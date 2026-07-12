@@ -754,3 +754,12 @@ winner causes the miner to clear pending composite state and back off; a closing
 phase causes it to retry after syncing instead of adding another competing
 commitment. Added a two-workdir quorum race regression test so concurrent
 clients must both reach the same target without wedging validator sidecars.
+
+## 2026-07-12: Workdir Mining Waits for Race Winners
+
+When a workdir miner loses a quorum commit phase, `run-jobs` now treats the
+failure as a possible propagation race instead of immediately failing if the
+first sync does not advance. It records `waiting-for-race-winner`, polls and
+syncs briefly for the winning finalized record, then continues once the local
+frontier advances. This lets the losing client in a two-workdir public-demo race
+finish automatically after the winning client finalizes the integer.
