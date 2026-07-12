@@ -287,8 +287,9 @@ std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
     return peers;
 }
 
-bool closeCommitPhaseQuorum(const std::vector<PeerEndpoint>& peers, primechain::PrimeValue integer) {
-    std::size_t best_votes = 0;
+std::optional<PeerEndpoint> closeCommitPhaseQuorum(
+    const std::vector<PeerEndpoint>& peers,
+    primechain::PrimeValue integer) {
     for (const auto& peer : peers) {
         std::ostringstream command;
         command << "CLOSE_COMMIT_PHASE " << integer << "\n";
@@ -299,12 +300,11 @@ bool closeCommitPhaseQuorum(const std::vector<PeerEndpoint>& peers, primechain::
             continue;
         }
         std::cout << *response << "\n";
-        best_votes = std::max(best_votes, phaseVoteCount(*response));
-        if (best_votes >= 2) {
-            return true;
+        if (phaseVoteCount(*response) >= 2) {
+            return peer;
         }
     }
-    return best_votes >= 2;
+    return std::nullopt;
 }
 
 std::optional<Status> getStatus(const std::string& host, int port) {
@@ -610,6 +610,7 @@ int main(int argc, char** argv) {
         }
 
         std::vector<PeerEndpoint> quorum_peers;
+        std::optional<PeerEndpoint> reveal_peer;
         const bool needs_quorum_phase = commit_request.has_value() &&
             composite_identity.has_value() && remoteQuorumEnabled(host, port);
         if (needs_quorum_phase) {
@@ -632,14 +633,19 @@ int main(int argc, char** argv) {
                 commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0) {
                 return 1;
             }
-            if (needs_quorum_phase && !closeCommitPhaseQuorum(quorum_peers, next)) {
-                std::cerr << "could not close commit phase for " << next
-                          << " with validator quorum\n";
-                return 1;
+            if (needs_quorum_phase) {
+                reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);
+                if (!reveal_peer.has_value()) {
+                    std::cerr << "could not close commit phase for " << next
+                              << " with validator quorum\n";
+                    return 1;
+                }
             }
         }
 
-        const auto response = requestLine(host, port, request);
+        const std::string submit_host = reveal_peer.has_value() ? reveal_peer->host : host;
+        const int submit_port = reveal_peer.has_value() ? reveal_peer->port : port;
+        const auto response = requestLine(submit_host, submit_port, request);
         if (!response.has_value()) {
             std::cerr << "node closed connection while submitting " << next << "\n";
             return 1;
