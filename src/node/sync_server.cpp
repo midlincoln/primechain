@@ -2221,8 +2221,7 @@ private:
         const auto key = std::make_tuple(vote.integer, vote.new_round, vote.validator_address);
         const auto existing = round_changes_.find(key);
         if (existing != round_changes_.end()) {
-            if (existing->second.signature == vote.signature &&
-                existing->second.public_key == vote.public_key) return true;
+            if (existing->second.public_key == vote.public_key) return true;
             error = "validator already submitted a different round-change vote";
             return false;
         }

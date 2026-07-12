@@ -727,3 +727,11 @@ received anti-equivocation rejections. The frontier miner now queries
 the local commitment won it reveals to the closed peer, and if another provider
 won it clears its pending composite state and backs off instead of requesting
 conflicting validator votes.
+
+## 2026-07-12: Round-Change Duplicate Vote Semantics
+
+Live two-client quorum mining exposed that ML-DSA round-change signatures for
+the same validator and same round-change payload are not guaranteed to be
+byte-identical. The sync server now treats a repeated valid round-change vote
+from the same validator/public key as the same semantic vote, instead of
+rejecting it as equivocation solely because the signature bytes differ.
