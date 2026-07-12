@@ -700,3 +700,11 @@ bounded per-integer retry limit.
 
 A two-workdir regression now runs two clients against one node to the same target
 and requires both `run-jobs` processes to complete.
+
+## 2026-07-12: Workdir Retry After Race Sync
+
+Extended workdir mining retry behavior for live competing clients. The frontier
+miner now treats `commit phase is closing or closed` as stale work and backs off
+before retrying. `run-jobs` also syncs and restarts the frontier miner when a
+miner failure was caused by another client advancing the chain and adding
+composite proofs needed by the next Pratt certificate.

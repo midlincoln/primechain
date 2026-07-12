@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -531,6 +533,7 @@ bool staleOrTransient(const std::string& response) {
            response.find("must extend frontier") != std::string::npos ||
            response.find("wrong frontier") != std::string::npos ||
            response.find("current frontier record not found") != std::string::npos ||
+           response.find("commit phase is closing or closed") != std::string::npos ||
            response.find("no prior commitment for reveal") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos ||
            response.rfind("RECORD_CONFLICT", 0) == 0;
@@ -629,6 +632,7 @@ int main(int argc, char** argv) {
             ++attempts;
             std::cerr << "frontier changed while mining " << next << "; retrying: "
                       << reason << "\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
             return true;
         };
         std::string request;

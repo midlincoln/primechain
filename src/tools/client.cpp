@@ -1073,19 +1073,50 @@ int runJobs(const char* argv0, int argc, char** argv) {
     state["last_result"] = "mining";
     if (!writeMineState(workdir, state)) return 1;
 
-    rc = runTool(argv0, "primechain-frontier-miner", {
-        peer->host,
-        std::to_string(peer->port),
-        std::to_string(*target),
-        "--prime-identity",
-        primeWalletPath(workdir),
-        "--composite-identity",
-        compositeWalletPath(workdir),
-        "--proof-store",
-        chainPath(workdir),
-        "--pending-composite",
-        pendingCompositePath(workdir),
-    });
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        const auto before_mine = loadLocalStatus(chainPath(workdir));
+        rc = runTool(argv0, "primechain-frontier-miner", {
+            peer->host,
+            std::to_string(peer->port),
+            std::to_string(*target),
+            "--prime-identity",
+            primeWalletPath(workdir),
+            "--composite-identity",
+            compositeWalletPath(workdir),
+            "--proof-store",
+            chainPath(workdir),
+            "--pending-composite",
+            pendingCompositePath(workdir),
+        });
+        if (rc == 0) break;
+
+        state["status"] = "syncing";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "syncing-after-stale-miner";
+        if (!writeMineState(workdir, state)) return 1;
+        const int sync_rc = syncWorkdir(argv0, workdir, *peer);
+        local = loadLocalStatus(chainPath(workdir));
+        state["last_synced_frontier"] = std::to_string(local.frontier);
+        if (sync_rc != 0 || local.frontier <= before_mine.frontier) {
+            state["status"] = "failed";
+            state["updated_at"] = nowSeconds();
+            state["last_result"] = sync_rc != 0 ? "sync-after-miner-failed" : "miner-failed";
+            writeMineState(workdir, state);
+            return rc;
+        }
+        if (local.frontier >= *target) {
+            state["status"] = "complete";
+            state["updated_at"] = nowSeconds();
+            state["last_result"] = "complete-after-stale-miner";
+            if (!writeMineState(workdir, state)) return 1;
+            std::cout << "JOB_COMPLETE target=" << *target << " frontier=" << local.frontier << "\n";
+            return 0;
+        }
+        state["status"] = "running";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "retrying-after-stale-miner";
+        if (!writeMineState(workdir, state)) return 1;
+    }
     if (rc != 0) {
         state["status"] = "failed";
         state["updated_at"] = nowSeconds();
