@@ -717,3 +717,13 @@ submitting its own commitment. The frontier miner now submits the same signed
 commitment to all advertised validator peers and waits briefly before requesting
 commit-phase votes, so validators are more likely to close over the same
 snapshot instead of split-voting.
+
+## 2026-07-12: Closed Commit Phase Winner Handling
+
+A second live two-client test showed that after a commit phase had already
+closed, the losing client kept asking validators to close the same integer and
+received anti-equivocation rejections. The frontier miner now queries
+`GET_COMMIT_PHASE` when the phase is already closed or quorum close fails: if
+the local commitment won it reveals to the closed peer, and if another provider
+won it clears its pending composite state and backs off instead of requesting
+conflicting validator votes.

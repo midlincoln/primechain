@@ -114,6 +114,14 @@ struct PeerEndpoint {
     int port{0};
 };
 
+struct CommitPhaseStatus {
+    PeerEndpoint peer;
+    std::string state;
+    std::size_t votes{0};
+    std::string snapshot_hash;
+    std::string winner;
+};
+
 struct PendingComposite {
     primechain::PrimeValue integer{0};
     primechain::PrimeValue d{0};
@@ -337,6 +345,39 @@ std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
         if (!known) peers.push_back(peer);
     }
     return peers;
+}
+
+std::optional<CommitPhaseStatus> requestCommitPhase(
+    const PeerEndpoint& peer,
+    primechain::PrimeValue integer) {
+    std::ostringstream command;
+    command << "GET_COMMIT_PHASE " << integer << "\n";
+    const auto response = requestLine(peer.host, peer.port, command.str());
+    if (!response.has_value()) return std::nullopt;
+
+    std::istringstream in(*response);
+    std::string tag;
+    primechain::PrimeValue response_integer = 0;
+    CommitPhaseStatus status;
+    status.peer = peer;
+    in >> tag >> response_integer >> status.state >> status.votes
+       >> status.snapshot_hash >> status.winner;
+    if (!in || tag != "COMMIT_PHASE" || response_integer != integer) {
+        return std::nullopt;
+    }
+    return status;
+}
+
+std::optional<CommitPhaseStatus> closedCommitPhase(
+    const std::vector<PeerEndpoint>& peers,
+    primechain::PrimeValue integer) {
+    for (const auto& peer : peers) {
+        const auto status = requestCommitPhase(peer, integer);
+        if (status.has_value() && status->state == "CLOSED" && status->votes >= 2) {
+            return status;
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<PeerEndpoint> closeCommitPhaseQuorum(
@@ -759,14 +800,45 @@ int main(int argc, char** argv) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
             }
+            const auto local_provider = composite_identity.has_value()
+                ? composite_identity->address : composite_miner;
             if (needs_quorum_phase && !phase_already_closed) {
                 warmQuorumCommitments(quorum_peers, *commit_request);
             }
             if (needs_quorum_phase) {
-                reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);
-                if (!reveal_peer.has_value()) {
-                    if (retryCurrentInteger("could not close commit phase with validator quorum")) continue;
-                    return 1;
+                auto useClosedPhase = [&](const CommitPhaseStatus& closed) -> bool {
+                    if (closed.winner == local_provider) {
+                        reveal_peer = closed.peer;
+                        return true;
+                    }
+                    clearPendingComposite(pending_composite_path);
+                    return false;
+                };
+
+                if (phase_already_closed) {
+                    const auto closed = closedCommitPhase(quorum_peers, next);
+                    if (!closed.has_value()) {
+                        if (retryCurrentInteger("commit phase is closed but no closed peer was found")) continue;
+                        return 1;
+                    }
+                    if (!useClosedPhase(*closed)) {
+                        if (retryCurrentInteger("commit phase already won by " + closed->winner)) continue;
+                        return 1;
+                    }
+                } else {
+                    reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);
+                    if (!reveal_peer.has_value()) {
+                        const auto closed = closedCommitPhase(quorum_peers, next);
+                        if (closed.has_value()) {
+                            if (!useClosedPhase(*closed)) {
+                                if (retryCurrentInteger("commit phase already won by " + closed->winner)) continue;
+                                return 1;
+                            }
+                        } else {
+                            if (retryCurrentInteger("could not close commit phase with validator quorum")) continue;
+                            return 1;
+                        }
+                    }
                 }
             }
         }
