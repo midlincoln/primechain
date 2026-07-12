@@ -689,3 +689,14 @@ Automatic peer-of-peer discovery remains enabled for non-quorum nodes, while
 quorum validator topology is explicit until node identity and advertised address
 handling are added. A three-validator workdir regression now mines from genesis
 to frontier 10 in one client run.
+
+## 2026-07-12: Client Stale-Work Retry
+
+The frontier miner now treats competing-client races as retryable stale work
+instead of terminal job failure. If another miner advances the frontier, wins a
+commit-reveal selection, or prunes the pending reveal sidecar before this miner
+submits, the miner re-queries status and continues from the new frontier with a
+bounded per-integer retry limit.
+
+A two-workdir regression now runs two clients against one node to the same target
+and requires both `run-jobs` processes to complete.

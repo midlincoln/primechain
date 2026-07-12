@@ -526,6 +526,16 @@ bool accepted(const std::string& response) {
            response.rfind("RECORD_CONFLICT_WORSE ", 0) == 0;
 }
 
+bool staleOrTransient(const std::string& response) {
+    return response.find("must target next integer") != std::string::npos ||
+           response.find("must extend frontier") != std::string::npos ||
+           response.find("wrong frontier") != std::string::npos ||
+           response.find("current frontier record not found") != std::string::npos ||
+           response.find("no prior commitment for reveal") != std::string::npos ||
+           response.find("commitment not selected for reveal") != std::string::npos ||
+           response.rfind("RECORD_CONFLICT", 0) == 0;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
               << " [host] [port] [limit] --prime-identity <file> --composite-identity <file>\n"
@@ -593,6 +603,7 @@ int main(int argc, char** argv) {
         }
     }
     std::size_t submitted = 0;
+    std::map<primechain::PrimeValue, std::size_t> retry_counts;
 
     while (true) {
         const auto status = getStatus(host, port);
@@ -609,6 +620,17 @@ int main(int argc, char** argv) {
         }
 
         const primechain::PrimeValue next = effective_frontier + 1;
+        auto retryCurrentInteger = [&](const std::string& reason) -> bool {
+            auto& attempts = retry_counts[next];
+            if (attempts >= 5) {
+                std::cerr << "retry limit reached for " << next << ": " << reason << "\n";
+                return false;
+            }
+            ++attempts;
+            std::cerr << "frontier changed while mining " << next << "; retrying: "
+                      << reason << "\n";
+            return true;
+        };
         std::string request;
         std::optional<std::string> commit_request;
         bool reused_pending_composite = false;
@@ -698,7 +720,7 @@ int main(int argc, char** argv) {
         if (commit_request.has_value()) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
-                std::cerr << "node closed connection while committing " << next << "\n";
+                if (retryCurrentInteger("node closed connection while committing")) continue;
                 return 1;
             }
             std::cout << *commit_response << "\n";
@@ -707,13 +729,13 @@ int main(int argc, char** argv) {
             if (commit_response->rfind("COMMIT_ACCEPTED ", 0) != 0 &&
                 commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0 &&
                 !(reused_pending_composite && phase_already_closed)) {
+                if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
             }
             if (needs_quorum_phase) {
                 reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);
                 if (!reveal_peer.has_value()) {
-                    std::cerr << "could not close commit phase for " << next
-                              << " with validator quorum\n";
+                    if (retryCurrentInteger("could not close commit phase with validator quorum")) continue;
                     return 1;
                 }
             }
@@ -738,6 +760,7 @@ int main(int argc, char** argv) {
 
         bool submitted_ok = false;
         bool got_response = false;
+        std::string last_rejection;
         for (const auto& submit_peer : submit_peers) {
             const auto response = requestLine(submit_peer.host, submit_peer.port, request);
             if (!response.has_value()) {
@@ -751,15 +774,18 @@ int main(int argc, char** argv) {
                 submitted_ok = true;
                 break;
             }
+            last_rejection = *response;
             if (!needs_quorum_phase) break;
         }
         if (!got_response) {
-            std::cerr << "node closed connection while submitting " << next << "\n";
+            if (retryCurrentInteger("node closed connection while submitting")) continue;
             return 1;
         }
         if (!submitted_ok) {
+            if (staleOrTransient(last_rejection) && retryCurrentInteger(last_rejection)) continue;
             return 1;
         }
+        retry_counts.erase(next);
         if (commit_request.has_value()) {
             clearPendingComposite(pending_composite_path);
         }
