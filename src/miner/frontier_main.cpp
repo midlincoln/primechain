@@ -643,15 +643,45 @@ int main(int argc, char** argv) {
             }
         }
 
-        const std::string submit_host = reveal_peer.has_value() ? reveal_peer->host : host;
-        const int submit_port = reveal_peer.has_value() ? reveal_peer->port : port;
-        const auto response = requestLine(submit_host, submit_port, request);
-        if (!response.has_value()) {
+        std::vector<PeerEndpoint> submit_peers;
+        if (reveal_peer.has_value()) {
+            submit_peers.push_back(*reveal_peer);
+            for (const auto& peer : quorum_peers) {
+                bool known = false;
+                for (const auto& existing : submit_peers) {
+                    if (existing.host == peer.host && existing.port == peer.port) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) submit_peers.push_back(peer);
+            }
+        } else {
+            submit_peers.push_back({host, port});
+        }
+
+        bool submitted_ok = false;
+        bool got_response = false;
+        for (const auto& submit_peer : submit_peers) {
+            const auto response = requestLine(submit_peer.host, submit_peer.port, request);
+            if (!response.has_value()) {
+                std::cerr << "node closed connection while submitting " << next
+                          << " to " << submit_peer.host << ":" << submit_peer.port << "\n";
+                continue;
+            }
+            got_response = true;
+            std::cout << *response << "\n";
+            if (accepted(*response)) {
+                submitted_ok = true;
+                break;
+            }
+            if (!needs_quorum_phase) break;
+        }
+        if (!got_response) {
             std::cerr << "node closed connection while submitting " << next << "\n";
             return 1;
         }
-        std::cout << *response << "\n";
-        if (!accepted(*response)) {
+        if (!submitted_ok) {
             return 1;
         }
         ++submitted;
