@@ -539,6 +539,30 @@ bool staleOrTransient(const std::string& response) {
            response.rfind("RECORD_CONFLICT", 0) == 0;
 }
 
+bool commitAcceptedOrDuplicate(const std::string& response) {
+    return response.rfind("COMMIT_ACCEPTED ", 0) == 0 ||
+           response.rfind("COMMIT_DUPLICATE ", 0) == 0;
+}
+
+void warmQuorumCommitments(
+    const std::vector<PeerEndpoint>& peers,
+    const std::string& commit_request) {
+    for (const auto& peer : peers) {
+        const auto response = requestLine(peer.host, peer.port, commit_request);
+        if (!response.has_value()) {
+            std::cerr << "commit propagation warmup warning from " << peer.host << ":"
+                      << peer.port << ": no response\n";
+            continue;
+        }
+        if (!commitAcceptedOrDuplicate(*response) &&
+            response->find("commit phase is closing or closed") == std::string::npos) {
+            std::cerr << "commit propagation warmup warning from " << peer.host << ":"
+                      << peer.port << ": " << *response << "\n";
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
               << " [host] [port] [limit] --prime-identity <file> --composite-identity <file>\n"
@@ -730,11 +754,13 @@ int main(int argc, char** argv) {
             std::cout << *commit_response << "\n";
             const bool phase_already_closed =
                 commit_response->find("commit phase is closing or closed") != std::string::npos;
-            if (commit_response->rfind("COMMIT_ACCEPTED ", 0) != 0 &&
-                commit_response->rfind("COMMIT_DUPLICATE ", 0) != 0 &&
+            if (!commitAcceptedOrDuplicate(*commit_response) &&
                 !(reused_pending_composite && phase_already_closed)) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
+            }
+            if (needs_quorum_phase && !phase_already_closed) {
+                warmQuorumCommitments(quorum_peers, *commit_request);
             }
             if (needs_quorum_phase) {
                 reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);

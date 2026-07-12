@@ -708,3 +708,12 @@ miner now treats `commit phase is closing or closed` as stale work and backs off
 before retrying. `run-jobs` also syncs and restarts the frontier miner when a
 miner failure was caused by another client advancing the chain and adding
 composite proofs needed by the next Pratt certificate.
+
+## 2026-07-12: Quorum Commit Warmup Before Phase Close
+
+A live two-client testnet race exposed that validators could freeze integer 85 on
+different commitment snapshots if a miner closed the phase immediately after
+submitting its own commitment. The frontier miner now submits the same signed
+commitment to all advertised validator peers and waits briefly before requesting
+commit-phase votes, so validators are more likely to close over the same
+snapshot instead of split-voting.
