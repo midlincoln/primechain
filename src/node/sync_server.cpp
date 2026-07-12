@@ -1252,6 +1252,10 @@ public:
                 sendValidatorEpoch(fd);
                 continue;
             }
+            if (*line == "GET_MINING_VIEW" || line->rfind("GET_MINING_VIEW ", 0) == 0) {
+                sendMiningView(fd, *line);
+                continue;
+            }
             if (line->rfind("GET_RECORD ", 0) == 0) {
                 sendRecord(fd, *line);
                 continue;
@@ -2974,6 +2978,55 @@ private:
             + std::to_string(phaseVoteCount(integer)) + " "
             + primechain::crypto::toHex(commitmentSnapshotHash(integer)) + " "
             + (winner.has_value() ? winner->provider_address : std::string("-")) + "\n");
+    }
+
+    void sendMiningView(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command, extra;
+        primechain::PrimeValue requested = 0;
+        in >> command;
+        if (!in || command != "GET_MINING_VIEW") {
+            writeAll(fd, "ERROR invalid GET_MINING_VIEW\n");
+            return;
+        }
+        if (in >> requested) {
+            if (in >> extra) {
+                writeAll(fd, "ERROR invalid GET_MINING_VIEW\n");
+                return;
+            }
+        } else {
+            in.clear();
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto status = node.status();
+        const primechain::PrimeValue frontier = status.has_genesis ? status.frontier_integer : 2;
+        const primechain::PrimeValue integer = requested == 0 ? frontier + 1 : requested;
+        const auto winner = selectedCommitment(integer);
+        const std::string phase_state = phaseClosed(integer) ? "CLOSED" :
+            (phaseFrozen(integer) ? "CLOSING" : "OPEN");
+        std::size_t commitment_count = 0;
+        for (const auto& item : commitments_) {
+            if (item.first.first == integer) ++commitment_count;
+        }
+        writeAll(fd, "MINING_VIEW "
+            + std::to_string(frontier) + " "
+            + std::to_string(integer) + " "
+            + std::to_string(status.has_genesis ? 1 : 0) + " "
+            + primechain::crypto::toHex(status.latest_record_hash) + " "
+            + phase_state + " "
+            + std::to_string(phaseVoteCount(integer)) + " "
+            + primechain::crypto::toHex(commitmentSnapshotHash(integer)) + " "
+            + (winner.has_value() ? winner->provider_address : std::string("-")) + " "
+            + std::to_string(commitment_count) + " "
+            + std::to_string(activeFinalizationRound(integer)) + " "
+            + std::to_string(validator_set_.size()) + " "
+            + std::to_string(peers_.size()) + "\n");
     }
 
     void sendPhaseVotes(int fd, const std::string& line) const {

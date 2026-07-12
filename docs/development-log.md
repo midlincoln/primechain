@@ -735,3 +735,13 @@ the same validator and same round-change payload are not guaranteed to be
 byte-identical. The sync server now treats a repeated valid round-change vote
 from the same validator/public key as the same semantic vote, instead of
 rejecting it as equivocation solely because the signature bytes differ.
+
+## 2026-07-12: Mining View Command
+
+Added `GET_MINING_VIEW [integer]` as a compact read-only coordination command
+for miners and operators. It reports the local frontier, target integer, latest
+record hash, commit-phase state, phase vote count, snapshot hash, current
+winner, commitment count, active finalization round, validator count, and known
+peer count. This is the first step toward clients coordinating across all
+validators from one consistent mining view instead of inferring state from
+several separate commands.

@@ -359,6 +359,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log; $<TARGET_FILE:primechain-sequential> 500 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.log ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18989 ${CMAKE_CURRENT_BINARY_DIR}/sync-500.dat > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18989 GET_STATUS | grep -q 'STATUS 499 95 404 1 498 500' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/sync-server.pid)"
 )
 add_test(
+    NAME sync_server_mining_view
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/mining-view.dat ${CMAKE_CURRENT_BINARY_DIR}/mining-view.log ${CMAKE_CURRENT_BINARY_DIR}/mining-view-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/mining-view.log ${CMAKE_CURRENT_BINARY_DIR}/mining-view.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18990 ${CMAKE_CURRENT_BINARY_DIR}/mining-view.dat > ${CMAKE_CURRENT_BINARY_DIR}/mining-view-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/mining-view-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18990 GET_MINING_VIEW | grep -q '^MINING_VIEW 20 21 1 .* OPEN 0 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/mining-view-server.pid)"
+)
+add_test(
     NAME sync_get_factorization_12
     COMMAND
         /bin/sh -c
