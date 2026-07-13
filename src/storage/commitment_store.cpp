@@ -12,6 +12,7 @@ namespace {
 
 constexpr std::uint64_t kCommitmentStoreMagicV0 = 0x3056544d43435055ull;
 constexpr std::uint64_t kCommitmentStoreMagicV1 = 0x3156544d43435055ull;
+constexpr std::uint64_t kCommitmentStoreMagicV2 = 0x3256544d43435055ull;
 constexpr std::uint64_t kMaxAddressBytes = 1024;
 constexpr std::uint64_t kMaxAuthBytes = 8192;
 
@@ -61,15 +62,25 @@ std::vector<StoredCommitment> CommitmentStore::loadAll(std::string& error) const
             error = "truncated commitment store magic";
             return {};
         }
-        if (magic != kCommitmentStoreMagicV0 && magic != kCommitmentStoreMagicV1) {
+        if (magic != kCommitmentStoreMagicV0 && magic != kCommitmentStoreMagicV1 &&
+            magic != kCommitmentStoreMagicV2) {
             error = "invalid commitment store magic";
             return {};
         }
-        const bool authenticated_format = magic == kCommitmentStoreMagicV1;
+        const bool authenticated_format = magic == kCommitmentStoreMagicV1 || magic == kCommitmentStoreMagicV2;
+        const bool round_format = magic == kCommitmentStoreMagicV2;
 
         StoredCommitment commitment;
         std::uint64_t address_size = 0;
-        if (!readUint64(in, commitment.integer) || !readUint64(in, address_size)) {
+        if (!readUint64(in, commitment.integer)) {
+            error = "truncated commitment header";
+            return {};
+        }
+        if (round_format && !readUint64(in, commitment.commit_round)) {
+            error = "truncated commitment round";
+            return {};
+        }
+        if (!readUint64(in, address_size)) {
             error = "truncated commitment header";
             return {};
         }
@@ -129,8 +140,9 @@ bool CommitmentStore::replaceAll(
             std::remove(temp_path.c_str());
             return false;
         }
-        writeUint64(out, kCommitmentStoreMagicV1);
+        writeUint64(out, kCommitmentStoreMagicV2);
         writeUint64(out, commitment.integer);
+        writeUint64(out, commitment.commit_round);
         writeUint64(out, commitment.provider_address.size());
         out.write(commitment.provider_address.data(), commitment.provider_address.size());
         out.write(

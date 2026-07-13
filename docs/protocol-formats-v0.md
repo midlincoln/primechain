@@ -559,22 +559,22 @@ attribution require signed commitments plus a quorum-defined commit boundary.
 A node started with a fixed three-address validator set uses an explicit commit-phase state machine for each candidate integer:
 
 ```text
-OPEN -> CLOSING -> CLOSED -> FINALIZED
-  |          |          |
-  +----------+----------+-> TIMED_OUT -> OPEN
+round N: OPEN -> CLOSING -> CLOSED -> FINALIZED
+             |          |
+             +----------+-> TIMED_OUT(N -> N+1) -> round N+1: OPEN
 ```
 
-The current wire API exposes `OPEN`, `CLOSING`, and `CLOSED` through `GET_COMMIT_PHASE` and `GET_MINING_VIEW`. `FINALIZED` is represented by the arithmetic record appearing in the main record store. `TIMED_OUT` is a certified local recovery transition that clears temporary sidecars and reopens the same integer. Timeout certificates are not yet embedded in finalized records; this is acceptable for the controlled public demo network, but it is not the final permissionless protocol.
+The current wire API exposes `OPEN`, `CLOSING`, and `CLOSED` through `GET_COMMIT_PHASE` and `GET_MINING_VIEW`. `FINALIZED` is represented by the arithmetic record appearing in the main record store. `TIMED_OUT(N -> N+1)` is a certified recovery transition: two validators sign a timeout for the exact current commit round, nodes clear only that round's temporary commitments/votes, and the same integer reopens in the next commit round. Timeout certificates are not yet embedded in finalized records; this is acceptable for the controlled public demo network, but it is not the final permissionless protocol.
 
 State rules:
 
-- `OPEN`: signed composite commitments for the current next integer are accepted.
-- `CLOSING`: one validator signed a snapshot; late commitments are rejected and clients must wait, sync, or reuse the winning local commitment if it later closes.
-- `CLOSED`: two distinct configured validators signed the same snapshot; only the deterministic winner may reveal.
-- `FINALIZED`: the winning reveal produced a version-1 composite record embedding the commitment snapshot, validator set, and phase votes. Replay no longer needs `.commitments` or `.phases`.
-- `TIMED_OUT`: two validators signed a timeout for the stalled current integer and next commit round; nodes clear temporary commitments/votes and return to `OPEN`.
+- `OPEN`: signed composite commitments for the active `(integer, commit_round)` are accepted.
+- `CLOSING`: one validator signed the active round snapshot; late commitments for that round are rejected and clients must wait, sync, or reuse the winning local commitment if it later closes.
+- `CLOSED`: two distinct configured validators signed the same active round snapshot; only the deterministic winner may reveal.
+- `FINALIZED`: the winning reveal produced a version-1 composite record embedding the winning round's commitment snapshot, validator set, and phase votes. Replay no longer needs `.commitments` or `.phases` for finalized records.
+- `TIMED_OUT`: two validators signed a timeout from round `N` to round `N+1`; nodes clear only round `N` commitments/votes and accept new round `N+1` commitments. A validator still stuck in round `N` can later consume the same timeout certificate and catch up without manual sidecar deletion.
 
-Client behavior follows the same state machine: commit only in `OPEN`, reveal only in `CLOSED` when the local provider won, back off when another provider won, and keep syncing while another client advances the frontier.
+Client behavior follows the same state machine: commit only in active-round `OPEN`, reveal only in active-round `CLOSED` when the local provider won, back off when another provider won, and keep syncing while another client advances the frontier.
 
 The snapshot hash commits to the integer and the canonical ordered list of full
 commitment records, including miner authentication data. Validator signatures

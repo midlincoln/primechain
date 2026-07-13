@@ -794,3 +794,15 @@ instead of scattered string checks, and `run-jobs` keeps cycling while competing
 miners advance the frontier. A losing workdir no longer treats normal race
 progress as a terminal failure; only repeated no-progress attempts fail the
 job.
+
+## 2026-07-13: Round-Numbered Commit-Phase Timeout
+
+Commit-phase sidecars are now keyed by `(integer, commit_round, signer)`. A
+certified timeout signs the exact transition from round `N` to round `N+1` and
+clears only round `N` commitments and phase votes. This lets a validator that
+remained stuck in an old `CLOSING` round consume the already-certified timeout
+and reopen the same integer in the next round without manual sidecar deletion.
+The finalized composite record still embeds the winning round's commitments and
+phase votes using the existing record certificate format; abandoned timeout
+certificates remain controlled-testnet liveness evidence rather than permanent
+replay evidence.

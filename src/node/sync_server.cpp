@@ -67,6 +67,7 @@ struct CommitPhaseTimeoutVote {
     std::vector<std::uint8_t> public_key;
     primechain::Hash256 previous_record_hash{};
     primechain::PrimeValue integer{0};
+    std::uint64_t current_round{1};
     std::uint64_t new_round{0};
     std::vector<std::uint8_t> signature;
 };
@@ -903,11 +904,19 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
     while (const auto line = readLine(socket->fd())) {
         if (*line == "END_PHASE_VOTES") break;
         std::istringstream in(*line);
-        std::string entry_tag, snapshot_hex, public_key_hex, signature_hex, extra;
+        std::string entry_tag, maybe_round_or_snapshot, snapshot_hex, public_key_hex, signature_hex, extra;
         primechain::storage::CommitPhaseVote vote;
-        in >> entry_tag >> vote.integer >> snapshot_hex >> vote.validator_address
-           >> public_key_hex >> signature_hex;
-        const auto snapshot = parseHash(snapshot_hex);
+        in >> entry_tag >> vote.integer >> maybe_round_or_snapshot;
+        auto snapshot = parseHash(maybe_round_or_snapshot);
+        if (snapshot.has_value()) {
+            snapshot_hex = maybe_round_or_snapshot;
+            vote.commit_round = 1;
+            in >> vote.validator_address >> public_key_hex >> signature_hex;
+        } else {
+            vote.commit_round = std::stoull(maybe_round_or_snapshot);
+            in >> snapshot_hex >> vote.validator_address >> public_key_hex >> signature_hex;
+            snapshot = parseHash(snapshot_hex);
+        }
         if (!in || entry_tag != "PHASE_VOTE" || vote.integer != integer ||
             !snapshot.has_value() || (in >> extra)) {
             error = "invalid peer phase vote entry";
@@ -1004,8 +1013,8 @@ std::optional<CommitPhaseTimeoutVote> requestCommitPhaseTimeoutVote(
     std::ostringstream command;
     command << "SIGN_COMMIT_PHASE_TIMEOUT "
             << primechain::crypto::toHex(proposer_vote.previous_record_hash) << " "
-            << proposer_vote.integer << " " << proposer_vote.new_round << " "
-            << proposer_vote.validator_address << " "
+            << proposer_vote.integer << " " << proposer_vote.current_round << " "
+            << proposer_vote.new_round << " " << proposer_vote.validator_address << " "
             << bytesToHex(proposer_vote.public_key) << " "
             << bytesToHex(proposer_vote.signature) << "\n";
     if (!writeCommand(socket->fd(), command.str())) { error = "could not submit commit-phase timeout"; return std::nullopt; }
@@ -1015,7 +1024,7 @@ std::optional<CommitPhaseTimeoutVote> requestCommitPhaseTimeoutVote(
     std::istringstream in(*response);
     std::string tag, previous_hex, public_hex, signature_hex, extra;
     CommitPhaseTimeoutVote vote;
-    in >> tag >> previous_hex >> vote.integer >> vote.new_round
+    in >> tag >> previous_hex >> vote.integer >> vote.current_round >> vote.new_round
        >> vote.validator_address >> public_hex >> signature_hex;
     const auto previous = parseHash(previous_hex);
     if (!in || tag != "COMMIT_PHASE_TIMEOUT_VOTE" || !previous.has_value() || (in >> extra)) {
@@ -1559,7 +1568,7 @@ public:
                     return false;
                 }
             }
-            const auto key = std::make_pair(commitment.integer, commitment.provider_address);
+            const auto key = std::make_tuple(commitment.integer, commitment.commit_round, commitment.provider_address);
             const auto inserted = commitments_.emplace(key, commitment);
             if (!inserted.second && inserted.first->second.commitment_hash != commitment.commitment_hash) {
                 error = "conflicting provider commitments in commitment store";
@@ -1647,7 +1656,7 @@ public:
             return false;
         }
         for (const auto& entry : signed_candidates_) {
-            if (entry.first.second > activeFinalizationRound(entry.first.first)) {
+            if (entry.first.second > activeFinalizationRound(std::get<0>(entry.first))) {
                 error = "persisted finalization vote has no certified round change";
                 return false;
             }
@@ -1679,7 +1688,7 @@ private:
         const primechain::PrimeValue target = frontier + 1;
         bool changed = false;
         for (auto it = commitments_.begin(); it != commitments_.end();) {
-            if (it->first.first != target) {
+            if (std::get<0>(it->first) != target) {
                 it = commitments_.erase(it);
                 changed = true;
             } else {
@@ -1690,13 +1699,14 @@ private:
             return false;
         }
         changed = false;
+        const auto commit_round = activeCommitPhaseRound(target);
         const auto remote = requestCommitments(host, port, target, error);
         if (!error.empty()) {
             return false;
         }
 
         for (const auto& commitment : remote) {
-            const auto key = std::make_pair(commitment.integer, commitment.provider_address);
+            const auto key = std::make_tuple(commitment.integer, commitment.commit_round, commitment.provider_address);
             const auto existing = commitments_.find(key);
             if (existing != commitments_.end()) {
                 if (existing->second.commitment_hash != commitment.commitment_hash ||
@@ -1733,7 +1743,7 @@ private:
     void pruneFinalizedCommitments(primechain::PrimeValue finalized_integer) {
         bool changed = false;
         for (auto it = commitments_.begin(); it != commitments_.end();) {
-            if (it->first.first <= finalized_integer) {
+            if (std::get<0>(it->first) <= finalized_integer) {
                 it = commitments_.erase(it);
                 changed = true;
             } else {
@@ -1748,7 +1758,7 @@ private:
         }
         bool phase_changed = false;
         for (auto it = phase_votes_.begin(); it != phase_votes_.end();) {
-            if (it->first.first <= finalized_integer) {
+            if (std::get<0>(it->first) <= finalized_integer) {
                 it = phase_votes_.erase(it);
                 phase_changed = true;
             } else {
@@ -2203,7 +2213,7 @@ private:
 
     std::vector<primechain::storage::SignedCandidateRecord> signedCandidateSnapshot() const {
         std::vector<primechain::storage::SignedCandidateRecord> out;
-        for (const auto& entry : signed_candidates_) out.push_back({entry.first.first, entry.second});
+        for (const auto& entry : signed_candidates_) out.push_back({std::get<0>(entry.first), entry.second});
         return out;
     }
 
@@ -2359,7 +2369,7 @@ private:
     void clearSignedCandidate(primechain::PrimeValue integer) {
         bool changed = false;
         for (auto it = signed_candidates_.begin(); it != signed_candidates_.end();) {
-            if (it->first.first == integer) { it = signed_candidates_.erase(it); changed = true; }
+            if (std::get<0>(it->first) == integer) { it = signed_candidates_.erase(it); changed = true; }
             else ++it;
         }
         for (auto it = round_changes_.begin(); it != round_changes_.end();) {
@@ -2462,18 +2472,47 @@ private:
 
     std::size_t commitPhaseTimeoutVoteCount(
         primechain::PrimeValue integer,
+        std::uint64_t current_round,
         std::uint64_t new_round) const {
         std::size_t count = 0;
         for (const auto& entry : commit_phase_timeouts_) {
-            if (std::get<0>(entry.first) == integer && std::get<1>(entry.first) == new_round) ++count;
+            if (std::get<0>(entry.first) == integer &&
+                std::get<1>(entry.first) == current_round &&
+                std::get<2>(entry.first) == new_round) ++count;
         }
         return count;
     }
 
-    bool commitPhaseStarted(primechain::PrimeValue integer) const {
-        if (phaseFrozen(integer)) return true;
+    bool commitPhaseTimeoutCertified(
+        primechain::PrimeValue integer,
+        std::uint64_t current_round,
+        std::uint64_t new_round) const {
+        return commitPhaseTimeoutVoteCount(integer, current_round, new_round) >= 2;
+    }
+
+    std::uint64_t activeCommitPhaseRound(primechain::PrimeValue integer) const {
+        std::uint64_t round = 1;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& entry : commit_phase_timeouts_) {
+                if (std::get<0>(entry.first) == integer &&
+                    std::get<1>(entry.first) == round &&
+                    std::get<2>(entry.first) == round + 1 &&
+                    commitPhaseTimeoutCertified(integer, round, round + 1)) {
+                    ++round;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return round;
+    }
+
+    bool commitPhaseStarted(primechain::PrimeValue integer, std::uint64_t commit_round) const {
+        if (phaseFrozen(integer, commit_round)) return true;
         for (const auto& entry : commitments_) {
-            if (entry.first.first == integer) return true;
+            if (std::get<0>(entry.first) == integer && std::get<1>(entry.first) == commit_round) return true;
         }
         return false;
     }
@@ -2486,9 +2525,12 @@ private:
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) return false;
         const auto target = node.status().frontier_integer + 1;
+        const bool already_certified = commitPhaseTimeoutCertified(
+            vote.integer, vote.current_round, vote.new_round);
         if (vote.integer != target || vote.previous_record_hash != node.status().latest_record_hash ||
-            vote.new_round != 2 ||
-            !commitPhaseStarted(vote.integer) ||
+            vote.new_round != vote.current_round + 1 ||
+            (!already_certified && vote.current_round != activeCommitPhaseRound(vote.integer)) ||
+            (!already_certified && !commitPhaseStarted(vote.integer, vote.current_round)) ||
             !std::binary_search(validator_set_.begin(), validator_set_.end(), vote.validator_address) ||
             vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
             error = "invalid commit-phase timeout vote target";
@@ -2497,7 +2539,8 @@ private:
         return primechain::crypto::verifyProtocolMessageSignature(
             vote.public_key,
             primechain::crypto::commitPhaseTimeoutSigningPayload(
-                vote.previous_record_hash, vote.integer, vote.new_round, vote.validator_address),
+                vote.previous_record_hash, vote.integer, vote.current_round, vote.new_round,
+                vote.validator_address),
             vote.signature, error);
     }
 
@@ -2505,7 +2548,8 @@ private:
         const CommitPhaseTimeoutVote& vote,
         std::string& error) {
         if (!verifyCommitPhaseTimeoutVote(vote, error)) return false;
-        const auto key = std::make_tuple(vote.integer, vote.new_round, vote.validator_address);
+        const auto key = std::make_tuple(
+            vote.integer, vote.current_round, vote.new_round, vote.validator_address);
         const auto existing = commit_phase_timeouts_.find(key);
         if (existing != commit_phase_timeouts_.end()) {
             if (existing->second.public_key == vote.public_key) return true;
@@ -2519,6 +2563,7 @@ private:
     CommitPhaseTimeoutVote makeLocalCommitPhaseTimeoutVote(
         const primechain::Hash256& previous_hash,
         primechain::PrimeValue integer,
+        std::uint64_t current_round,
         std::uint64_t new_round,
         std::string& error) const {
         CommitPhaseTimeoutVote vote;
@@ -2527,32 +2572,34 @@ private:
         vote.public_key = validator_identity_->public_key;
         vote.previous_record_hash = previous_hash;
         vote.integer = integer;
+        vote.current_round = current_round;
         vote.new_round = new_round;
         const auto signature = primechain::crypto::signProtocolMessage(
             validator_identity_->private_key,
             primechain::crypto::commitPhaseTimeoutSigningPayload(
-                previous_hash, integer, new_round, vote.validator_address), error);
+                previous_hash, integer, current_round, new_round, vote.validator_address), error);
         if (signature.has_value()) vote.signature = *signature;
         return vote;
     }
 
-    bool clearCommitPhaseForTimeout(primechain::PrimeValue integer, std::string& error) {
+    bool clearCommitPhaseForTimeout(
+        primechain::PrimeValue integer,
+        std::uint64_t commit_round,
+        std::string& error) {
         bool commitments_changed = false;
         for (auto it = commitments_.begin(); it != commitments_.end();) {
-            if (it->first.first == integer) { it = commitments_.erase(it); commitments_changed = true; }
-            else ++it;
+            if (std::get<0>(it->first) == integer && std::get<1>(it->first) == commit_round) {
+                it = commitments_.erase(it);
+                commitments_changed = true;
+            } else ++it;
         }
         bool phases_changed = false;
         for (auto it = phase_votes_.begin(); it != phase_votes_.end();) {
-            if (it->first.first == integer) { it = phase_votes_.erase(it); phases_changed = true; }
-            else ++it;
+            if (std::get<0>(it->first) == integer && std::get<1>(it->first) == commit_round) {
+                it = phase_votes_.erase(it);
+                phases_changed = true;
+            } else ++it;
         }
-        bool timeout_changed = false;
-        for (auto it = commit_phase_timeouts_.begin(); it != commit_phase_timeouts_.end();) {
-            if (std::get<0>(it->first) == integer) { it = commit_phase_timeouts_.erase(it); timeout_changed = true; }
-            else ++it;
-        }
-        (void)timeout_changed;
         if (commitments_changed && !persistCommitments(error)) return false;
         if (phases_changed && !persistPhaseVotes(error)) return false;
         return true;
@@ -2560,10 +2607,11 @@ private:
 
     bool applyCommitPhaseTimeoutIfCertified(
         primechain::PrimeValue integer,
+        std::uint64_t current_round,
         std::uint64_t new_round,
         std::string& error) {
-        if (commitPhaseTimeoutVoteCount(integer, new_round) < 2) return true;
-        return clearCommitPhaseForTimeout(integer, error);
+        if (!commitPhaseTimeoutCertified(integer, current_round, new_round)) return true;
+        return clearCommitPhaseForTimeout(integer, current_round, error);
     }
 
     void timeoutCommitPhase(int fd, const std::string& line) {
@@ -2601,8 +2649,9 @@ private:
         std::istringstream in(line);
         std::string command, previous_hex, proposer_public_hex, proposer_signature_hex, extra;
         CommitPhaseTimeoutVote proposer;
-        in >> command >> previous_hex >> proposer.integer >> proposer.new_round
-           >> proposer.validator_address >> proposer_public_hex >> proposer_signature_hex;
+        in >> command >> previous_hex >> proposer.integer >> proposer.current_round
+           >> proposer.new_round >> proposer.validator_address >> proposer_public_hex
+           >> proposer_signature_hex;
         const auto previous = parseHash(previous_hex);
         if (!in || command != "SIGN_COMMIT_PHASE_TIMEOUT" || !previous.has_value() || (in >> extra)) {
             writeAll(fd, "ERROR invalid SIGN_COMMIT_PHASE_TIMEOUT\n");
@@ -2617,18 +2666,21 @@ private:
             return;
         }
         auto local = makeLocalCommitPhaseTimeoutVote(
-            proposer.previous_record_hash, proposer.integer, proposer.new_round, error);
+            proposer.previous_record_hash, proposer.integer, proposer.current_round,
+            proposer.new_round, error);
         if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        if (!applyCommitPhaseTimeoutIfCertified(proposer.integer, proposer.new_round, error)) {
+        if (!applyCommitPhaseTimeoutIfCertified(
+                proposer.integer, proposer.current_round, proposer.new_round, error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
         writeCommand(fd, "COMMIT_PHASE_TIMEOUT_VOTE "
             + primechain::crypto::toHex(local.previous_record_hash) + " "
-            + std::to_string(local.integer) + " " + std::to_string(local.new_round) + " "
+            + std::to_string(local.integer) + " " + std::to_string(local.current_round)
+            + " " + std::to_string(local.new_round) + " "
             + local.validator_address + " " + bytesToHex(local.public_key) + " "
             + bytesToHex(local.signature) + "\n");
     }
@@ -2637,11 +2689,13 @@ private:
         const primechain::Hash256& previous_hash,
         primechain::PrimeValue integer,
         std::string& error) {
-        constexpr std::uint64_t next_round = 2;
-        auto local = makeLocalCommitPhaseTimeoutVote(previous_hash, integer, next_round, error);
+        const std::uint64_t current_round = activeCommitPhaseRound(integer);
+        const std::uint64_t next_round = current_round + 1;
+        auto local = makeLocalCommitPhaseTimeoutVote(
+            previous_hash, integer, current_round, next_round, error);
         if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) return false;
         for (const auto& peer : peers_) {
-            if (commitPhaseTimeoutVoteCount(integer, next_round) >= 2) break;
+            if (commitPhaseTimeoutCertified(integer, current_round, next_round)) break;
             std::string peer_error;
             const auto vote = requestCommitPhaseTimeoutVote(peer, local, peer_error);
             if (!vote.has_value()) {
@@ -2655,11 +2709,11 @@ private:
                 continue;
             }
         }
-        if (commitPhaseTimeoutVoteCount(integer, next_round) < 2) {
+        if (!commitPhaseTimeoutCertified(integer, current_round, next_round)) {
             error = "could not collect two validator commit-phase timeout signatures";
             return false;
         }
-        return clearCommitPhaseForTimeout(integer, error);
+        return clearCommitPhaseForTimeout(integer, current_round, error);
     }
 
     primechain::protocol::RoundChangeVoteV1 makeLocalRoundChangeVote(
@@ -2931,10 +2985,11 @@ private:
     }
 
     std::vector<primechain::protocol::CommitCertificateEntryV1> certificateCommitments(
-        primechain::PrimeValue integer) const {
+        primechain::PrimeValue integer,
+        std::uint64_t commit_round) const {
         std::vector<primechain::protocol::CommitCertificateEntryV1> entries;
         for (const auto& item : commitments_) {
-            if (item.first.first != integer) continue;
+            if (std::get<0>(item.first) != integer || std::get<1>(item.first) != commit_round) continue;
             primechain::protocol::CommitCertificateEntryV1 entry;
             entry.commitment_hash = item.second.commitment_hash;
             entry.provider_address = item.second.provider_address;
@@ -2951,9 +3006,20 @@ private:
         return entries;
     }
 
-    primechain::Hash256 commitmentSnapshotHash(primechain::PrimeValue integer) const {
+    std::vector<primechain::protocol::CommitCertificateEntryV1> certificateCommitments(
+        primechain::PrimeValue integer) const {
+        return certificateCommitments(integer, activeCommitPhaseRound(integer));
+    }
+
+    primechain::Hash256 commitmentSnapshotHash(
+        primechain::PrimeValue integer,
+        std::uint64_t commit_round) const {
         return primechain::protocol::commitPhaseSnapshotHash(
-            integer, certificateCommitments(integer));
+            integer, certificateCommitments(integer, commit_round));
+    }
+
+    primechain::Hash256 commitmentSnapshotHash(primechain::PrimeValue integer) const {
+        return commitmentSnapshotHash(integer, activeCommitPhaseRound(integer));
     }
 
     primechain::protocol::CommitPhaseCertificateV1 embeddedCommitPhaseCertificate(
@@ -2962,11 +3028,12 @@ private:
         certificate.integer = integer;
         certificate.validator_set = validator_set_;
         std::sort(certificate.validator_set.begin(), certificate.validator_set.end());
-        certificate.commitments = certificateCommitments(integer);
+        const auto commit_round = activeCommitPhaseRound(integer);
+        certificate.commitments = certificateCommitments(integer, commit_round);
         certificate.snapshot_hash = primechain::protocol::commitPhaseSnapshotHash(
             integer, certificate.commitments);
         for (const auto& item : phase_votes_) {
-            if (item.first.first != integer) continue;
+            if (std::get<0>(item.first) != integer || std::get<1>(item.first) != commit_round) continue;
             primechain::protocol::CommitCertificateVoteV1 vote;
             vote.validator_address = item.second.validator_address;
             vote.public_key = item.second.public_key;
@@ -2980,20 +3047,32 @@ private:
         return certificate;
     }
 
-    std::size_t phaseVoteCount(primechain::PrimeValue integer) const {
+    std::size_t phaseVoteCount(primechain::PrimeValue integer, std::uint64_t commit_round) const {
         std::size_t count = 0;
         for (const auto& entry : phase_votes_) {
-            if (entry.first.first == integer) ++count;
+            if (std::get<0>(entry.first) == integer && std::get<1>(entry.first) == commit_round) ++count;
         }
         return count;
     }
 
+    std::size_t phaseVoteCount(primechain::PrimeValue integer) const {
+        return phaseVoteCount(integer, activeCommitPhaseRound(integer));
+    }
+
+    bool phaseClosed(primechain::PrimeValue integer, std::uint64_t commit_round) const {
+        return phaseVoteCount(integer, commit_round) >= 2;
+    }
+
     bool phaseClosed(primechain::PrimeValue integer) const {
-        return phaseVoteCount(integer) >= 2;
+        return phaseClosed(integer, activeCommitPhaseRound(integer));
+    }
+
+    bool phaseFrozen(primechain::PrimeValue integer, std::uint64_t commit_round) const {
+        return phaseVoteCount(integer, commit_round) != 0;
     }
 
     bool phaseFrozen(primechain::PrimeValue integer) const {
-        return phaseVoteCount(integer) != 0;
+        return phaseFrozen(integer, activeCommitPhaseRound(integer));
     }
 
     bool loadPhaseVotesInternal(std::string& error) {
@@ -3012,8 +3091,8 @@ private:
         if (!node.load(error)) return false;
         const primechain::PrimeValue target =
             (node.status().has_genesis ? node.status().frontier_integer : 2) + 1;
-        const auto expected_snapshot = commitmentSnapshotHash(target);
         for (const auto& vote : stored) {
+            const auto expected_snapshot = commitmentSnapshotHash(target, vote.commit_round);
             if (vote.integer != target || vote.snapshot_hash != expected_snapshot ||
                 std::find(validator_set_.begin(), validator_set_.end(), vote.validator_address) ==
                     validator_set_.end() ||
@@ -3032,7 +3111,7 @@ private:
                 error = "invalid persisted commit-phase vote signature";
                 return false;
             }
-            const auto key = std::make_pair(vote.integer, vote.validator_address);
+            const auto key = std::make_tuple(vote.integer, vote.commit_round, vote.validator_address);
             if (!phase_votes_.emplace(key, vote).second) {
                 error = "duplicate persisted validator vote";
                 return false;
@@ -3051,7 +3130,7 @@ private:
             return false;
         }
         std::ostringstream command;
-        command << "SUBMIT_PHASE_VOTE_PEER " << vote.integer << " "
+        command << "SUBMIT_PHASE_VOTE_PEER " << vote.integer << " " << vote.commit_round << " "
                 << primechain::crypto::toHex(vote.snapshot_hash) << " "
                 << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
                 << bytesToHex(vote.signature) << "\n";
@@ -3094,7 +3173,11 @@ private:
             error = "phase vote must target next integer " + std::to_string(target);
             return false;
         }
-        if (commitments_.empty()) {
+        if (vote.commit_round != activeCommitPhaseRound(vote.integer)) {
+            error = "phase vote targets inactive commit round";
+            return false;
+        }
+        if (certificateCommitments(vote.integer, vote.commit_round).empty()) {
             error = "cannot close an empty commit phase";
             return false;
         }
@@ -3108,13 +3191,14 @@ private:
             error = "validator address does not match public key";
             return false;
         }
-        const auto snapshot = commitmentSnapshotHash(vote.integer);
+        const auto snapshot = commitmentSnapshotHash(vote.integer, vote.commit_round);
         if (vote.snapshot_hash != snapshot) {
             error = "phase vote snapshot does not match local commitments";
             return false;
         }
         for (const auto& existing : phase_votes_) {
-            if (existing.first.first == vote.integer &&
+            if (std::get<0>(existing.first) == vote.integer &&
+                std::get<1>(existing.first) == vote.commit_round &&
                 existing.second.snapshot_hash != vote.snapshot_hash) {
                 error = "commit phase already frozen on a different snapshot";
                 return false;
@@ -3130,7 +3214,7 @@ private:
             error = "invalid commit-phase validator signature";
             return false;
         }
-        const auto key = std::make_pair(vote.integer, vote.validator_address);
+        const auto key = std::make_tuple(vote.integer, vote.commit_round, vote.validator_address);
         const auto existing = phase_votes_.find(key);
         if (existing != phase_votes_.end()) {
             if (existing->second.snapshot_hash == vote.snapshot_hash &&
@@ -3163,7 +3247,8 @@ private:
         }
         primechain::storage::CommitPhaseVote vote;
         vote.integer = integer;
-        vote.snapshot_hash = commitmentSnapshotHash(integer);
+        vote.commit_round = activeCommitPhaseRound(integer);
+        vote.snapshot_hash = commitmentSnapshotHash(integer, vote.commit_round);
         vote.validator_address = validator_identity_->address;
         vote.public_key = validator_identity_->public_key;
         std::string error;
@@ -3178,7 +3263,7 @@ private:
         }
         vote.signature = *signature;
         const bool duplicate = phase_votes_.find(
-            std::make_pair(integer, vote.validator_address)) != phase_votes_.end();
+            std::make_tuple(integer, vote.commit_round, vote.validator_address)) != phase_votes_.end();
         if (!acceptPhaseVote(vote, error, true)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
@@ -3190,10 +3275,19 @@ private:
 
     void submitPhaseVote(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
-        std::string command, snapshot_hex, address, public_key_hex, signature_hex, extra;
+        std::string command, maybe_round_or_snapshot, snapshot_hex, address, public_key_hex, signature_hex, extra;
         primechain::PrimeValue integer = 0;
-        in >> command >> integer >> snapshot_hex >> address >> public_key_hex >> signature_hex;
-        const auto snapshot = parseHash(snapshot_hex);
+        in >> command >> integer >> maybe_round_or_snapshot;
+        auto snapshot = parseHash(maybe_round_or_snapshot);
+        std::uint64_t commit_round = activeCommitPhaseRound(integer);
+        if (snapshot.has_value()) {
+            snapshot_hex = maybe_round_or_snapshot;
+            in >> address >> public_key_hex >> signature_hex;
+        } else {
+            commit_round = std::stoull(maybe_round_or_snapshot);
+            in >> snapshot_hex >> address >> public_key_hex >> signature_hex;
+            snapshot = parseHash(snapshot_hex);
+        }
         if (!in || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER") ||
             !snapshot.has_value() || (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_PHASE_VOTE\n");
@@ -3201,11 +3295,12 @@ private:
         }
         primechain::storage::CommitPhaseVote vote;
         vote.integer = integer;
+        vote.commit_round = commit_round;
         vote.snapshot_hash = *snapshot;
         vote.validator_address = address;
         vote.public_key = hexToBytes(public_key_hex);
         vote.signature = hexToBytes(signature_hex);
-        const bool duplicate = phase_votes_.find(std::make_pair(integer, address)) != phase_votes_.end();
+        const bool duplicate = phase_votes_.find(std::make_tuple(integer, vote.commit_round, address)) != phase_votes_.end();
         std::string error;
         if (!acceptPhaseVote(vote, error, propagate)) {
             writeAll(fd, "ERROR " + error + "\n");
@@ -3264,9 +3359,10 @@ private:
         const auto winner = selectedCommitment(integer);
         const std::string phase_state = phaseClosed(integer) ? "CLOSED" :
             (phaseFrozen(integer) ? "CLOSING" : "OPEN");
+        const auto commit_round = activeCommitPhaseRound(integer);
         std::size_t commitment_count = 0;
         for (const auto& item : commitments_) {
-            if (item.first.first == integer) ++commitment_count;
+            if (std::get<0>(item.first) == integer && std::get<1>(item.first) == commit_round) ++commitment_count;
         }
         writeAll(fd, "MINING_VIEW "
             + std::to_string(frontier) + " "
@@ -3278,7 +3374,7 @@ private:
             + primechain::crypto::toHex(commitmentSnapshotHash(integer)) + " "
             + (winner.has_value() ? winner->provider_address : std::string("-")) + " "
             + std::to_string(commitment_count) + " "
-            + std::to_string(activeFinalizationRound(integer)) + " "
+            + std::to_string(commit_round) + " "
             + std::to_string(validator_set_.size()) + " "
             + std::to_string(peers_.size()) + "\n");
     }
@@ -3292,12 +3388,14 @@ private:
             writeAll(fd, "ERROR invalid GET_PHASE_VOTES\n");
             return;
         }
+        const auto commit_round = activeCommitPhaseRound(integer);
         writeAll(fd, "PHASE_VOTES " + std::to_string(integer) + " "
-            + std::to_string(phaseVoteCount(integer)) + "\n");
+            + std::to_string(phaseVoteCount(integer, commit_round)) + "\n");
         for (const auto& entry : phase_votes_) {
-            if (entry.first.first != integer) continue;
+            if (std::get<0>(entry.first) != integer || std::get<1>(entry.first) != commit_round) continue;
             const auto& vote = entry.second;
             writeCommand(fd, "PHASE_VOTE " + std::to_string(integer) + " "
+                + std::to_string(vote.commit_round) + " "
                 + primechain::crypto::toHex(vote.snapshot_hash) + " "
                 + vote.validator_address + " " + bytesToHex(vote.public_key) + " "
                 + bytesToHex(vote.signature) + "\n");
@@ -3575,7 +3673,7 @@ private:
             writeAll(fd, "ERROR commit phase is closing or closed\n");
             return;
         }
-        const auto key = std::make_pair(g, provider_address);
+        const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
             if (existing->second.commitment_hash == *commitment_hash &&
@@ -3596,6 +3694,7 @@ private:
 
         primechain::storage::StoredCommitment stored;
         stored.integer = g;
+        stored.commit_round = activeCommitPhaseRound(g);
         stored.provider_address = provider_address;
         stored.commitment_hash = *commitment_hash;
         stored.public_key = public_key;
@@ -3651,14 +3750,14 @@ private:
         }
 
         for (auto it = commitments_.begin(); it != commitments_.end();) {
-            if (it->first.first < g) {
+            if (std::get<0>(it->first) < g) {
                 it = commitments_.erase(it);
             } else {
                 ++it;
             }
         }
 
-        const auto key = std::make_pair(g, provider_address);
+        const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
             if (existing->second.commitment_hash == *commitment) {
@@ -3677,6 +3776,7 @@ private:
 
         primechain::storage::StoredCommitment stored_commitment;
         stored_commitment.integer = g;
+        stored_commitment.commit_round = activeCommitPhaseRound(g);
         stored_commitment.provider_address = provider_address;
         stored_commitment.commitment_hash = *commitment;
         commitments_[key] = stored_commitment;
@@ -3701,15 +3801,16 @@ private:
             return;
         }
 
+        const auto commit_round = activeCommitPhaseRound(integer);
         std::size_t count = 0;
         for (const auto& entry : commitments_) {
-            if (entry.first.first == integer) {
+            if (std::get<0>(entry.first) == integer && std::get<1>(entry.first) == commit_round) {
                 ++count;
             }
         }
         writeAll(fd, "COMMITMENTS " + std::to_string(integer) + " " + std::to_string(count) + "\n");
         for (const auto& entry : commitments_) {
-            if (entry.first.first != integer) {
+            if (std::get<0>(entry.first) != integer || std::get<1>(entry.first) != commit_round) {
                 continue;
             }
             const auto& commitment = entry.second;
@@ -3724,9 +3825,10 @@ private:
 
     std::optional<primechain::storage::StoredCommitment> selectedCommitment(
         primechain::PrimeValue g) const {
+        const auto commit_round = activeCommitPhaseRound(g);
         std::optional<primechain::storage::StoredCommitment> selected;
         for (const auto& entry : commitments_) {
-            if (entry.first.first != g) {
+            if (std::get<0>(entry.first) != g || std::get<1>(entry.first) != commit_round) {
                 continue;
             }
             const auto& candidate = entry.second;
@@ -3800,7 +3902,7 @@ private:
             return;
         }
 
-        const auto key = std::make_pair(g, provider_address);
+        const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
         const auto existing = commitments_.find(key);
         if (existing == commitments_.end()) {
             writeAll(fd, "ERROR no prior commitment for reveal\n");
@@ -3859,7 +3961,7 @@ private:
             return;
         }
 
-        const auto key = std::make_pair(g, provider_address);
+        const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
         const auto existing = commitments_.find(key);
         if (existing == commitments_.end()) {
             writeAll(fd, "ERROR no prior commitment for reveal\n");
@@ -4489,17 +4591,17 @@ private:
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<
-        std::pair<primechain::PrimeValue, std::string>,
+        std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::StoredCommitment> commitments_;
     std::map<
-        std::pair<primechain::PrimeValue, std::string>,
+        std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::CommitPhaseVote> phase_votes_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
         primechain::protocol::RoundChangeVoteV1> round_changes_;
-    std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
+    std::map<std::tuple<primechain::PrimeValue, std::uint64_t, std::uint64_t, primechain::Address>,
         CommitPhaseTimeoutVote> commit_phase_timeouts_;
 };
 

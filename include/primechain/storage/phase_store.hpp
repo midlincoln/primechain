@@ -9,6 +9,7 @@ namespace primechain::storage {
 
 struct CommitPhaseVote {
     PrimeValue integer{0};
+    std::uint64_t commit_round{1};
     Hash256 snapshot_hash{};
     Address validator_address;
     std::vector<std::uint8_t> public_key;

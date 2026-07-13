@@ -140,7 +140,7 @@ struct MiningView {
     std::string snapshot_hash;
     std::string winner;
     std::size_t commitment_count{0};
-    std::uint64_t finalization_round{0};
+    std::uint64_t commit_round{0};
     std::size_t validator_count{0};
     std::size_t peer_count{0};
 };
@@ -411,7 +411,7 @@ std::optional<MiningView> requestMiningView(
        >> view.snapshot_hash
        >> view.winner
        >> view.commitment_count
-       >> view.finalization_round
+       >> view.commit_round
        >> view.validator_count
        >> view.peer_count;
     if (!in || tag != "MINING_VIEW" || view.target != integer ||

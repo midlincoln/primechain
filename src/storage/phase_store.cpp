@@ -11,6 +11,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3156455341485055ull;
+constexpr std::uint64_t kMagicV2 = 0x3256455341485055ull;
 constexpr std::uint64_t kMaxFieldBytes = 8192;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
@@ -72,13 +73,14 @@ std::vector<CommitPhaseVote> PhaseStore::loadAll(std::string& error) const {
             error = "truncated phase store magic";
             return {};
         }
-        if (magic != kMagic) {
+        if (magic != kMagic && magic != kMagicV2) {
             error = "invalid phase store magic";
             return {};
         }
         CommitPhaseVote vote;
         std::vector<std::uint8_t> address;
         if (!readUint64(in, vote.integer) ||
+            (magic == kMagicV2 && !readUint64(in, vote.commit_round)) ||
             !in.read(reinterpret_cast<char*>(vote.snapshot_hash.data()), vote.snapshot_hash.size()) ||
             !readBytes(in, address, error) || !readBytes(in, vote.public_key, error) ||
             !readBytes(in, vote.signature, error)) {
@@ -109,8 +111,9 @@ bool PhaseStore::replaceAll(const std::vector<CommitPhaseVote>& votes, std::stri
             std::remove(temp_path.c_str());
             return false;
         }
-        writeUint64(out, kMagic);
+        writeUint64(out, kMagicV2);
         writeUint64(out, vote.integer);
+        writeUint64(out, vote.commit_round);
         out.write(reinterpret_cast<const char*>(vote.snapshot_hash.data()), vote.snapshot_hash.size());
         writeBytes(out, address);
         writeBytes(out, vote.public_key);

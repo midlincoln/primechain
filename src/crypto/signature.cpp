@@ -316,12 +316,14 @@ Bytes commitPhaseVoteSigningPayload(
 Bytes commitPhaseTimeoutSigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue integer,
+    std::uint64_t current_round,
     std::uint64_t new_round,
     const Address& validator_address) {
     Bytes payload;
-    appendString(payload, "primechain-commit-phase-timeout-mldsa65-v1");
+    appendString(payload, "primechain-commit-phase-timeout-mldsa65-v2");
     appendHash(payload, previous_record_hash);
     appendUint64(payload, integer);
+    appendUint64(payload, current_round);
     appendUint64(payload, new_round);
     appendString(payload, validator_address);
     return payload;
