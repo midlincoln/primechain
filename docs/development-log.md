@@ -2,6 +2,45 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-13: Board Report And Validator Reputation Commands
+
+Added first-pass `primechain-client board-report <record-store> --from <n> --to <m>`
+and `primechain-client validator-reputation <record-store> <address>` commands.
+These commands do not change consensus. They replay existing finalized records
+and produce the facts needed for policy-board review: record counts,
+prime/composite mix, discovery and fee rewards, unique miners, validator
+finalization evidence, and address-bound mining history. This is the measurable
+layer that should precede validator applications, reserve locks, and policy
+votes.
+
+## 2026-07-13: Reserve-Backed Validator Economy Direction
+
+Primechain's architecture separates arithmetic discovery from settlement
+finality. Miners produce prime and composite evidence; validators provide public
+endpoints, finality, coordination, timeout recovery, sync service, and policy
+governance. The emerging economic model therefore prices those roles
+separately.
+
+The current direction is a reserve-backed validator system:
+
+- validator operators use separate signing, reserve, income, and optional admin
+  wallets,
+- mining history is address-bound and non-transferable,
+- validator reserve funds are locked and later unbonded only after delay,
+- validator rewards are paid to income wallets, not reserve wallets,
+- board meetings are represented as integer-range policy epochs,
+- validators review network data and vote on reward/reserve parameters within
+  hard protocol bounds,
+- admission/removal will require explicit on-chain events and delayed
+  activation.
+
+The detailed design target is recorded in `docs/validator-economy-v0.md`.
+
+Before implementing reserve governance, the wallet layer should gain
+passphrase-protected protocol wallets and a clean transfer UX. The current
+public testnet remains experimental and can be reset before a reserve/governance
+testnet.
+
 ## 2026-06-04: Cooperative Arithmetic Chain Direction
 
 ### Working Prototype

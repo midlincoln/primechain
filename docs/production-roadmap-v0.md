@@ -99,6 +99,10 @@ Deliverables:
 - address balances,
 - transaction batch Merkle roots.
 
+Before reserve-backed validator governance is implemented, protocol wallets
+need encrypted/passphrase-protected key storage and a clean public transfer UX.
+The validator economy design is tracked in `docs/validator-economy-v0.md`.
+
 ## Stage 7: Rewards
 
 Purpose: pay contributors deterministically.
@@ -109,6 +113,10 @@ Deliverables:
 - composite-proof reward pool,
 - transaction fee distribution,
 - contributor accounting.
+
+Future reward work should split newly minted prime assets into discovery,
+validator-finality, and treasury pools according to policy-epoch parameters.
+The current hardcoded development reward split remains a prototype rule.
 
 ## Stage 8: Spam And DoS Protection
 

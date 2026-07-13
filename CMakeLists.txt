@@ -473,6 +473,13 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.log ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat >/dev/null && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat | grep -q 'frontier_integer: 20' && $<TARGET_FILE:primechain-client> inspect ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat --range 18 20 | grep -q '^20 18 COMPOSITE ' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 19 | grep -q '^factors_of_p_minus_1: 2 2^1 3^2$' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 20 | grep -q '^divisor: 2$' && $<TARGET_FILE:primechain-client> decode-record ${CMAKE_CURRENT_BINARY_DIR}/client-inspect.dat 20 | grep -q '^cofactor: 10$'"
 )
 add_test(
+    NAME client_board_reports
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat ${CMAKE_CURRENT_BINARY_DIR}/client-board.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-board.log ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat >/dev/null && $<TARGET_FILE:primechain-client> board-report ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat --from 2 --to 20 | grep -q '^BOARD_REPORT .* from=2 to=20$' && $<TARGET_FILE:primechain-client> board-report ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat --from 2 --to 20 | grep -q '^RECORDS total=19 prime=8 composite=11 transactions=0$' && $<TARGET_FILE:primechain-client> board-report ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat --from 2 --to 20 | grep -q '^REWARDS discovery_micro_units=8000000 fee_micro_units=0 unique_miners=3$' && $<TARGET_FILE:primechain-client> validator-reputation ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat pcdev1_prime_miner | grep -q '^MINING_HISTORY prime_records=7 composite_records=0 work_score=70 discovery_micro_units=4000004 fee_micro_units=0$' && $<TARGET_FILE:primechain-client> validator-reputation ${CMAKE_CURRENT_BINARY_DIR}/client-board.dat pcdev1_validator_a | grep -q '^VALIDATOR_PARTICIPATION finalization_votes=19 commit_phase_votes=0 round_change_votes=0 total_participation_events=19$'"
+)
+
+add_test(
     NAME client_status_and_sync
     COMMAND
         /bin/sh -c

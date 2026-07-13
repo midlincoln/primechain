@@ -65,6 +65,8 @@ that remain available for tests and protocol development.
 ./build/primechain-client balances ./pc-work
 ./build/primechain-client rewards ./pc-work
 ./build/primechain-client reward-history ./pc-work --last 20
+./build/primechain-client board-report ./pc-work/data/chain.dat --from 2 --to 100
+./build/primechain-client validator-reputation ./pc-work/data/chain.dat <address>
 ./build/primechain-client update-indexes ./pc-work
 ./build/primechain-client index-status ./pc-work
 ./build/primechain-client factor-workdir ./pc-work 84
@@ -87,7 +89,10 @@ from replay, `rewards` summarizes totals, and `reward-history` lists per-record
 prime, composite, and fee reward events from the local chain. `update-indexes` builds
 a rebuildable local composite-proof cache under `indexes/`, and
 `factor-workdir` / `pratt-workdir` use that cache instead of rescanning the
-chain. `decode-record` prints a human-readable view of a local prime or composite chain record. The lower-level direct commands remain available for tests and debugging:
+chain. `board-report` prints replay-derived meeting-range metrics for records,
+rewards, miner distribution, and validator evidence. `validator-reputation`
+prints replay-derived mining history and validator participation for one address.
+`decode-record` prints a human-readable view of a local prime or composite chain record. The lower-level direct commands remain available for tests and debugging:
 
 ```bash
 ./build/primechain-client status 127.0.0.1 18889

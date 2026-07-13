@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -808,6 +809,323 @@ int rewardHistoryWorkdir(int argc, char** argv) {
     return 0;
 }
 
+
+struct AddressBoardStats {
+    std::uint64_t prime_records{0};
+    std::uint64_t composite_records{0};
+    std::uint64_t discovery_micro_units{0};
+    std::uint64_t fee_micro_units{0};
+};
+
+struct ValidatorBoardStats {
+    std::uint64_t finalization_votes{0};
+    std::uint64_t round_change_votes{0};
+    std::uint64_t commit_phase_votes{0};
+};
+
+struct BoardReportStats {
+    primechain::PrimeValue from{0};
+    primechain::PrimeValue to{0};
+    std::uint64_t records{0};
+    std::uint64_t prime_records{0};
+    std::uint64_t composite_records{0};
+    std::uint64_t transaction_count{0};
+    std::uint64_t fee_micro_units{0};
+    std::uint64_t pending_composites_after_range{0};
+    std::map<primechain::Address, AddressBoardStats> miners;
+    std::map<primechain::Address, ValidatorBoardStats> validators;
+};
+
+bool inRange(primechain::PrimeValue n, primechain::PrimeValue from, primechain::PrimeValue to) {
+    return n >= from && n <= to;
+}
+
+void addDiscoveryReward(
+    BoardReportStats& stats,
+    const primechain::Address& address,
+    std::uint64_t micro_units) {
+    stats.miners[address].discovery_micro_units += micro_units;
+}
+
+void addFeeReward(
+    BoardReportStats& stats,
+    const primechain::Address& address,
+    std::uint64_t micro_units) {
+    stats.miners[address].fee_micro_units += micro_units;
+    stats.fee_micro_units += micro_units;
+}
+
+void addValidatorEvidence(
+    BoardReportStats& stats,
+    const primechain::protocol::CommitPhaseCertificateV1& phase,
+    const primechain::protocol::FinalizationProofV0& finalization) {
+    for (const auto& vote : phase.votes) {
+        ++stats.validators[vote.validator_address].commit_phase_votes;
+    }
+    for (const auto& vote : finalization.votes) {
+        ++stats.validators[vote.validator_address].finalization_votes;
+    }
+    for (const auto& vote : finalization.round_changes) {
+        ++stats.validators[vote.validator_address].round_change_votes;
+    }
+}
+
+bool collectBoardReportStats(
+    const std::string& store_path,
+    primechain::PrimeValue from,
+    primechain::PrimeValue to,
+    BoardReportStats& stats,
+    std::string& error) {
+    if (from < 2 || to < from) {
+        error = "invalid report range";
+        return false;
+    }
+
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) return false;
+
+    stats = BoardReportStats{};
+    stats.from = from;
+    stats.to = to;
+
+    std::vector<PendingCompositeReward> pending;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) return false;
+            if (inRange(record->integer, from, to)) {
+                ++stats.records;
+                ++stats.composite_records;
+                ++stats.miners[record->proof.provider_address].composite_records;
+                stats.transaction_count += record->transactions.size();
+                const auto fees = transactionFees(record->transactions);
+                if (fees != 0) addFeeReward(stats, record->proof.provider_address, fees);
+                addValidatorEvidence(stats, record->commit_phase, record->finalized_by);
+            }
+            pending.push_back({record->proof.provider_address, record->integer});
+            if (record->integer <= to) stats.pending_composites_after_range = pending.size();
+            continue;
+        }
+
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        const bool count_record = inRange(record->integer, from, to);
+        if (count_record) {
+            ++stats.records;
+            ++stats.prime_records;
+            ++stats.miners[record->proof.provider_address].prime_records;
+            stats.transaction_count += record->transactions.size();
+            const auto fees = transactionFees(record->transactions);
+            if (fees != 0) addFeeReward(stats, record->proof.provider_address, fees);
+            addValidatorEvidence(stats, primechain::protocol::CommitPhaseCertificateV1{}, record->finalized_by);
+        }
+
+        if (count_record) {
+            if (pending.empty()) {
+                addDiscoveryReward(stats, record->proof.provider_address, primechain::node::kAssetMicroUnits);
+            } else {
+                constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
+                const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+                const std::uint64_t per_composite = composite_pool / pending.size();
+                const std::uint64_t remainder = composite_pool % pending.size();
+                addDiscoveryReward(stats, record->proof.provider_address, prime_reward + remainder);
+                for (const auto& provider : pending) {
+                    addDiscoveryReward(stats, provider.provider, per_composite);
+                }
+            }
+        }
+        pending.clear();
+        if (record->integer <= to) stats.pending_composites_after_range = pending.size();
+    }
+
+    return true;
+}
+
+std::vector<std::pair<primechain::Address, AddressBoardStats>> sortedMinerStats(
+    const std::map<primechain::Address, AddressBoardStats>& miners) {
+    std::vector<std::pair<primechain::Address, AddressBoardStats>> out(miners.begin(), miners.end());
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        const auto total_a = a.second.discovery_micro_units + a.second.fee_micro_units;
+        const auto total_b = b.second.discovery_micro_units + b.second.fee_micro_units;
+        if (total_a != total_b) return total_a > total_b;
+        const auto records_a = a.second.prime_records + a.second.composite_records;
+        const auto records_b = b.second.prime_records + b.second.composite_records;
+        if (records_a != records_b) return records_a > records_b;
+        return a.first < b.first;
+    });
+    return out;
+}
+
+std::vector<std::pair<primechain::Address, ValidatorBoardStats>> sortedValidatorStats(
+    const std::map<primechain::Address, ValidatorBoardStats>& validators) {
+    std::vector<std::pair<primechain::Address, ValidatorBoardStats>> out(validators.begin(), validators.end());
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        const auto total_a = a.second.finalization_votes + a.second.round_change_votes + a.second.commit_phase_votes;
+        const auto total_b = b.second.finalization_votes + b.second.round_change_votes + b.second.commit_phase_votes;
+        if (total_a != total_b) return total_a > total_b;
+        return a.first < b.first;
+    });
+    return out;
+}
+
+int boardReport(int argc, char** argv) {
+    if (argc != 7 || std::string(argv[3]) != "--from" || std::string(argv[5]) != "--to") return 1;
+    const std::string store_path = argv[2];
+    const auto from = static_cast<primechain::PrimeValue>(std::stoull(argv[4]));
+    const auto to = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
+
+    BoardReportStats stats;
+    std::string error;
+    if (!collectBoardReportStats(store_path, from, to, stats, error)) {
+        std::cerr << "could not build board report: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t discovery_total = 0;
+    std::uint64_t unique_miners = 0;
+    for (const auto& entry : stats.miners) {
+        const auto record_count = entry.second.prime_records + entry.second.composite_records;
+        const auto reward_total = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (record_count != 0 || reward_total != 0) ++unique_miners;
+        discovery_total += entry.second.discovery_micro_units;
+    }
+
+    std::cout << "BOARD_REPORT " << store_path << " from=" << stats.from << " to=" << stats.to << "\n";
+    std::cout << "RECORDS total=" << stats.records
+              << " prime=" << stats.prime_records
+              << " composite=" << stats.composite_records
+              << " transactions=" << stats.transaction_count << "\n";
+    std::cout << "REWARDS discovery_micro_units=" << discovery_total
+              << " fee_micro_units=" << stats.fee_micro_units
+              << " unique_miners=" << unique_miners << "\n";
+    std::cout << "PENDING_COMPOSITES_AFTER_RANGE " << stats.pending_composites_after_range << "\n";
+
+    for (const auto& entry : sortedMinerStats(stats.miners)) {
+        const auto records = entry.second.prime_records + entry.second.composite_records;
+        const auto rewards = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (records == 0 && rewards == 0) continue;
+        std::cout << "MINER " << entry.first
+                  << " prime_records=" << entry.second.prime_records
+                  << " composite_records=" << entry.second.composite_records
+                  << " discovery_micro_units=" << entry.second.discovery_micro_units
+                  << " fee_micro_units=" << entry.second.fee_micro_units << "\n";
+    }
+
+    for (const auto& entry : sortedValidatorStats(stats.validators)) {
+        std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " finalization_votes=" << entry.second.finalization_votes
+                  << " commit_phase_votes=" << entry.second.commit_phase_votes
+                  << " round_change_votes=" << entry.second.round_change_votes << "\n";
+    }
+    return 0;
+}
+
+int validatorReputation(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const primechain::Address address = argv[3];
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "could not load record store: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t prime_records = 0;
+    std::uint64_t composite_records = 0;
+    std::uint64_t discovery_micro_units = 0;
+    std::uint64_t fee_micro_units = 0;
+    std::uint64_t finalization_votes = 0;
+    std::uint64_t round_change_votes = 0;
+    std::uint64_t commit_phase_votes = 0;
+    std::uint64_t policy_votes = 0;
+    std::uint64_t epoch_votes = 0;
+    std::vector<PendingCompositeReward> pending;
+
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode composite record: " << error << "\n";
+                return 1;
+            }
+            if (record->proof.provider_address == address) {
+                ++composite_records;
+                fee_micro_units += transactionFees(record->transactions);
+            }
+            for (const auto& vote : record->commit_phase.votes) {
+                if (vote.validator_address == address) ++commit_phase_votes;
+            }
+            for (const auto& vote : record->finalized_by.votes) {
+                if (vote.validator_address == address) ++finalization_votes;
+            }
+            for (const auto& vote : record->finalized_by.round_changes) {
+                if (vote.validator_address == address) ++round_change_votes;
+            }
+            for (const auto& vote : record->validator_epoch.votes) {
+                if (vote.validator_address == address) ++epoch_votes;
+            }
+            pending.push_back({record->proof.provider_address, record->integer});
+            continue;
+        }
+
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode prime record: " << error << "\n";
+            return 1;
+        }
+        if (record->proof.provider_address == address) {
+            ++prime_records;
+            fee_micro_units += transactionFees(record->transactions);
+        }
+        for (const auto& vote : record->finalized_by.votes) {
+            if (vote.validator_address == address) ++finalization_votes;
+        }
+        for (const auto& vote : record->finalized_by.round_changes) {
+            if (vote.validator_address == address) ++round_change_votes;
+        }
+        for (const auto& vote : record->validator_epoch.votes) {
+            if (vote.validator_address == address) ++epoch_votes;
+        }
+
+        if (pending.empty()) {
+            if (record->proof.provider_address == address) {
+                discovery_micro_units += primechain::node::kAssetMicroUnits;
+            }
+        } else {
+            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
+            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t per_composite = composite_pool / pending.size();
+            const std::uint64_t remainder = composite_pool % pending.size();
+            if (record->proof.provider_address == address) discovery_micro_units += prime_reward + remainder;
+            for (const auto& provider : pending) {
+                if (provider.provider == address) discovery_micro_units += per_composite;
+            }
+        }
+        pending.clear();
+    }
+
+    const auto work_score = prime_records * 10 + composite_records * 2;
+    const auto participation = finalization_votes + commit_phase_votes + round_change_votes;
+    std::cout << "VALIDATOR_REPUTATION " << address << "\n";
+    std::cout << "MINING_HISTORY prime_records=" << prime_records
+              << " composite_records=" << composite_records
+              << " work_score=" << work_score
+              << " discovery_micro_units=" << discovery_micro_units
+              << " fee_micro_units=" << fee_micro_units << "\n";
+    std::cout << "VALIDATOR_PARTICIPATION finalization_votes=" << finalization_votes
+              << " commit_phase_votes=" << commit_phase_votes
+              << " round_change_votes=" << round_change_votes
+              << " total_participation_events=" << participation << "\n";
+    std::cout << "GOVERNANCE_PARTICIPATION epoch_votes=" << epoch_votes
+              << " policy_votes=" << policy_votes << "\n";
+    std::cout << "TRANSFERABILITY mining_history=non_transferable reserve_required=not_implemented\n";
+    return 0;
+}
+
 int updateIndexes(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string workdir = argv[2];
@@ -1236,6 +1554,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " balances <workdir>\n"
               << "  " << argv0 << " rewards <workdir>\n"
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
+              << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
+              << "  " << argv0 << " validator-reputation <record-store> <address>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -1304,6 +1624,14 @@ int main(int argc, char** argv) {
     if (command == "reward-history") {
         if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
         return rewardHistoryWorkdir(argc, argv);
+    }
+    if (command == "board-report") {
+        if (argc != 7) { printUsage(argv[0]); return 1; }
+        return boardReport(argc, argv);
+    }
+    if (command == "validator-reputation") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorReputation(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
