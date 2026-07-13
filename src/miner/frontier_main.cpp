@@ -122,6 +122,13 @@ struct CommitPhaseStatus {
     std::string winner;
 };
 
+enum class CommitPhaseState {
+    Unknown,
+    Open,
+    Closing,
+    Closed,
+};
+
 struct MiningView {
     PeerEndpoint peer;
     primechain::PrimeValue frontier{0};
@@ -363,11 +370,22 @@ std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
     return peers;
 }
 
-int phaseRank(const std::string& state) {
-    if (state == "CLOSED") return 3;
-    if (state == "CLOSING") return 2;
-    if (state == "OPEN") return 1;
+CommitPhaseState parseCommitPhaseState(const std::string& state) {
+    if (state == "CLOSED") return CommitPhaseState::Closed;
+    if (state == "CLOSING") return CommitPhaseState::Closing;
+    if (state == "OPEN") return CommitPhaseState::Open;
+    return CommitPhaseState::Unknown;
+}
+
+int phaseRank(CommitPhaseState state) {
+    if (state == CommitPhaseState::Closed) return 3;
+    if (state == CommitPhaseState::Closing) return 2;
+    if (state == CommitPhaseState::Open) return 1;
     return 0;
+}
+
+int phaseRank(const std::string& state) {
+    return phaseRank(parseCommitPhaseState(state));
 }
 
 std::optional<MiningView> requestMiningView(
@@ -402,6 +420,10 @@ std::optional<MiningView> requestMiningView(
     }
     view.has_genesis = has_genesis != 0;
     return view;
+}
+
+CommitPhaseState viewPhaseState(const MiningView& view) {
+    return parseCommitPhaseState(view.phase_state);
 }
 
 std::vector<MiningView> requestMiningViews(
@@ -870,7 +892,8 @@ int main(int argc, char** argv) {
             ? composite_identity->address : composite_miner;
 
         auto adoptMiningView = [&](const MiningView& view, bool can_reveal_local) -> std::optional<bool> {
-            if (view.phase_state == "CLOSED") {
+            switch (viewPhaseState(view)) {
+            case CommitPhaseState::Closed:
                 if (view.winner == local_provider && can_reveal_local) {
                     reveal_peer = view.peer;
                     return true;
@@ -880,13 +903,16 @@ int main(int argc, char** argv) {
                 }
                 if (retryCurrentInteger("commit phase already won by " + view.winner)) return false;
                 return std::nullopt;
-            }
-            if (view.phase_state == "CLOSING") {
+            case CommitPhaseState::Closing:
                 if (retryCurrentInteger("commit phase is closing on " + view.peer.host + ":" +
                                         std::to_string(view.peer.port))) return false;
                 return std::nullopt;
+            case CommitPhaseState::Open:
+                return true;
+            case CommitPhaseState::Unknown:
+                break;
             }
-            return true;
+            return std::nullopt;
         };
 
         if (needs_quorum_phase) {
@@ -921,7 +947,7 @@ int main(int argc, char** argv) {
             if (needs_quorum_phase && !phase_already_closed) {
                 const auto views = requestMiningViews(quorum_peers, next);
                 const auto strongest = strongestMiningView(views);
-                if (strongest.has_value() && strongest->phase_state != "OPEN") {
+                if (strongest.has_value() && viewPhaseState(*strongest) != CommitPhaseState::Open) {
                     const auto decision = adoptMiningView(*strongest, local_commit_available);
                     if (!decision.has_value()) return 1;
                     if (!*decision) continue;

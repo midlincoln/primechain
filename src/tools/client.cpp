@@ -1092,7 +1092,8 @@ int runJobs(const char* argv0, int argc, char** argv) {
     state["last_result"] = "mining";
     if (!writeMineState(workdir, state)) return 1;
 
-    for (int attempt = 0; attempt < 5; ++attempt) {
+    int stagnant_attempts = 0;
+    while (true) {
         const auto before_mine = loadLocalStatus(chainPath(workdir));
         rc = runTool(argv0, "primechain-frontier-miner", {
             peer->host,
@@ -1140,6 +1141,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
                     state["status"] = "running";
                     state["updated_at"] = nowSeconds();
                     state["last_result"] = "retrying-after-commit-phase-timeout";
+                    stagnant_attempts = 0;
                     if (!writeMineState(workdir, state)) return 1;
                     continue;
                 }
@@ -1152,12 +1154,21 @@ int runJobs(const char* argv0, int argc, char** argv) {
             }
         }
         if (sync_rc != 0 || local.frontier <= before_mine.frontier) {
-            state["status"] = "failed";
+            ++stagnant_attempts;
+            if (stagnant_attempts >= 5) {
+                state["status"] = "failed";
+                state["updated_at"] = nowSeconds();
+                state["last_result"] = sync_rc != 0 ? "sync-after-miner-failed" : "miner-failed";
+                writeMineState(workdir, state);
+                return rc;
+            }
+            state["status"] = "running";
             state["updated_at"] = nowSeconds();
-            state["last_result"] = sync_rc != 0 ? "sync-after-miner-failed" : "miner-failed";
-            writeMineState(workdir, state);
-            return rc;
+            state["last_result"] = sync_rc != 0 ? "retrying-after-sync-failure" : "retrying-after-stalled-race";
+            if (!writeMineState(workdir, state)) return 1;
+            continue;
         }
+        stagnant_attempts = 0;
         if (local.frontier >= *target) {
             state["status"] = "complete";
             state["updated_at"] = nowSeconds();
@@ -1168,15 +1179,8 @@ int runJobs(const char* argv0, int argc, char** argv) {
         }
         state["status"] = "running";
         state["updated_at"] = nowSeconds();
-        state["last_result"] = "retrying-after-stale-miner";
+        state["last_result"] = "continuing-after-race-progress";
         if (!writeMineState(workdir, state)) return 1;
-    }
-    if (rc != 0) {
-        state["status"] = "failed";
-        state["updated_at"] = nowSeconds();
-        state["last_result"] = "miner-failed";
-        writeMineState(workdir, state);
-        return rc;
     }
 
     state["status"] = "syncing";

@@ -556,15 +556,25 @@ attribution require signed commitments plus a quorum-defined commit boundary.
 
 ### 10.1 Controlled Commit-Phase Quorum
 
-A node started with a fixed three-address validator set uses these phase states:
+A node started with a fixed three-address validator set uses an explicit commit-phase state machine for each candidate integer:
 
 ```text
-OPEN -> CLOSING -> CLOSED
+OPEN -> CLOSING -> CLOSED -> FINALIZED
+  |          |          |
+  +----------+----------+-> TIMED_OUT -> OPEN
 ```
 
-- `OPEN`: signed composite commitments are accepted.
-- `CLOSING`: the first valid validator vote freezes the canonical snapshot.
-- `CLOSED`: two distinct configured validators signed the same snapshot.
+The current wire API exposes `OPEN`, `CLOSING`, and `CLOSED` through `GET_COMMIT_PHASE` and `GET_MINING_VIEW`. `FINALIZED` is represented by the arithmetic record appearing in the main record store. `TIMED_OUT` is a certified local recovery transition that clears temporary sidecars and reopens the same integer. Timeout certificates are not yet embedded in finalized records; this is acceptable for the controlled public demo network, but it is not the final permissionless protocol.
+
+State rules:
+
+- `OPEN`: signed composite commitments for the current next integer are accepted.
+- `CLOSING`: one validator signed a snapshot; late commitments are rejected and clients must wait, sync, or reuse the winning local commitment if it later closes.
+- `CLOSED`: two distinct configured validators signed the same snapshot; only the deterministic winner may reveal.
+- `FINALIZED`: the winning reveal produced a version-1 composite record embedding the commitment snapshot, validator set, and phase votes. Replay no longer needs `.commitments` or `.phases`.
+- `TIMED_OUT`: two validators signed a timeout for the stalled current integer and next commit round; nodes clear temporary commitments/votes and return to `OPEN`.
+
+Client behavior follows the same state machine: commit only in `OPEN`, reveal only in `CLOSED` when the local provider won, back off when another provider won, and keep syncing while another client advances the frontier.
 
 The snapshot hash commits to the integer and the canonical ordered list of full
 commitment records, including miner authentication data. Validator signatures

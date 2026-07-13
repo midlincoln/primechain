@@ -784,3 +784,13 @@ commit-phase timeout, and treats a successful `TIMEOUT_COMMIT_PHASE` as progress
 that reopens the same integer rather than waiting for the frontier to advance.
 After a timeout clears a stalled phase, the workdir immediately restarts the
 frontier miner and retries the same integer automatically.
+
+## 2026-07-13: Commit-Phase State Machine
+
+Documented the controlled-testnet commit-phase state machine as `OPEN ->
+CLOSING -> CLOSED -> FINALIZED`, with certified timeout recovery back to
+`OPEN`. The frontier miner now parses phase states through a named state enum
+instead of scattered string checks, and `run-jobs` keeps cycling while competing
+miners advance the frontier. A losing workdir no longer treats normal race
+progress as a terminal failure; only repeated no-progress attempts fail the
+job.
