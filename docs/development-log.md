@@ -2,6 +2,19 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-14: Validator Gossip And Admission Architecture
+
+Recorded the target architecture for validator membership, validator-owned
+coordination, and gossip in `docs/validator-gossip-architecture-v0.md`.
+Validator authority should come from replayed chain records, not local service
+files. Gossip should be runtime liveness state, not consensus authority.
+
+The design uses frontier-integer epochs so validator membership and policy are
+constant during an epoch. Validator admission should be on-chain and require
+address-bound work history, reserve lock, endpoint observation, validator vote,
+and delayed activation. The target coordination model moves quorum collection
+out of client miners and into validator-owned gossip/finality.
+
 ## 2026-07-14: Encrypted Protocol Wallets
 
 Protocol wallets created by `primechain-wallet new-miner` and
