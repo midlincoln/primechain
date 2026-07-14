@@ -31,6 +31,7 @@ add_library(primechain_core
     src/crypto/signature.cpp
     src/math/number_theory.cpp
     src/node/sequential_node.cpp
+    src/node/validator_registry.cpp
     src/protocol/records.cpp
     src/storage/atomic_file.cpp
     src/storage/commitment_store.cpp
@@ -276,7 +277,16 @@ add_executable(primechain-validator-epoch-tests
     tests/validator_epoch_tests.cpp
 )
 
+add_executable(primechain-validator-registry-tests
+    tests/validator_registry_tests.cpp
+)
+
 target_link_libraries(primechain-validator-epoch-tests
+    PRIVATE
+        primechain_core
+)
+
+target_link_libraries(primechain-validator-registry-tests
     PRIVATE
         primechain_core
 )
@@ -326,6 +336,7 @@ add_test(
         "$<TARGET_FILE:primechain-arithmetic-bench> 20 7 3 ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log >/dev/null && $<TARGET_FILE:primechain-arithmetic-bench-tests> ${CMAKE_CURRENT_BINARY_DIR}/arithmetic-bench-test.log"
 )
 add_test(NAME protocol_records COMMAND primechain-protocol-record-tests)
+add_test(NAME validator_registry COMMAND primechain-validator-registry-tests ${CMAKE_CURRENT_BINARY_DIR}/validator-registry.dat)
 add_test(NAME recursive_factorization COMMAND primechain-factorization-tests)
 add_test(NAME pratt_proofs COMMAND primechain-pratt-tests)
 add_test(

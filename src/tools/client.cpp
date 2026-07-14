@@ -20,6 +20,7 @@
 #include "primechain/crypto/hash.hpp"
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
+#include "primechain/node/validator_registry.hpp"
 #include "primechain/protocol/records.hpp"
 #include "primechain/storage/record_store.hpp"
 #include "primechain/wallet/miner_identity.hpp"
@@ -1021,6 +1022,42 @@ int boardReport(int argc, char** argv) {
     return 0;
 }
 
+
+int validatorRegistry(int argc, char** argv) {
+    if (argc != 3) return 1;
+    primechain::node::ValidatorRegistryState state;
+    std::string error;
+    if (!primechain::node::loadValidatorRegistry(argv[2], state, error)) {
+        std::cerr << "validator_registry_error: " << error << "\n";
+        return 1;
+    }
+
+    std::cout << "VALIDATOR_REGISTRY " << argv[2]
+              << " has_genesis=" << (state.has_genesis ? 1 : 0)
+              << " current_epoch=" << state.current_epoch
+              << " active_validators=" << state.active_validators.size()
+              << " events=" << state.events.size() << "\n";
+    std::cout << "ACTIVE_VALIDATORS";
+    for (const auto& validator : state.active_validators) {
+        std::cout << " " << validator;
+    }
+    std::cout << "\n";
+    for (const auto& event : state.events) {
+        std::cout << "VALIDATOR_REGISTRY_EVENT "
+                  << primechain::node::validatorRegistryEventTypeName(event.type)
+                  << " height=" << event.height
+                  << " integer=" << event.record_integer
+                  << " epoch=" << event.epoch
+                  << " activation_integer=" << event.activation_integer
+                  << " validators=" << event.validator_set.size();
+        for (const auto& validator : event.validator_set) {
+            std::cout << " " << validator;
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
 int validatorReputation(int argc, char** argv) {
     if (argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -1556,6 +1593,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
+              << "  " << argv0 << " validator-registry <record-store>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -1632,6 +1670,10 @@ int main(int argc, char** argv) {
     if (command == "validator-reputation") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
         return validatorReputation(argc, argv);
+    }
+    if (command == "validator-registry") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return validatorRegistry(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

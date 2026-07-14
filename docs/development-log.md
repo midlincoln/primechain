@@ -2,6 +2,20 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-14: Replay-Derived Validator Registry Foundation
+
+Added a read-only validator registry replay layer. It derives active validators
+from finalized chain data: anchored genesis validator configuration and signed
+validator epoch transitions. The new `primechain-client validator-registry
+<record-store>` command reports current epoch, active validators, and registry
+history events.
+
+This is the first implementation slice of the validator/gossip architecture. It
+does not yet add candidate, reserve-lock, admission-vote, endpoint-update, or
+gossip behavior. It makes validator membership an explicit replayed chain view
+so those records can be added without relying on local `--validator-set` config
+as the long-term authority.
+
 ## 2026-07-14: Validator Gossip And Admission Architecture
 
 Recorded the target architecture for validator membership, validator-owned
