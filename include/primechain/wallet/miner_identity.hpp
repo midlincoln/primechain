@@ -15,6 +15,7 @@ struct MinerIdentity {
 bool createMinerIdentity(MinerIdentity& identity, std::string& error);
 bool saveMinerIdentity(const std::string& path, const MinerIdentity& identity, std::string& error);
 bool loadMinerIdentity(const std::string& path, MinerIdentity& identity, std::string& error);
+bool loadMinerIdentityAddress(const std::string& path, Address& address, std::string& error);
 std::string bytesToHex(const crypto::Bytes& bytes);
 crypto::Bytes hexToBytes(const std::string& hex);
 

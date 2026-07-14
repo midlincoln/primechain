@@ -582,13 +582,13 @@ bool ensureWallet(const std::string& argv0, const std::string& path) {
 }
 
 std::optional<primechain::Address> loadMinerAddress(const std::string& path) {
-    primechain::wallet::MinerIdentity identity;
+    primechain::Address address;
     std::string error;
-    if (!primechain::wallet::loadMinerIdentity(path, identity, error)) {
+    if (!primechain::wallet::loadMinerIdentityAddress(path, address, error)) {
         std::cerr << "could not load miner wallet " << path << ": " << error << "\n";
         return std::nullopt;
     }
-    return identity.address;
+    return address;
 }
 
 void printHoldings(

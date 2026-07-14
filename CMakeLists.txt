@@ -639,6 +639,12 @@ add_test(
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/signed-miner.wallet; address=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/signed-miner.wallet) && printf '%s\n' \"$address\" | grep -Eq '^pcpq1_[0-9a-f]{40}$' && [ \"$address\" = \"$($<TARGET_FILE:primechain-wallet> miner-address ${CMAKE_CURRENT_BINARY_DIR}/signed-miner.wallet)\" ]"
 )
 add_test(
+    NAME wallet_new_mldsa65_identity_is_encrypted
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet; address=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet) && grep -q '^version=pc-miner-mldsa65-v3$' ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet && ! grep -q '^private_key=' ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet && [ \"$address\" = \"$($<TARGET_FILE:primechain-wallet> address ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet)\" ] && ! PRIMECHAIN_WALLET_PASSPHRASE=wrong $<TARGET_FILE:primechain-composite-commitment> sign-commit ${CMAKE_CURRENT_BINARY_DIR}/encrypted-miner.wallet 4 2 2 44 >/dev/null 2>&1"
+)
+add_test(
     NAME tcp_signed_commit_reveal_accepts
     COMMAND
         /bin/sh -c
@@ -946,3 +952,8 @@ add_test(
         /bin/sh -c
         "rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-net*; a=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet) && b=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet) && c=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/round-net-c.wallet) && ($<TARGET_FILE:primechain-sync-server> 19079 ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.pid) && sleep 0.2 && ! $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19079 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-b-miner.log 2>&1 && test -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.finalization && ($<TARGET_FILE:primechain-sync-server> 19080 ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat --peer 127.0.0.1 19079 --finalization-timeout-ms 50 --validator-set $a $b $c --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet > ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.pid) && sleep 0.3 && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19080 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.wallet | grep -q 'frontier miner complete frontier=3' && sleep 0.3 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19079 GET_STATUS | grep -q '^STATUS 2 2 0 1 1 3 ' && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.finalization && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.rounds && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.finalization && test ! -s ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.dat.rounds && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.pid) $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-b.pid) && sleep 0.2 && rm -f ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.finalization ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat.rounds && ($<TARGET_FILE:primechain-sync-server> 19081 ${CMAKE_CURRENT_BINARY_DIR}/round-net-a.dat > ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19081 GET_STATUS | grep -q '^STATUS 2 2 0 1 1 3 ' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/round-net-replay.pid)"
 )
+get_property(PRIMECHAIN_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
+if(PRIMECHAIN_REGISTERED_TESTS)
+    set_tests_properties(${PRIMECHAIN_REGISTERED_TESTS}
+        PROPERTIES ENVIRONMENT "PRIMECHAIN_WALLET_PASSPHRASE=primechain-test-passphrase")
+endif()

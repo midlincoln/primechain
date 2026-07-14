@@ -80,7 +80,12 @@ that remain available for tests and protocol development.
 ```
 
 A client workdir stores peer configuration, a local downloaded chain copy,
-prime and composite miner wallets, and persistent mining job state.
+prime and composite miner wallets, and persistent mining job state. Protocol
+wallets created by `new-miner` are encrypted ML-DSA-65 wallet files. Interactive
+commands prompt for a passphrase when signing is required; unattended miners,
+validators, and tests should provide it through `PRIMECHAIN_WALLET_PASSPHRASE`.
+The public address can be read from wallet metadata without unlocking the
+private key.
 `add-mine-job` records the target frontier, `run-jobs` syncs before mining,
 runs the authenticated frontier miner only when the target is still ahead, then
 syncs again and records pending/complete/failed state. `mine-job` remains a

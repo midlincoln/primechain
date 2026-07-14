@@ -2,6 +2,21 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-14: Encrypted Protocol Wallets
+
+Protocol wallets created by `primechain-wallet new-miner` and
+`primechain-client new-miner` now use encrypted wallet format
+`pc-miner-mldsa65-v3`. The ML-DSA-65 private key is encrypted with
+scrypt-derived 256-bit key material and AES-256-GCM. Public wallet metadata
+(address, algorithm, public key, KDF parameters, salt, nonce, and tag) remains
+cleartext so addresses can be inspected without unlocking the signing key.
+
+Signing operations require a passphrase. Interactive use prompts for it;
+unattended validators and miners should set `PRIMECHAIN_WALLET_PASSPHRASE` in
+their service environment. Legacy plaintext v2 protocol wallets remain readable
+for transitional tests, but new public testnets should use fresh encrypted
+wallets and can reset the old experimental chain.
+
 ## 2026-07-13: Board Report And Validator Reputation Commands
 
 Added first-pass `primechain-client board-report <record-store> --from <n> --to <m>`

@@ -162,13 +162,13 @@ int main(int argc, char** argv) {
     }
 
     if (command == "miner-address") {
-        primechain::wallet::MinerIdentity identity;
+        primechain::Address address;
         std::string error;
-        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
+        if (!primechain::wallet::loadMinerIdentityAddress(argv[2], address, error)) {
             std::cerr << error << "\n";
             return 1;
         }
-        std::cout << identity.address << "\n";
+        std::cout << address << "\n";
         return 0;
     }
 
@@ -178,13 +178,13 @@ int main(int argc, char** argv) {
             std::cout << wallet.address << "\n";
             return 0;
         }
-        primechain::wallet::MinerIdentity identity;
+        primechain::Address address;
         std::string error;
-        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
+        if (!primechain::wallet::loadMinerIdentityAddress(argv[2], address, error)) {
             std::cerr << "could not load wallet\n";
             return 1;
         }
-        std::cout << identity.address << "\n";
+        std::cout << address << "\n";
         return 0;
     }
 
@@ -198,13 +198,11 @@ int main(int argc, char** argv) {
         if (loadWallet(argv[3], wallet)) {
             wallet_address = wallet.address;
         } else {
-            primechain::wallet::MinerIdentity identity;
             std::string identity_error;
-            if (!primechain::wallet::loadMinerIdentity(argv[3], identity, identity_error)) {
+            if (!primechain::wallet::loadMinerIdentityAddress(argv[3], wallet_address, identity_error)) {
                 std::cerr << "could not load wallet\n";
                 return 1;
             }
-            wallet_address = identity.address;
         }
         primechain::node::SequentialNode node(argv[2]);
         std::string error;
