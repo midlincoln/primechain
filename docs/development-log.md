@@ -2,6 +2,13 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-14: Reference Miner Boundary
+
+Clarified that the bundled C++ client/miner is a reference implementation, not
+privileged consensus logic. Public miners may use any algorithm or hardware to
+find composite factors or construct Pratt proofs. Validators only verify wire
+protocol evidence, signatures, chain linkage, and finality rules.
+
 ## 2026-07-14: Validator Eligibility Report
 
 Added `primechain-client validator-eligibility <record-store> <address> --reserve

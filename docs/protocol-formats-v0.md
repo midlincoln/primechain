@@ -26,6 +26,12 @@ The v0 chain is intentionally small-number and development-focused:
 - Pratt certificates are the target prime-proof format for test-sized integers,
 - validator voting is authenticated but remains a controlled 2-of-3 mechanism, not permissionless consensus.
 
+The bundled C++ client/miner is a reference implementation. The protocol only
+requires valid submitted evidence. Independent clients may use different
+algorithms or hardware to find composite factors or construct Pratt proofs.
+Validators verify the evidence and signatures; they do not trust the miner's
+implementation.
+
 ## 2. Primitive Types
 
 ### UInt64

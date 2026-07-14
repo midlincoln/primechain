@@ -29,6 +29,12 @@ A miner must not be responsible for assembling validator quorum. The miner
 may submit to one or more public nodes, but validator-to-validator coordination
 belongs to validators.
 
+The project-provided C++ miner is a reference implementation only. Consensus
+must not depend on the algorithm it uses to find a divisor or construct a Pratt
+certificate. Public miners may use different CPU, GPU, distributed, pooled, or
+research algorithms as long as their submitted evidence verifies under the
+wire protocol.
+
 ### Client
 
 A client is a user-facing program. It may mine, query balances, submit
@@ -52,6 +58,34 @@ A validator is an admitted settlement institution. It:
 - runs a reachable endpoint,
 - maintains a locked reserve,
 - earns validator rewards for signed finality work.
+
+## Reference Client Boundary
+
+Primechain should expose a public proof-submission protocol, not a privileged
+miner implementation.
+
+The reference client may provide:
+
+- basic factor search,
+- Pratt proof construction,
+- wallet handling,
+- sync and inspection commands,
+- convenience mining loops.
+
+But validators must only care about protocol evidence:
+
+```text
+prime evidence     = valid Pratt certificate + provider signature
+composite evidence = valid divisor/cofactor reveal + matching commitment + provider signature
+transaction        = valid transfer signature and replay state
+```
+
+A third-party miner is valid if it can produce acceptable protocol messages.
+It does not need to share code, search strategy, hardware type, or proof
+construction internals with the reference client.
+
+This boundary lets Primechain support independent mining software without
+changing validator consensus.
 
 ## On-Chain Authority
 
