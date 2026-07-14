@@ -22,6 +22,7 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/node/validator_registry.hpp"
 #include "primechain/protocol/records.hpp"
+#include "primechain/protocol/validator_governance.hpp"
 #include "primechain/storage/record_store.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
@@ -1023,6 +1024,79 @@ int boardReport(int argc, char** argv) {
 }
 
 
+primechain::protocol::ValidatorWorkStatsV0 validatorWorkStatsFromBoardStats(
+    const AddressBoardStats& stats) {
+    return primechain::protocol::ValidatorWorkStatsV0{
+        stats.prime_records,
+        stats.composite_records,
+        stats.discovery_micro_units};
+}
+
+int validatorEligibility(int argc, char** argv) {
+    if (argc != 10 || std::string(argv[4]) != "--reserve" ||
+        std::string(argv[6]) != "--observed" || std::string(argv[8]) != "--total") {
+        return 1;
+    }
+    const std::string store_path = argv[2];
+    const primechain::Address address = argv[3];
+    const auto reserve_micro_units = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    const auto successful_observations = static_cast<std::uint64_t>(std::stoull(argv[7]));
+    const auto total_observations = static_cast<std::uint64_t>(std::stoull(argv[9]));
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not load latest record: " << error << "\n";
+        return 1;
+    }
+    if (!latest.has_value()) {
+        std::cerr << "record store is empty\n";
+        return 1;
+    }
+
+    BoardReportStats report;
+    if (!collectBoardReportStats(store_path, 2, latest->integer, report, error)) {
+        std::cerr << "could not build eligibility report: " << error << "\n";
+        return 1;
+    }
+
+    const auto found = report.miners.find(address);
+    const AddressBoardStats address_stats = found == report.miners.end()
+        ? AddressBoardStats{}
+        : found->second;
+    const auto work_stats = validatorWorkStatsFromBoardStats(address_stats);
+    const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+    const auto work_score = primechain::protocol::validatorWorkScoreV0(work_stats);
+    const bool work_ok = primechain::protocol::validatorMeetsWorkMinimumV0(work_stats, policy);
+    const bool reserve_ok = primechain::protocol::validatorMeetsReserveMinimumV0(reserve_micro_units, policy);
+    const bool endpoint_ok = primechain::protocol::validatorMeetsEndpointUptimeMinimumV0(
+        successful_observations, total_observations, policy);
+    const bool eligible = work_ok && reserve_ok && endpoint_ok;
+
+    std::cout << "VALIDATOR_ELIGIBILITY " << address
+              << " eligible=" << (eligible ? 1 : 0) << "\n";
+    std::cout << "WORK_HISTORY prime_records=" << work_stats.prime_records_mined
+              << " composite_records=" << work_stats.composite_records_mined
+              << " discovery_micro_units=" << work_stats.discovery_micro_units << "\n";
+    std::cout << "WORK_SCORE score=" << work_score
+              << " min=" << policy.min_work_score
+              << " pass=" << (work_ok ? 1 : 0) << "\n";
+    std::cout << "RESERVE locked_micro_units=" << reserve_micro_units
+              << " min=" << policy.min_reserve_micro_units
+              << " pass=" << (reserve_ok ? 1 : 0) << "\n";
+    std::cout << "ENDPOINT_OBSERVATION successful=" << successful_observations
+              << " total=" << total_observations
+              << " required_bps=" << policy.endpoint_required_uptime_bps
+              << " window=" << policy.endpoint_observation_window
+              << " pass=" << (endpoint_ok ? 1 : 0) << "\n";
+    std::cout << "ADMISSION_RULE quorum=" << policy.admission_quorum_numerator
+              << "/" << policy.admission_quorum_denominator
+              << " activation_delay_epochs=" << policy.activation_delay_epochs
+              << " epoch_length=" << policy.epoch_length << "\n";
+    return 0;
+}
+
 int validatorRegistry(int argc, char** argv) {
     if (argc != 3) return 1;
     primechain::node::ValidatorRegistryState state;
@@ -1145,7 +1219,8 @@ int validatorReputation(int argc, char** argv) {
         pending.clear();
     }
 
-    const auto work_score = prime_records * 10 + composite_records * 2;
+    const auto work_score = primechain::protocol::validatorWorkScoreV0(
+        {prime_records, composite_records, discovery_micro_units});
     const auto participation = finalization_votes + commit_phase_votes + round_change_votes;
     std::cout << "VALIDATOR_REPUTATION " << address << "\n";
     std::cout << "MINING_HISTORY prime_records=" << prime_records
@@ -1593,6 +1668,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
+              << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-registry <record-store>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
@@ -1670,6 +1746,10 @@ int main(int argc, char** argv) {
     if (command == "validator-reputation") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
         return validatorReputation(argc, argv);
+    }
+    if (command == "validator-eligibility") {
+        if (argc != 10) { printUsage(argv[0]); return 1; }
+        return validatorEligibility(argc, argv);
     }
     if (command == "validator-registry") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

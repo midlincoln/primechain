@@ -2,6 +2,15 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-14: Validator Eligibility Report
+
+Added `primechain-client validator-eligibility <record-store> <address> --reserve
+<micro-units> --observed <ok> --total <count>`. The command checks replayed
+Primechain work history against the v0 work-score formula, then combines it
+with explicit reserve and endpoint-observation inputs. This is still a report,
+not an admission record, but it makes the proof-of-work qualification rule
+inspectable before adding on-chain candidate and admission events.
+
 ## 2026-07-14: Replay-Derived Validator Registry Foundation
 
 Added a read-only validator registry replay layer. It derives active validators
