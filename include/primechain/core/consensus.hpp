@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "primechain/types.hpp"
@@ -17,5 +18,7 @@ private:
 };
 
 Hash256 blockHash(const BlockHeader& header);
+std::size_t requiredValidatorQuorum(std::size_t validator_count);
+bool validValidatorSetSize(std::size_t validator_count);
 
 } // namespace primechain::core

@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
+#include "primechain/core/consensus.hpp"
 #include "primechain/crypto/hash.hpp"
 #include "primechain/crypto/signature.hpp"
 #include "primechain/wallet/miner_identity.hpp"
@@ -15,7 +17,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " sign-commit <miner-identity> g d e nonce\n"
               << "  " << argv0 << " sign-reveal <miner-identity> g d e nonce\n"
               << "  " << argv0 << " sign-phase <validator-identity> g snapshot_hash\n"
-              << "  " << argv0 << " sign-epoch <validator-identity> previous_hash record_integer epoch next_a next_b next_c\n";
+              << "  " << argv0 << " sign-epoch <validator-identity> previous_hash record_integer epoch next_validator...\n";
 }
 
 } // namespace
@@ -33,7 +35,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (argc == 9 && std::string(argv[1]) == "sign-epoch") {
+    if (argc >= 7 && std::string(argv[1]) == "sign-epoch") {
         primechain::wallet::MinerIdentity identity;
         std::string error;
         if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
@@ -49,11 +51,13 @@ int main(int argc, char** argv) {
         std::copy(previous_bytes.begin(), previous_bytes.end(), previous_hash.begin());
         const auto record_integer = static_cast<primechain::PrimeValue>(std::stoull(argv[4]));
         const auto epoch = static_cast<std::uint64_t>(std::stoull(argv[5]));
-        std::vector<primechain::Address> next_set{argv[6], argv[7], argv[8]};
+        std::vector<primechain::Address> next_set;
+        for (int i = 6; i < argc; ++i) next_set.push_back(argv[i]);
         std::sort(next_set.begin(), next_set.end());
-        if (std::adjacent_find(next_set.begin(), next_set.end()) != next_set.end() ||
+        if (!primechain::core::validValidatorSetSize(next_set.size()) ||
+            std::adjacent_find(next_set.begin(), next_set.end()) != next_set.end() ||
             !std::all_of(next_set.begin(), next_set.end(), primechain::crypto::isProtocolSignatureAddress)) {
-            std::cerr << "next validator set must contain three distinct pc1 addresses\n";
+            std::cerr << "next validator set must contain distinct pcpq1_ addresses\n";
             return 1;
         }
         const auto activation_integer = record_integer + 1;
@@ -68,8 +72,9 @@ int main(int argc, char** argv) {
         }
         std::cout << "SUBMIT_EPOCH_VOTE "
                   << primechain::crypto::toHex(previous_hash) << " "
-                  << record_integer << " " << epoch << " " << activation_integer << " "
-                  << next_set[0] << " " << next_set[1] << " " << next_set[2] << " "
+                  << record_integer << " " << epoch << " " << activation_integer;
+        for (const auto& validator : next_set) std::cout << " " << validator;
+        std::cout << " "
                   << identity.address << " "
                   << primechain::wallet::bytesToHex(identity.public_key) << " "
                   << primechain::wallet::bytesToHex(*signature) << "\n";

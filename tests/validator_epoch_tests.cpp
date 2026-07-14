@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "primechain/core/consensus.hpp"
 #include "primechain/crypto/signature.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
@@ -87,7 +88,8 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
     record.finalized_by.votes.clear();
     const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
-    for (std::size_t i = 0; i < 2; ++i) {
+    const auto finalization_quorum = primechain::core::requiredValidatorQuorum(current.size());
+    for (std::size_t i = 0; i < finalization_quorum; ++i) {
         auto vote = primechain::protocol::makeSignedValidatorVote(
             current[i].address,
             current[i].keys.public_key,
@@ -154,6 +156,62 @@ int main(int argc, char** argv) {
         std::cerr << error << "\n";
         return 1;
     }
+
+
+    const std::string bootstrap_one_path = std::string(argv[1]) + ".bootstrap-one";
+    std::remove(bootstrap_one_path.c_str());
+    primechain::node::SequentialNode bootstrap_one(bootstrap_one_path);
+    const std::vector<ValidatorKey> one_validator{validators[0]};
+    const std::vector<ValidatorKey> two_validators{validators[0], validators[1]};
+    error.clear();
+    if (!expect(bootstrap_one.load(error), "load one-validator bootstrap node") ||
+        !expect(bootstrap_one.initializeGenesis(addresses(one_validator), error), "initialize one-validator genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    auto one_to_two = makeRotationRecord(bootstrap_one, one_validator, addresses(two_validators), 1, error);
+    error.clear();
+    if (!expect(bootstrap_one.appendPrime(one_to_two, error), "accept 1-of-1 admission to two validators")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(bootstrap_one.validatorEpoch() == 1, "one-validator bootstrap epoch activates") ||
+        !expect(bootstrap_one.validatorSet() == addresses(two_validators), "one-validator bootstrap activates two validators")) {
+        return 1;
+    }
+
+    const std::string bootstrap_two_path = std::string(argv[1]) + ".bootstrap-two";
+    std::remove(bootstrap_two_path.c_str());
+    primechain::node::SequentialNode bootstrap_two(bootstrap_two_path);
+    error.clear();
+    if (!expect(bootstrap_two.load(error), "load two-validator bootstrap node") ||
+        !expect(bootstrap_two.initializeGenesis(addresses(two_validators), error), "initialize two-validator genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    auto two_to_three = makeRotationRecord(bootstrap_two, two_validators, addresses(current), 2, error);
+    error.clear();
+    if (!expect(bootstrap_two.appendPrime(two_to_three, error), "accept 2-of-2 admission to three validators")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!expect(bootstrap_two.validatorEpoch() == 1, "two-validator bootstrap epoch activates") ||
+        !expect(bootstrap_two.validatorSet() == addresses(current), "two-validator bootstrap activates three validators")) {
+        return 1;
+    }
+
+    const std::string two_insufficient_path = std::string(argv[1]) + ".bootstrap-two-insufficient";
+    std::remove(two_insufficient_path.c_str());
+    primechain::node::SequentialNode two_insufficient(two_insufficient_path);
+    error.clear();
+    if (!expect(two_insufficient.load(error), "load two-validator insufficient node") ||
+        !expect(two_insufficient.initializeGenesis(addresses(two_validators), error), "initialize two-validator insufficient genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    auto bad_two_to_three = makeRotationRecord(two_insufficient, two_validators, addresses(current), 1, error);
+    error.clear();
+    if (!expect(!two_insufficient.appendPrime(bad_two_to_three, error), "reject 1-of-2 admission to three validators")) return 1;
 
     const std::string insufficient_path = std::string(argv[1]) + ".insufficient";
     std::remove(insufficient_path.c_str());

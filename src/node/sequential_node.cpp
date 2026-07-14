@@ -1,5 +1,7 @@
 #include "primechain/node/sequential_node.hpp"
 
+#include "primechain/core/consensus.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -574,7 +576,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     if (reconstructed_supply != snapshot.total_supply ||
         (snapshot.validator_set.empty()
             ? snapshot.validator_epoch != 0
-            : snapshot.validator_set.size() != 3) ||
+            : !core::validValidatorSetSize(snapshot.validator_set.size())) ||
         !std::all_of(snapshot.pending_composite_providers.begin(),
             snapshot.pending_composite_providers.end(), protocol::isProtocolAddress) ||
         !std::all_of(snapshot.validator_set.begin(), snapshot.validator_set.end(),

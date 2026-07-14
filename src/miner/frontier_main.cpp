@@ -15,6 +15,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "primechain/core/consensus.hpp"
+#include "primechain/core/consensus.hpp"
 #include "primechain/crypto/hash.hpp"
 #include "primechain/crypto/signature.hpp"
 #include "primechain/wallet/miner_identity.hpp"
@@ -345,14 +347,15 @@ std::size_t phaseVoteCount(const std::string& response) {
     }
 }
 
-bool remoteQuorumEnabled(const std::string& host, int port) {
+std::size_t remoteValidatorCount(const std::string& host, int port) {
     const auto response = requestLine(host, port, "GET_VALIDATORS\n");
-    if (!response.has_value()) return false;
+    if (!response.has_value()) return 0;
     std::istringstream in(*response);
     std::string tag;
     std::size_t count = 0;
     in >> tag >> count;
-    return in && tag == "VALIDATORS" && count == 3;
+    if (!in || tag != "VALIDATORS") return 0;
+    return count;
 }
 
 std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
@@ -473,10 +476,11 @@ std::optional<CommitPhaseStatus> requestCommitPhase(
 
 std::optional<CommitPhaseStatus> closedCommitPhase(
     const std::vector<PeerEndpoint>& peers,
-    primechain::PrimeValue integer) {
+    primechain::PrimeValue integer,
+    std::size_t required_votes) {
     for (const auto& peer : peers) {
         const auto status = requestCommitPhase(peer, integer);
-        if (status.has_value() && status->state == "CLOSED" && status->votes >= 2) {
+        if (status.has_value() && status->state == "CLOSED" && status->votes >= required_votes) {
             return status;
         }
     }
@@ -485,7 +489,8 @@ std::optional<CommitPhaseStatus> closedCommitPhase(
 
 std::optional<PeerEndpoint> closeCommitPhaseQuorum(
     const std::vector<PeerEndpoint>& peers,
-    primechain::PrimeValue integer) {
+    primechain::PrimeValue integer,
+    std::size_t required_votes) {
     std::optional<PeerEndpoint> quorum_peer;
     for (const auto& peer : peers) {
         std::ostringstream command;
@@ -497,7 +502,7 @@ std::optional<PeerEndpoint> closeCommitPhaseQuorum(
             continue;
         }
         std::cout << *response << "\n";
-        if (phaseVoteCount(*response) >= 2) {
+        if (phaseVoteCount(*response) >= required_votes) {
             quorum_peer = peer;
         }
     }
@@ -878,13 +883,17 @@ int main(int argc, char** argv) {
 
         std::vector<PeerEndpoint> quorum_peers;
         std::optional<PeerEndpoint> reveal_peer;
+        const auto remote_validator_count = remoteValidatorCount(host, port);
         const bool needs_quorum_phase = commit_request.has_value() &&
-            composite_identity.has_value() && remoteQuorumEnabled(host, port);
+            composite_identity.has_value() && remote_validator_count > 0;
+        const auto required_quorum_votes = primechain::core::requiredValidatorQuorum(remote_validator_count);
         if (needs_quorum_phase) {
             quorum_peers = quorumEndpoints(host, port);
-            if (quorum_peers.size() < 2) {
-                std::cerr << "quorum node did not advertise enough validator peers before commit; "
-                          << "try a validator with peers configured\n";
+            const auto required_endpoints = required_quorum_votes;
+            if (quorum_peers.size() < required_endpoints) {
+                std::cerr << "quorum node did not advertise enough validator endpoints before commit; "
+                          << "required=" << required_endpoints
+                          << " advertised=" << quorum_peers.size() << "\n";
                 return 1;
             }
         }
@@ -964,7 +973,7 @@ int main(int argc, char** argv) {
                 };
 
                 if (phase_already_closed) {
-                    const auto closed = closedCommitPhase(quorum_peers, next);
+                    const auto closed = closedCommitPhase(quorum_peers, next, required_quorum_votes);
                     if (!closed.has_value()) {
                         if (retryCurrentInteger("commit phase is closed but no closed peer was found")) continue;
                         return 1;
@@ -974,9 +983,9 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 } else {
-                    reveal_peer = closeCommitPhaseQuorum(quorum_peers, next);
+                    reveal_peer = closeCommitPhaseQuorum(quorum_peers, next, required_quorum_votes);
                     if (!reveal_peer.has_value()) {
-                        const auto closed = closedCommitPhase(quorum_peers, next);
+                        const auto closed = closedCommitPhase(quorum_peers, next, required_quorum_votes);
                         if (closed.has_value()) {
                             if (!useClosedPhase(*closed)) {
                                 if (retryCurrentInteger("commit phase already won by " + closed->winner)) continue;

@@ -28,6 +28,16 @@ void appendString(std::vector<std::uint8_t>& out, std::string_view value) {
 
 } // namespace
 
+std::size_t requiredValidatorQuorum(std::size_t validator_count) {
+    if (validator_count == 0) return 0;
+    if (validator_count == 1) return 1;
+    return (validator_count * 2 + 2) / 3;
+}
+
+bool validValidatorSetSize(std::size_t validator_count) {
+    return validator_count >= 1;
+}
+
 Hash256 blockHash(const BlockHeader& header) {
     std::vector<std::uint8_t> bytes;
     appendUint64(bytes, header.version);

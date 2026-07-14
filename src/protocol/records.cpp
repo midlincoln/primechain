@@ -6,6 +6,7 @@
 #include <set>
 #include <string_view>
 
+#include "primechain/core/consensus.hpp"
 #include "primechain/crypto/hash.hpp"
 #include "primechain/crypto/signature.hpp"
 
@@ -19,6 +20,22 @@ constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
 constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-mldsa65-v2";
 constexpr std::string_view kRoundFinalizationRule = "fixed-2-of-3-mldsa65-rounds-v3";
 constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
+constexpr std::uint64_t kMaxDecodedPrattFactors = 1024;
+constexpr std::uint64_t kMaxDecodedTransactions = 10000;
+constexpr std::uint64_t kMaxDecodedTxInputs = 1024;
+constexpr std::uint64_t kMaxDecodedTxOutputs = 1024;
+
+bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
+    return core::validValidatorSetSize(validators.size()) &&
+           std::is_sorted(validators.begin(), validators.end()) &&
+           std::adjacent_find(validators.begin(), validators.end()) == validators.end() &&
+           std::all_of(validators.begin(), validators.end(), crypto::isProtocolSignatureAddress);
+}
+
+bool hasQuorumVoteCount(std::size_t vote_count, std::size_t validator_count) {
+    return vote_count >= core::requiredValidatorQuorum(validator_count) &&
+           vote_count <= validator_count;
+}
 
 class ByteReader {
 public:
@@ -71,6 +88,7 @@ public:
 
 private:
     std::size_t remaining() const {
+        if (offset_ > bytes_.size()) return 0;
         return bytes_.size() - offset_;
     }
 
@@ -261,7 +279,7 @@ bool readAmount(ByteReader& reader, Amount& amount) {
 
 bool readTransactionList(ByteReader& reader, std::vector<TransactionV0>& transactions, std::string& error) {
     std::uint64_t count = 0;
-    if (!reader.readUint64(count)) {
+    if (!reader.readUint64(count) || count > kMaxDecodedTransactions) {
         return false;
     }
     transactions.clear();
@@ -297,7 +315,8 @@ bool readPrattProof(ByteReader& reader, PrattPrimeProofV0& proof) {
     std::uint64_t factor_count = 0;
     if (!reader.readUint64(proof.p) ||
         !reader.readUint64(proof.witness) ||
-        !reader.readUint64(factor_count)) {
+        !reader.readUint64(factor_count) ||
+        factor_count > kMaxDecodedPrattFactors) {
         return false;
     }
     proof.factors_of_p_minus_1.clear();
@@ -515,8 +534,9 @@ std::optional<TransactionV0> deserializeTransaction(const std::vector<std::uint8
     TransactionV0 tx;
     std::uint64_t input_count = 0;
     std::uint64_t output_count = 0;
-    if (!reader.readUint64(tx.version) || !reader.readUint64(input_count)) {
-        error = "truncated transaction header";
+    if (!reader.readUint64(tx.version) || !reader.readUint64(input_count) ||
+        input_count > kMaxDecodedTxInputs) {
+        error = "truncated or oversized transaction header";
         return std::nullopt;
     }
     tx.inputs.reserve(static_cast<std::size_t>(input_count));
@@ -528,8 +548,8 @@ std::optional<TransactionV0> deserializeTransaction(const std::vector<std::uint8
         }
         tx.inputs.push_back(input);
     }
-    if (!reader.readUint64(output_count)) {
-        error = "truncated transaction output count";
+    if (!reader.readUint64(output_count) || output_count > kMaxDecodedTxOutputs) {
+        error = "truncated or oversized transaction output count";
         return std::nullopt;
     }
     tx.outputs.reserve(static_cast<std::size_t>(output_count));
@@ -694,21 +714,9 @@ bool verifyCommitPhaseCertificate(
         error = "commit-phase certificate integer mismatch";
         return false;
     }
-    if (certificate.validator_set.size() != 3) {
-        error = "commit-phase certificate requires three validators";
-        return false;
-    }
-    if (!std::is_sorted(certificate.validator_set.begin(), certificate.validator_set.end()) ||
-        std::adjacent_find(certificate.validator_set.begin(), certificate.validator_set.end()) !=
-            certificate.validator_set.end()) {
+    if (!isCanonicalProtocolValidatorSet(certificate.validator_set)) {
         error = "commit-phase validator set is not canonical";
         return false;
-    }
-    for (const auto& validator : certificate.validator_set) {
-        if (!crypto::isProtocolSignatureAddress(validator)) {
-            error = "invalid commit-phase validator address";
-            return false;
-        }
     }
     if (certificate.commitments.empty() || certificate.commitments.size() > 1024) {
         error = "invalid embedded commitment count";
@@ -747,8 +755,8 @@ bool verifyCommitPhaseCertificate(
         error = "commit-phase snapshot hash mismatch";
         return false;
     }
-    if (certificate.votes.size() < 2 || certificate.votes.size() > 3) {
-        error = "commit-phase certificate requires two or three votes";
+    if (!hasQuorumVoteCount(certificate.votes.size(), certificate.validator_set.size())) {
+        error = "commit-phase certificate does not meet validator quorum";
         return false;
     }
     Address previous_vote;
@@ -815,17 +823,9 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
         return false;
     }
     const auto& validators = record.genesis_config.validator_set;
-    if (validators.size() != 3 ||
-        !std::is_sorted(validators.begin(), validators.end()) ||
-        std::adjacent_find(validators.begin(), validators.end()) != validators.end()) {
-        error = "genesis validator set must contain three canonical addresses";
+    if (!isCanonicalProtocolValidatorSet(validators)) {
+        error = "genesis validator set must contain canonical validator addresses";
         return false;
-    }
-    for (const auto& validator : validators) {
-        if (!crypto::isProtocolSignatureAddress(validator)) {
-            error = "invalid genesis validator address";
-            return false;
-        }
     }
     return true;
 }
@@ -840,8 +840,8 @@ bool verifyValidatorEpochTransition(
     const bool absent = transition.epoch == 0 && transition.activation_integer == 0 &&
         transition.next_validator_set.empty() && transition.votes.empty();
     if (absent) return true;
-    if (current_validator_set.size() != 3) {
-        error = "validator epoch requires an active three-validator set";
+    if (!isCanonicalProtocolValidatorSet(current_validator_set)) {
+        error = "validator epoch requires an active canonical validator set";
         return false;
     }
     if (transition.epoch != current_epoch + 1) {
@@ -852,21 +852,12 @@ bool verifyValidatorEpochTransition(
         error = "validator epoch must activate at the next integer";
         return false;
     }
-    if (transition.next_validator_set.size() != 3 ||
-        !std::is_sorted(transition.next_validator_set.begin(), transition.next_validator_set.end()) ||
-        std::adjacent_find(transition.next_validator_set.begin(), transition.next_validator_set.end()) !=
-            transition.next_validator_set.end()) {
-        error = "next validator set must contain three canonical addresses";
+    if (!isCanonicalProtocolValidatorSet(transition.next_validator_set)) {
+        error = "next validator set must contain canonical validator addresses";
         return false;
     }
-    for (const auto& validator : transition.next_validator_set) {
-        if (!crypto::isProtocolSignatureAddress(validator)) {
-            error = "invalid next validator address";
-            return false;
-        }
-    }
-    if (transition.votes.size() < 2 || transition.votes.size() > 3) {
-        error = "validator epoch requires two or three votes";
+    if (!hasQuorumVoteCount(transition.votes.size(), current_validator_set.size())) {
+        error = "validator epoch votes do not meet current validator quorum";
         return false;
     }
     Address previous_vote;
@@ -1038,8 +1029,8 @@ bool verifyRoundChangeCertificate(
         return true;
     }
     if (proof.rule != kRoundFinalizationRule ||
-        proof.round_changes.size() < 2 || proof.round_changes.size() > 3) {
-        error = "later finalization rounds require a two-of-three round-change certificate";
+        !hasQuorumVoteCount(proof.round_changes.size(), validator_set.size())) {
+        error = "later finalization rounds require a validator-quorum round-change certificate";
         return false;
     }
     round = proof.round_changes.front().new_round;
@@ -1078,8 +1069,9 @@ bool verifyRecordFinalization(
     if (proof.rule != kSignedFinalizationRule && proof.rule != kRoundFinalizationRule) {
         error = "quorum records require ML-DSA-65 finalization"; return false;
     }
-    if (validator_set.size() != 3 || proof.votes.size() < 2 || proof.votes.size() > 3) {
-        error = "signed finalization requires two or three votes from a three-validator set"; return false;
+    if (!isCanonicalProtocolValidatorSet(validator_set) ||
+        !hasQuorumVoteCount(proof.votes.size(), validator_set.size())) {
+        error = "signed finalization requires validator-quorum votes from the active set"; return false;
     }
     std::uint64_t round = 0;
     if (!verifyRoundChangeCertificate(

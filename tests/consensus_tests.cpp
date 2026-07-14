@@ -40,6 +40,15 @@ int main() {
     primechain::ChainState state;
     std::string error;
 
+    if (!expect(primechain::core::requiredValidatorQuorum(0) == 0, "zero-validator quorum is zero") ||
+        !expect(primechain::core::requiredValidatorQuorum(1) == 1, "one-validator quorum is one") ||
+        !expect(primechain::core::requiredValidatorQuorum(2) == 2, "two-validator quorum is two") ||
+        !expect(primechain::core::requiredValidatorQuorum(3) == 2, "three-validator quorum is two") ||
+        !expect(primechain::core::requiredValidatorQuorum(4) == 3, "four-validator quorum is three") ||
+        !expect(primechain::core::requiredValidatorQuorum(7) == 5, "seven-validator quorum is five")) {
+        return 1;
+    }
+
     primechain::Block valid = makeBlock(state, 3);
     if (!expect(consensus.validateBlock(valid, state, error), "valid next-prime block")) {
         std::cerr << error << "\n";

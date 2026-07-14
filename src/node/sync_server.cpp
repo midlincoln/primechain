@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "primechain/core/consensus.hpp"
 #include "primechain/crypto/hash.hpp"
 #include "primechain/crypto/signature.hpp"
 #include "primechain/math/number_theory.hpp"
@@ -2243,16 +2244,17 @@ private:
         std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
             return left.validator_address < right.validator_address;
         });
-        if (out.size() > 3) out.resize(3);
+        if (out.size() > validator_set_.size()) out.resize(validator_set_.size());
         return out;
     }
 
     std::uint64_t activeFinalizationRound(primechain::PrimeValue integer) const {
+        if (!quorumEnabled()) return 1;
         std::uint64_t active = 1;
         for (const auto& entry : round_changes_) {
             if (std::get<0>(entry.first) != integer) continue;
             const auto round = std::get<1>(entry.first);
-            if (certifiedRoundChanges(integer, round).size() >= 2) active = std::max(active, round);
+            if (certifiedRoundChanges(integer, round).size() >= validatorQuorumRequired()) active = std::max(active, round);
         }
         return active;
     }
@@ -2487,10 +2489,12 @@ private:
         primechain::PrimeValue integer,
         std::uint64_t current_round,
         std::uint64_t new_round) const {
-        return commitPhaseTimeoutVoteCount(integer, current_round, new_round) >= 2;
+        return quorumEnabled() &&
+               commitPhaseTimeoutVoteCount(integer, current_round, new_round) >= validatorQuorumRequired();
     }
 
     std::uint64_t activeCommitPhaseRound(primechain::PrimeValue integer) const {
+        if (!quorumEnabled()) return 1;
         std::uint64_t round = 1;
         bool changed = true;
         while (changed) {
@@ -2710,7 +2714,7 @@ private:
             }
         }
         if (!commitPhaseTimeoutCertified(integer, current_round, next_round)) {
-            error = "could not collect two validator commit-phase timeout signatures";
+            error = "could not collect validator-quorum commit-phase timeout signatures";
             return false;
         }
         return clearCommitPhaseForTimeout(integer, current_round, error);
@@ -2868,7 +2872,7 @@ private:
             !acceptFinalizationVote(local_vote, candidate_hash, round,
                 record.finalized_by.votes, error)) return false;
         for (const auto& peer : peers_) {
-            if (record.finalized_by.votes.size() >= 2) break;
+            if (record.finalized_by.votes.size() >= validatorQuorumRequired()) break;
             std::string peer_error;
             const auto vote = requestRecordFinalizationVote(peer, kind, payload, local_vote, peer_error);
             if (!vote.has_value()) {
@@ -2890,8 +2894,8 @@ private:
         if (!primechain::protocol::verifyRecordFinalization(
                 record.finalized_by, candidate_hash, record.previous_record_hash,
                 record.integer, validator_set_, error)) {
-            if (record.finalized_by.votes.size() < 2) {
-                error = "could not collect two validator finalization signatures in round "
+            if (record.finalized_by.votes.size() < validatorQuorumRequired()) {
+                error = "could not collect validator-quorum finalization signatures in round "
                     + std::to_string(round);
             }
             return false;
@@ -2907,7 +2911,7 @@ private:
         auto local = makeLocalRoundChangeVote(previous_hash, integer, new_round, error);
         if (local.signature.empty() || !acceptRoundChangeVote(local, error)) return false;
         for (const auto& peer : peers_) {
-            if (certifiedRoundChanges(integer, new_round).size() >= 2) break;
+            if (certifiedRoundChanges(integer, new_round).size() >= validatorQuorumRequired()) break;
             std::string peer_error;
             const auto vote = requestRoundChangeVote(peer, local, peer_error);
             if (!vote.has_value()) {
@@ -2921,8 +2925,8 @@ private:
                 continue;
             }
         }
-        if (certifiedRoundChanges(integer, new_round).size() < 2) {
-            error = "could not collect two validator round-change signatures";
+        if (certifiedRoundChanges(integer, new_round).size() < validatorQuorumRequired()) {
+            error = "could not collect validator-quorum round-change signatures";
             return false;
         }
         return true;
@@ -2970,7 +2974,11 @@ private:
     }
 
     bool quorumEnabled() const {
-        return validator_set_.size() == 3;
+        return !validator_set_.empty();
+    }
+
+    std::size_t validatorQuorumRequired() const {
+        return primechain::core::requiredValidatorQuorum(validator_set_.size());
     }
 
     std::vector<primechain::storage::CommitPhaseVote> phaseVoteSnapshot() const {
@@ -3060,7 +3068,7 @@ private:
     }
 
     bool phaseClosed(primechain::PrimeValue integer, std::uint64_t commit_round) const {
-        return phaseVoteCount(integer, commit_round) >= 2;
+        return quorumEnabled() && phaseVoteCount(integer, commit_round) >= validatorQuorumRequired();
     }
 
     bool phaseClosed(primechain::PrimeValue integer) const {
@@ -3424,7 +3432,7 @@ private:
     }
 
     bool epochProposalReady() const {
-        return epoch_votes_.size() >= 2;
+        return quorumEnabled() && epoch_votes_.size() >= validatorQuorumRequired();
     }
 
     primechain::protocol::ValidatorEpochTransitionV1 embeddedValidatorEpoch() const {
@@ -3453,7 +3461,7 @@ private:
                 record.record_integer != node.status().frontier_integer + 1 ||
                 record.epoch != node.validatorEpoch() + 1 ||
                 record.activation_integer != record.record_integer + 1 ||
-                record.next_validator_set.size() != 3 ||
+                !primechain::core::validValidatorSetSize(record.next_validator_set.size()) ||
                 !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
                 std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
                 std::find(validator_set_.begin(), validator_set_.end(), record.vote.validator_address) == validator_set_.end() ||
@@ -3547,17 +3555,24 @@ private:
 
     void submitEpochVote(int fd, const std::string& line, bool propagate = true) {
         std::istringstream in(line);
-        std::string command, previous_hex, voter, public_hex, signature_hex, extra;
+        std::string command, previous_hex;
+        std::vector<std::string> tail;
         primechain::storage::ValidatorEpochVoteRecord record;
         in >> command >> previous_hex >> record.record_integer >> record.epoch >> record.activation_integer;
-        record.next_validator_set.resize(3);
-        in >> record.next_validator_set[0] >> record.next_validator_set[1] >> record.next_validator_set[2]
-           >> voter >> public_hex >> signature_hex;
+        for (std::string token; in >> token;) tail.push_back(token);
         const auto previous = parseHash(previous_hex);
+        if (tail.size() < 4) {
+            writeAll(fd, "ERROR invalid SUBMIT_EPOCH_VOTE\n");
+            return;
+        }
+        const std::string voter = tail[tail.size() - 3];
+        const std::string public_hex = tail[tail.size() - 2];
+        const std::string signature_hex = tail[tail.size() - 1];
+        record.next_validator_set.assign(tail.begin(), tail.end() - 3);
         record.vote.validator_address = voter;
         record.vote.public_key = hexToBytes(public_hex);
         record.vote.signature = hexToBytes(signature_hex);
-        if (!in || command != "SUBMIT_EPOCH_VOTE" && command != "SUBMIT_EPOCH_VOTE_PEER" || !previous.has_value() || (in >> extra)) {
+        if (!in.eof() || command != "SUBMIT_EPOCH_VOTE" && command != "SUBMIT_EPOCH_VOTE_PEER" || !previous.has_value()) {
             writeAll(fd, "ERROR invalid SUBMIT_EPOCH_VOTE\n");
             return;
         }
@@ -3568,7 +3583,7 @@ private:
         if (!quorumEnabled() || record.previous_record_hash != node.status().latest_record_hash ||
             record.record_integer != node.status().frontier_integer + 1 ||
             record.epoch != node.validatorEpoch() + 1 || record.activation_integer != record.record_integer + 1 ||
-            record.next_validator_set.size() != 3 ||
+            !primechain::core::validValidatorSetSize(record.next_validator_set.size()) ||
             !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
             std::adjacent_find(record.next_validator_set.begin(), record.next_validator_set.end()) != record.next_validator_set.end() ||
             !std::all_of(record.next_validator_set.begin(), record.next_validator_set.end(), primechain::crypto::isProtocolSignatureAddress)) {
@@ -4676,9 +4691,11 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             continue;
         }
         if (flag == "--validator-set") {
-            if (index + 2 >= argc) return std::nullopt;
-            options.validator_set = {argv[index], argv[index + 1], argv[index + 2]};
-            index += 3;
+            options.validator_set.clear();
+            while (index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
+                options.validator_set.push_back(argv[index++]);
+            }
+            if (options.validator_set.empty()) return std::nullopt;
             continue;
         }
         if (flag == "--validator-identity") {
@@ -4725,12 +4742,13 @@ int main(int argc, char** argv) {
     if (!options.validator_set.empty()) {
         const std::set<primechain::Address> unique_validators(
             options.validator_set.begin(), options.validator_set.end());
-        if (unique_validators.size() != 3 ||
+        if (unique_validators.size() != options.validator_set.size() ||
+            !primechain::core::validValidatorSetSize(options.validator_set.size()) ||
             !std::all_of(options.validator_set.begin(), options.validator_set.end(),
                 [](const primechain::Address& address) {
                     return primechain::crypto::isProtocolSignatureAddress(address);
                 })) {
-            std::cerr << "validator set must contain three distinct pcpq1_ addresses\n";
+            std::cerr << "validator set must contain distinct pcpq1_ addresses\n";
             return 1;
         }
         primechain::wallet::MinerIdentity loaded;
@@ -4818,8 +4836,10 @@ int main(int argc, char** argv) {
         std::cout << "finalization timeout: " << options.finalization_timeout_ms << " ms\n";
     }
     if (validator_identity.has_value()) {
-        std::cout << "validator quorum enabled: fixed 2-of-3; local validator "
-                  << validator_identity->address << "\n";
+        std::cout << "validator quorum enabled: "
+                  << primechain::core::requiredValidatorQuorum(options.validator_set.size())
+                  << "-of-" << options.validator_set.size()
+                  << "; local validator " << validator_identity->address << "\n";
     }
 
     auto next_sync = std::chrono::steady_clock::now()
