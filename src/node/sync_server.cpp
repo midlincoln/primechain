@@ -3435,6 +3435,15 @@ private:
         return quorumEnabled() && epoch_votes_.size() >= validatorQuorumRequired();
     }
 
+    bool epochProposalTargetsNextRecord(const primechain::node::SequentialNode& node) const {
+        if (epoch_votes_.empty()) return false;
+        const auto& proposal = epoch_votes_.begin()->second;
+        return proposal.previous_record_hash == node.status().latest_record_hash &&
+               proposal.record_integer == node.status().frontier_integer + 1 &&
+               proposal.epoch == node.validatorEpoch() + 1 &&
+               proposal.activation_integer == proposal.record_integer + 1;
+    }
+
     primechain::protocol::ValidatorEpochTransitionV1 embeddedValidatorEpoch() const {
         primechain::protocol::ValidatorEpochTransitionV1 transition;
         if (!epochProposalReady()) return transition;
@@ -3447,6 +3456,17 @@ private:
             return left.validator_address < right.validator_address;
         });
         return transition;
+    }
+
+    primechain::protocol::ValidatorEpochTransitionV1 embeddedValidatorEpochForNextRecord(
+            const primechain::node::SequentialNode& node) {
+        if (epoch_votes_.empty()) return {};
+        if (!epochProposalTargetsNextRecord(node)) {
+            clearEpochVotesAfterRecord();
+            return {};
+        }
+        if (!epochProposalReady()) return {};
+        return embeddedValidatorEpoch();
     }
 
     bool loadEpochVotesInternal(std::string& error) {
@@ -4108,9 +4128,10 @@ private:
         if (quorumEnabled()) {
             record.version = 1;
             record.commit_phase = embeddedCommitPhaseCertificate(g);
-            if (epochProposalReady()) {
+            auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
+            if (validator_epoch.epoch != 0) {
                 record.version = 2;
-                record.validator_epoch = embeddedValidatorEpoch();
+                record.validator_epoch = std::move(validator_epoch);
             }
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
@@ -4273,9 +4294,10 @@ private:
         auto record = makePrimeRecord(
             node.status(), proof.p, proof, provider_address, authentication);
         if (quorumEnabled()) record.version = 1;
-        if (epochProposalReady()) {
+        auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
+        if (validator_epoch.epoch != 0) {
             record.version = 2;
-            record.validator_epoch = embeddedValidatorEpoch();
+            record.validator_epoch = std::move(validator_epoch);
         }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
