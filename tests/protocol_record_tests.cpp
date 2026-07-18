@@ -400,6 +400,28 @@ int main() {
         return 1;
     }
 
+    auto rollout_prime_v3 = prime;
+    rollout_prime_v3.version = 2;
+    auto rollout_prime_bytes = serializePrimeRecord(rollout_prime_v3);
+    rollout_prime_bytes[8] = 3;
+    decode_error.clear();
+    const auto decoded_rollout_prime = deserializePrimeRecord(rollout_prime_bytes, decode_error);
+    if (!expect(decoded_rollout_prime.has_value(), "decode rollout v3 prime without endpoint section")) {
+        std::cerr << decode_error << "\n";
+        return 1;
+    }
+
+    auto rollout_composite_v3 = *certified;
+    rollout_composite_v3.version = 2;
+    auto rollout_composite_bytes = serializeCompositeRecord(rollout_composite_v3);
+    rollout_composite_bytes[8] = 3;
+    decode_error.clear();
+    const auto decoded_rollout_composite = deserializeCompositeRecord(rollout_composite_bytes, decode_error);
+    if (!expect(decoded_rollout_composite.has_value(), "decode rollout v3 composite without endpoint section")) {
+        std::cerr << decode_error << "\n";
+        return 1;
+    }
+
     std::vector<primechain::Address> genesis_validators;
     for (int i = 0; i < 3; ++i) {
         certificate_error.clear();

@@ -454,7 +454,8 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2) || record.commit_phase.validator_set != validator_set_)) {
+        ((record.version != 1 && record.version != 2 && record.version != 3) ||
+         record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }

@@ -2124,8 +2124,8 @@ private:
         const auto record = primechain::protocol::deserializeCompositeRecord(
             submitted.payload, error);
         if (!record.has_value()) return false;
-        if (record->version != 1 && record->version != 2) {
-            error = "quorum mode requires composite record version 1 or 2";
+        if (record->version != 1 && record->version != 2 && record->version != 3) {
+            error = "quorum mode requires composite record version 1, 2, or 3";
             return false;
         }
         if (record->commit_phase.validator_set != validator_set_) {

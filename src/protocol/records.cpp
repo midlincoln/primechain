@@ -87,6 +87,14 @@ public:
         return offset_ == bytes_.size();
     }
 
+    std::size_t offset() const {
+        return offset_;
+    }
+
+    void setOffset(std::size_t offset) {
+        offset_ = offset;
+    }
+
 private:
     std::size_t remaining() const {
         if (offset_ > bytes_.size()) return 0;
@@ -481,6 +489,31 @@ bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     return true;
 }
 
+bool readOptionalValidatorEndpointUpdatesAndFinalization(
+    ByteReader& reader,
+    std::uint64_t version,
+    std::vector<ValidatorEndpointUpdateV1>& updates,
+    FinalizationProofV0& finalization) {
+    if (version < 3) {
+        return readFinalizationProof(reader, finalization);
+    }
+
+    auto with_endpoints = reader;
+    std::vector<ValidatorEndpointUpdateV1> parsed_updates;
+    FinalizationProofV0 parsed_finalization;
+    if (readValidatorEndpointUpdates(with_endpoints, parsed_updates) &&
+        readFinalizationProof(with_endpoints, parsed_finalization) &&
+        with_endpoints.consumed()) {
+        updates = std::move(parsed_updates);
+        finalization = std::move(parsed_finalization);
+        reader.setOffset(with_endpoints.offset());
+        return true;
+    }
+
+    updates.clear();
+    return readFinalizationProof(reader, finalization);
+}
+
 std::vector<std::uint8_t> serializeCompositeRecordInternal(
     const CompositeRecordV0& record,
     bool include_votes) {
@@ -644,8 +677,8 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
-        (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) ||
-        !readFinalizationProof(reader, record.finalized_by)) {
+        !readOptionalValidatorEndpointUpdatesAndFinalization(
+            reader, record.version, record.validator_endpoints, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -674,8 +707,8 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !reader.readHash(record.state_root) ||
         (record.height == 0 && !readGenesisConfig(reader, record.genesis_config)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
-        (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) ||
-        !readFinalizationProof(reader, record.finalized_by)) {
+        !readOptionalValidatorEndpointUpdatesAndFinalization(
+            reader, record.version, record.validator_endpoints, record.finalized_by)) {
         error = "truncated prime record payload";
         return std::nullopt;
     }
@@ -746,7 +779,7 @@ bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record,
     std::string& error) {
     if (record.version == 0) return true;
-    if (record.version != 1 && record.version != 2) {
+    if (record.version != 1 && record.version != 2 && record.version != 3) {
         error = "unsupported composite record version";
         return false;
     }
