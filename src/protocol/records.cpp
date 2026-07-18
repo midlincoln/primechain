@@ -704,11 +704,49 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !readPrattProof(reader, record.proof) ||
         !readTransactionBatch(reader, record.tx_batch) ||
         !readTransactionList(reader, record.transactions, error) ||
-        !reader.readHash(record.state_root) ||
-        (record.height == 0 && !readGenesisConfig(reader, record.genesis_config)) ||
-        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
-        !readOptionalValidatorEndpointUpdatesAndFinalization(
-            reader, record.version, record.validator_endpoints, record.finalized_by)) {
+        !reader.readHash(record.state_root)) {
+        error = "truncated prime record payload";
+        return std::nullopt;
+    }
+
+    const auto metadata_offset = reader.offset();
+    const auto read_metadata = [&](bool read_genesis_config) {
+        auto candidate_reader = reader;
+        record.genesis_config = {};
+        record.validator_epoch = {};
+        record.validator_endpoints.clear();
+        record.finalized_by = {};
+        if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config)) {
+            return false;
+        }
+        if (record.version >= 2 &&
+            !readValidatorEpochTransition(candidate_reader, record.validator_epoch)) {
+            return false;
+        }
+        if (!readOptionalValidatorEndpointUpdatesAndFinalization(
+                candidate_reader, record.version, record.validator_endpoints,
+                record.finalized_by) ||
+            !candidate_reader.consumed()) {
+            return false;
+        }
+        reader.setOffset(candidate_reader.offset());
+        return true;
+    };
+
+    bool decoded_metadata = false;
+    if (record.height == 0) {
+        decoded_metadata = read_metadata(true);
+    } else {
+        decoded_metadata = read_metadata(false);
+        if (!decoded_metadata) {
+            reader.setOffset(metadata_offset);
+            decoded_metadata = read_metadata(true);
+            if (decoded_metadata) {
+                record.genesis_config = {};
+            }
+        }
+    }
+    if (!decoded_metadata) {
         error = "truncated prime record payload";
         return std::nullopt;
     }
