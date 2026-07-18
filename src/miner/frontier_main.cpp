@@ -309,6 +309,15 @@ std::vector<std::string> requestLines(const std::string& host, int port, const s
     return lines;
 }
 
+void addUniquePeer(std::vector<PeerEndpoint>& peers, PeerEndpoint peer) {
+    for (const auto& existing : peers) {
+        if (existing.host == peer.host && existing.port == peer.port) {
+            return;
+        }
+    }
+    peers.push_back(std::move(peer));
+}
+
 std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port) {
     std::vector<PeerEndpoint> peers;
     const auto lines = requestLines(host, port, "GET_PEERS\n");
@@ -328,7 +337,38 @@ std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port) {
         PeerEndpoint peer;
         in >> tag >> peer.host >> peer.port;
         if (in && tag == "PEER" && peer.port > 0) {
-            peers.push_back(std::move(peer));
+            addUniquePeer(peers, std::move(peer));
+        }
+    }
+    if (peers.size() > expected) {
+        peers.resize(expected);
+    }
+    return peers;
+}
+
+std::vector<PeerEndpoint> requestValidatorEndpointList(const std::string& host, int port) {
+    std::vector<PeerEndpoint> peers;
+    const auto lines = requestLines(host, port, "GET_VALIDATOR_ENDPOINTS\n");
+    if (lines.empty()) {
+        return peers;
+    }
+    std::istringstream header(lines.front());
+    std::string tag;
+    std::size_t expected = 0;
+    header >> tag >> expected;
+    if (!header || tag != "VALIDATOR_ENDPOINTS") {
+        return peers;
+    }
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i] == "END_VALIDATOR_ENDPOINTS") break;
+        std::istringstream in(lines[i]);
+        std::string validator_address;
+        PeerEndpoint peer;
+        primechain::PrimeValue effective_integer = 0;
+        std::uint64_t sequence = 0;
+        in >> tag >> validator_address >> peer.host >> peer.port >> effective_integer >> sequence;
+        if (in && tag == "VALIDATOR_ENDPOINT" && peer.port > 0) {
+            addUniquePeer(peers, std::move(peer));
         }
     }
     if (peers.size() > expected) {
@@ -358,17 +398,22 @@ std::size_t remoteValidatorCount(const std::string& host, int port) {
     return count;
 }
 
-std::vector<PeerEndpoint> quorumEndpoints(const std::string& host, int port) {
-    std::vector<PeerEndpoint> peers{{host, port}};
-    for (const auto& peer : requestPeerList(host, port)) {
-        bool known = false;
-        for (const auto& existing : peers) {
-            if (existing.host == peer.host && existing.port == peer.port) {
-                known = true;
-                break;
-            }
+std::vector<PeerEndpoint> quorumEndpoints(
+    const std::string& host,
+    int port,
+    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
+    std::vector<PeerEndpoint> peers;
+    for (const auto& peer : configured_validator_endpoints) {
+        addUniquePeer(peers, peer);
+    }
+    for (const auto& peer : requestValidatorEndpointList(host, port)) {
+        addUniquePeer(peers, peer);
+    }
+    if (peers.empty()) {
+        addUniquePeer(peers, {host, port});
+        for (const auto& peer : requestPeerList(host, port)) {
+            addUniquePeer(peers, peer);
         }
-        if (!known) peers.push_back(peer);
     }
     return peers;
 }
@@ -714,7 +759,7 @@ void warmQuorumCommitments(
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file>\n"
+              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...]\n"
               << "legacy development: " << argv0
               << " [host] [port] [limit] [prime_miner] [composite_miner]\n";
 }
@@ -736,6 +781,7 @@ int main(int argc, char** argv) {
     std::optional<primechain::wallet::MinerIdentity> composite_identity;
     std::optional<std::string> proof_store_path;
     std::optional<std::string> pending_composite_path;
+    std::vector<PeerEndpoint> configured_validator_endpoints;
     int argument = 4;
     while (argument < argc) {
         const std::string option = argv[argument++];
@@ -745,6 +791,13 @@ int main(int argc, char** argv) {
         } else if (option == "--pending-composite") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             pending_composite_path = argv[argument++];
+        } else if (option == "--validator-endpoint") {
+            if (argument + 1 >= argc) { printUsage(argv[0]); return 1; }
+            PeerEndpoint peer;
+            peer.host = argv[argument++];
+            peer.port = std::stoi(argv[argument++]);
+            if (peer.port <= 0) { printUsage(argv[0]); return 1; }
+            addUniquePeer(configured_validator_endpoints, std::move(peer));
         } else if (option == "--prime-identity" || option == "--composite-identity") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             primechain::wallet::MinerIdentity identity;
@@ -888,7 +941,7 @@ int main(int argc, char** argv) {
             composite_identity.has_value() && remote_validator_count > 0;
         const auto required_quorum_votes = primechain::core::requiredValidatorQuorum(remote_validator_count);
         if (needs_quorum_phase) {
-            quorum_peers = quorumEndpoints(host, port);
+            quorum_peers = quorumEndpoints(host, port, configured_validator_endpoints);
             const auto required_endpoints = required_quorum_votes;
             if (quorum_peers.size() < required_endpoints) {
                 std::cerr << "quorum node did not advertise enough validator endpoints before commit; "

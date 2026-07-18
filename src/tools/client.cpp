@@ -1132,6 +1132,46 @@ int validatorRegistry(int argc, char** argv) {
     return 0;
 }
 
+std::vector<PeerConfig> loadValidatorEndpointsFromStore(const std::string& store_path) {
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        return {};
+    }
+
+    std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                return {};
+            }
+            for (const auto& update : record->validator_endpoints) {
+                latest[update.validator_address] = update;
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            return {};
+        }
+        for (const auto& update : record->validator_endpoints) {
+            latest[update.validator_address] = update;
+        }
+    }
+
+    std::vector<PeerConfig> endpoints;
+    endpoints.reserve(latest.size());
+    for (const auto& entry : latest) {
+        const auto& update = entry.second;
+        if (!update.host.empty() && update.port > 0 && update.port <= 65535) {
+            endpoints.push_back({update.host, static_cast<int>(update.port)});
+        }
+    }
+    return endpoints;
+}
+
 int validatorEndpoints(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string store_path = argv[2];
@@ -1576,7 +1616,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
     int stagnant_attempts = 0;
     while (true) {
         const auto before_mine = loadLocalStatus(chainPath(workdir));
-        rc = runTool(argv0, "primechain-frontier-miner", {
+        std::vector<std::string> miner_args{
             peer->host,
             std::to_string(peer->port),
             std::to_string(*target),
@@ -1588,7 +1628,13 @@ int runJobs(const char* argv0, int argc, char** argv) {
             chainPath(workdir),
             "--pending-composite",
             pendingCompositePath(workdir),
-        });
+        };
+        for (const auto& endpoint : loadValidatorEndpointsFromStore(chainPath(workdir))) {
+            miner_args.push_back("--validator-endpoint");
+            miner_args.push_back(endpoint.host);
+            miner_args.push_back(std::to_string(endpoint.port));
+        }
+        rc = runTool(argv0, "primechain-frontier-miner", miner_args);
         if (rc == 0) break;
 
         state["status"] = "syncing";
