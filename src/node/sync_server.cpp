@@ -73,6 +73,16 @@ struct CommitPhaseTimeoutVote {
     std::vector<std::uint8_t> signature;
 };
 
+struct SignedCompositeReveal {
+    primechain::PrimeValue g{0};
+    primechain::PrimeValue d{0};
+    primechain::PrimeValue e{0};
+    std::uint64_t nonce{0};
+    primechain::Address provider_address;
+    std::vector<std::uint8_t> public_key;
+    std::vector<std::uint8_t> signature;
+};
+
 bool samePeer(const PeerEndpoint& left, const PeerEndpoint& right) {
     return left.host == right.host && left.port == right.port;
 }
@@ -313,6 +323,7 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("TIMEOUT_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SIGN_RECORD_CANDIDATE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_REVEAL_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
@@ -1135,6 +1146,15 @@ bool submitTransactionToPeer(
     return false;
 }
 
+std::string signedRevealLine(const SignedCompositeReveal& reveal, bool peer_command) {
+    std::ostringstream out;
+    out << (peer_command ? "SUBMIT_SIGNED_REVEAL_PEER " : "SUBMIT_SIGNED_REVEAL ")
+        << reveal.g << " " << reveal.d << " " << reveal.e << " " << reveal.nonce << " "
+        << reveal.provider_address << " " << bytesToHex(reveal.public_key) << " "
+        << bytesToHex(reveal.signature) << "\n";
+    return out.str();
+}
+
 bool submitCommitToPeer(
     const PeerEndpoint& peer,
     const primechain::storage::StoredCommitment& commitment,
@@ -1173,6 +1193,38 @@ bool submitCommitToPeer(
         return true;
     }
     error = "peer rejected commitment: " + *response;
+    return false;
+}
+
+bool submitRevealToPeer(
+    const PeerEndpoint& peer,
+    const SignedCompositeReveal& reveal,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    if (!writeCommand(socket->fd(), signedRevealLine(reveal, true))) {
+        error = "could not submit reveal to peer";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "peer did not return reveal response";
+        return false;
+    }
+    if (response->rfind("COMPOSITE_ACCEPTED ", 0) == 0 ||
+        response->rfind("REVEAL_PENDING ", 0) == 0 ||
+        response->rfind("REVEAL_DUPLICATE ", 0) == 0 ||
+        response->find("no prior commitment for reveal") != std::string::npos ||
+        response->find("commitment not selected for reveal") != std::string::npos) {
+        return true;
+    }
+    error = "peer rejected reveal: " + *response;
     return false;
 }
 
@@ -1421,7 +1473,11 @@ public:
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
-                submitSignedCompositeReveal(fd, *line);
+                submitSignedCompositeReveal(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_SIGNED_REVEAL_PEER ", 0) == 0) {
+                submitSignedCompositeReveal(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0) {
@@ -1785,6 +1841,13 @@ private:
             std::string error;
             if (!persistPhaseVotes(error)) {
                 std::cerr << "phase vote persistence warning: " << error << "\n";
+            }
+        }
+        for (auto it = pending_reveals_.begin(); it != pending_reveals_.end();) {
+            if (std::get<0>(it->first) <= finalized_integer) {
+                it = pending_reveals_.erase(it);
+            } else {
+                ++it;
             }
         }
     }
@@ -4105,66 +4168,141 @@ private:
             + selected->provider_address + "\n");
     }
 
-    void submitSignedCompositeReveal(int fd, const std::string& line) {
+    bool parseSignedCompositeReveal(
+        const std::string& line,
+        SignedCompositeReveal& reveal,
+        std::string& error) const {
         std::istringstream in(line);
         std::string command;
-        primechain::PrimeValue g = 0;
-        primechain::PrimeValue d = 0;
-        primechain::PrimeValue e = 0;
-        std::uint64_t nonce = 0;
-        std::string provider_address;
         std::string public_key_hex;
         std::string signature_hex;
         std::string extra;
-        in >> command >> g >> d >> e >> nonce >> provider_address >> public_key_hex >> signature_hex;
-        const auto public_key = hexToBytes(public_key_hex);
-        const auto signature = hexToBytes(signature_hex);
-        if (!in || command != "SUBMIT_SIGNED_REVEAL" ||
-            public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
-            signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) || (in >> extra)) {
-            writeAll(fd, "ERROR invalid SUBMIT_SIGNED_REVEAL\n");
-            return;
+        in >> command >> reveal.g >> reveal.d >> reveal.e >> reveal.nonce
+           >> reveal.provider_address >> public_key_hex >> signature_hex;
+        reveal.public_key = hexToBytes(public_key_hex);
+        reveal.signature = hexToBytes(signature_hex);
+        if (!in || (command != "SUBMIT_SIGNED_REVEAL" && command != "SUBMIT_SIGNED_REVEAL_PEER") ||
+            reveal.public_key.size() != primechain::crypto::signaturePublicKeySize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+            reveal.signature.size() != primechain::crypto::signatureSize(primechain::crypto::kProtocolSignatureAlgorithm) ||
+            (in >> extra)) {
+            error = "invalid SUBMIT_SIGNED_REVEAL";
+            return false;
         }
-        if (provider_address != primechain::crypto::addressFromProtocolPublicKey(public_key)) {
-            writeAll(fd, "ERROR signed reveal address does not match public key\n");
-            return;
+        if (reveal.provider_address != primechain::crypto::addressFromProtocolPublicKey(reveal.public_key)) {
+            error = "signed reveal address does not match public key";
+            return false;
         }
-        std::string error;
         if (!primechain::crypto::verifyProtocolMessageSignature(
-                public_key,
+                reveal.public_key,
                 primechain::crypto::compositeRevealSigningPayload(
-                    g, d, e, nonce, provider_address),
-                signature,
+                    reveal.g, reveal.d, reveal.e, reveal.nonce, reveal.provider_address),
+                reveal.signature,
                 error)) {
-            writeAll(fd, "ERROR invalid signed reveal signature\n");
+            error = "invalid signed reveal signature";
+            return false;
+        }
+        return true;
+    }
+
+    bool rememberPendingReveal(const SignedCompositeReveal& reveal, std::string& error) {
+        const auto key = std::make_tuple(reveal.g, activeCommitPhaseRound(reveal.g), reveal.provider_address);
+        const auto existing = pending_reveals_.find(key);
+        if (existing != pending_reveals_.end()) {
+            if (existing->second.d == reveal.d && existing->second.e == reveal.e &&
+                existing->second.nonce == reveal.nonce &&
+                existing->second.public_key == reveal.public_key &&
+                existing->second.signature == reveal.signature) {
+                return true;
+            }
+            error = "provider already revealed different composite evidence";
+            return false;
+        }
+        pending_reveals_[key] = reveal;
+        return true;
+    }
+
+    void propagateReveal(const SignedCompositeReveal& reveal) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitRevealToPeer(peer, reveal, error)) {
+                std::cerr << "reveal propagation warning to " << peer.host << ":"
+                          << peer.port << ": " << error << "\n";
+            }
+        }
+    }
+
+    void syncCommitmentsFromPeersFor(primechain::PrimeValue) {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!syncCommitmentsFromPeer(peer.host, peer.port, error)) {
+                std::cerr << "commitment sync warning from " << peer.host << ":" << peer.port
+                          << ": " << error << "\n";
+            }
+        }
+    }
+
+    void submitSignedCompositeReveal(int fd, const std::string& line, bool propagate) {
+        SignedCompositeReveal reveal;
+        std::string error;
+        if (!parseSignedCompositeReveal(line, reveal, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        if (quorumEnabled() && !phaseClosed(g)) {
-            if (!closeCommitPhaseQuorum(g, error)) {
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const primechain::PrimeValue frontier =
+            node.status().has_genesis ? node.status().frontier_integer : 2;
+        if (reveal.g != frontier + 1) {
+            writeAll(fd, "ERROR SUBMIT_SIGNED_REVEAL must target next integer "
+                + std::to_string(frontier + 1) + "\n");
+            return;
+        }
+
+        if (!rememberPendingReveal(reveal, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!propagate) {
+            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " cached\n");
+            return;
+        }
+        propagateReveal(reveal);
+
+        const auto key = std::make_tuple(reveal.g, activeCommitPhaseRound(reveal.g), reveal.provider_address);
+        auto existing = commitments_.find(key);
+        if (existing == commitments_.end()) {
+            syncCommitmentsFromPeersFor(reveal.g);
+            existing = commitments_.find(key);
+        }
+        if (existing == commitments_.end()) {
+            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " awaiting_commitment\n");
+            return;
+        }
+        if (existing->second.public_key != reveal.public_key) {
+            writeAll(fd, "ERROR signed reveal key differs from commitment key\n");
+            return;
+        }
+        const auto revealed = primechain::crypto::compositeCommitment(
+            reveal.g, reveal.d, reveal.e, reveal.nonce, reveal.provider_address);
+        if (revealed != existing->second.commitment_hash) {
+            writeAll(fd, "ERROR reveal does not match prior commitment\n");
+            return;
+        }
+
+        if (quorumEnabled() && !phaseClosed(reveal.g)) {
+            if (!closeCommitPhaseQuorum(reveal.g, error)) {
                 writeAll(fd, "ERROR commit phase is not closed by validator quorum: " + error + "\n");
                 return;
             }
         }
 
-        const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
-        const auto existing = commitments_.find(key);
-        if (existing == commitments_.end()) {
-            writeAll(fd, "ERROR no prior commitment for reveal\n");
-            return;
-        }
-        if (existing->second.public_key != public_key) {
-            writeAll(fd, "ERROR signed reveal key differs from commitment key\n");
-            return;
-        }
-        const auto revealed = primechain::crypto::compositeCommitment(
-            g, d, e, nonce, provider_address);
-        if (revealed != existing->second.commitment_hash) {
-            writeAll(fd, "ERROR reveal does not match prior commitment\n");
-            return;
-        }
-        const auto selected = selectedCommitment(g);
+        const auto selected = selectedCommitment(reveal.g);
         if (!selected.has_value() ||
-            selected->provider_address != provider_address ||
+            selected->provider_address != reveal.provider_address ||
             selected->commitment_hash != existing->second.commitment_hash) {
             writeAll(fd, "ERROR commitment not selected for reveal; winner="
                 + (selected.has_value() ? selected->provider_address : std::string("none")) + "\n");
@@ -4172,11 +4310,12 @@ private:
         }
 
         const auto packed_proof = primechain::crypto::packCompositeRevealProof(
-            public_key, nonce, signature);
+            reveal.public_key, reveal.nonce, reveal.signature);
         std::ostringstream submission;
-        submission << "SUBMIT_COMPOSITE " << g << " " << d << " " << e << " "
-                   << provider_address << " " << bytesToHex(packed_proof);
+        submission << "SUBMIT_COMPOSITE " << reveal.g << " " << reveal.d << " " << reveal.e << " "
+                   << reveal.provider_address << " " << bytesToHex(packed_proof);
         submitComposite(fd, submission.str(), true);
+        pending_reveals_.erase(key);
     }
 
     void submitCompositeReveal(int fd, const std::string& line) {
@@ -4854,6 +4993,9 @@ private:
     std::map<
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::CommitPhaseVote> phase_votes_;
+    std::map<
+        std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
+        SignedCompositeReveal> pending_reveals_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,

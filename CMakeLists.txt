@@ -533,6 +533,17 @@ add_test(
 )
 
 add_test(
+    NAME quorum_pending_reveal_waits_for_commitment
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/quorum_pending_reveal.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        $<TARGET_FILE:primechain-composite-commitment>
+        $<TARGET_FILE:primechain-sequential>
+        ${CMAKE_CURRENT_BINARY_DIR}/quorum-pending-reveal
+)
+
+add_test(
     NAME quorum_two_client_workdirs_race_to_same_target
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/quorum_two_client_workdir_race.sh

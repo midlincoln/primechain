@@ -2,6 +2,15 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-18: Pending Signed Composite Reveals
+
+Added validator-side pending reveal handling for composite commit/reveal races.
+A client-origin signed reveal is now stored as signed evidence, propagated to
+validator peers, and retried after syncing missing commitments. Peer-propagated
+reveals are cache-only evidence and do not recursively trigger phase closing or
+finalization. This keeps gossip as liveness transport while finalized records
+remain the replayed authority.
+
 ## 2026-07-18: Validator-Owned Composite Phase Close
 
 Moved composite reveal coordination closer to the target validator-owned model.
