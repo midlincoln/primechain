@@ -130,6 +130,16 @@ struct ValidatorEpochTransitionV1 {
     std::vector<ValidatorEpochVoteV1> votes;
 };
 
+struct ValidatorEndpointUpdateV1 {
+    Address validator_address;
+    std::string host;
+    std::uint64_t port{0};
+    PrimeValue effective_integer{0};
+    std::uint64_t sequence{0};
+    Bytes public_key;
+    Bytes signature;
+};
+
 struct CompositeRecordV0 {
     std::uint64_t version{0};
     std::uint64_t height{0};
@@ -141,6 +151,7 @@ struct CompositeRecordV0 {
     Hash256 state_root{};
     CommitPhaseCertificateV1 commit_phase;
     ValidatorEpochTransitionV1 validator_epoch;
+    std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     FinalizationProofV0 finalized_by;
 };
 
@@ -155,6 +166,7 @@ struct PrimeRecordV0 {
     Hash256 state_root{};
     GenesisConfigV1 genesis_config;
     ValidatorEpochTransitionV1 validator_epoch;
+    std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     FinalizationProofV0 finalized_by;
 };
 
@@ -217,6 +229,12 @@ bool verifyValidatorEpochTransition(
     const ValidatorEpochTransitionV1& transition,
     const std::vector<Address>& current_validator_set,
     std::uint64_t current_epoch,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error);
+bool verifyValidatorEndpointUpdates(
+    const std::vector<ValidatorEndpointUpdateV1>& updates,
+    const std::vector<Address>& current_validator_set,
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::string& error);

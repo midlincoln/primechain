@@ -306,6 +306,8 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_VALIDATOR_ENDPOINT ", 0) == 0 ||
+           line.rfind("SUBMIT_VALIDATOR_ENDPOINT_PEER ", 0) == 0 ||
            line.rfind("SIGN_ROUND_CHANGE ", 0) == 0 ||
            line.rfind("SIGN_COMMIT_PHASE_TIMEOUT ", 0) == 0 ||
            line.rfind("TIMEOUT_COMMIT_PHASE ", 0) == 0 ||
@@ -1306,6 +1308,10 @@ public:
                 sendValidatorEpoch(fd);
                 continue;
             }
+            if (*line == "GET_VALIDATOR_ENDPOINTS") {
+                sendValidatorEndpoints(fd);
+                continue;
+            }
             if (*line == "GET_MINING_VIEW" || line->rfind("GET_MINING_VIEW ", 0) == 0) {
                 sendMiningView(fd, *line);
                 continue;
@@ -1388,6 +1394,14 @@ public:
             }
             if (line->rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0) {
                 submitEpochVote(fd, *line, false);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_ENDPOINT ", 0) == 0) {
+                submitValidatorEndpoint(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_ENDPOINT_PEER ", 0) == 0) {
+                submitValidatorEndpoint(fd, *line, false);
                 continue;
             }
             if (line->rfind("SIGN_ROUND_CHANGE ", 0) == 0) {
@@ -1523,6 +1537,7 @@ public:
         std::remove((temp_path + ".idx").c_str());
         validator_set_ = reloaded.validatorSet();
         clearEpochVotesAfterRecord();
+        clearEndpointUpdatesAfterRecord();
         revalidateMempool();
         std::remove(temp_path.c_str());
         return true;
@@ -1887,6 +1902,40 @@ private:
         out << "VALIDATOR_EPOCH " << node.validatorEpoch() << " "
             << (node.status().frontier_integer + 1) << " "
             << primechain::crypto::toHex(node.status().latest_record_hash) << "\n";
+        writeAll(fd, out.str());
+    }
+
+    void sendValidatorEndpoints(int fd) const {
+        std::string error;
+        primechain::storage::RecordStore store(store_path_);
+        const auto records = store.loadAll(error);
+        if (!error.empty()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
+        for (const auto& stored : records) {
+            std::optional<primechain::protocol::PrimeRecordV0> prime;
+            std::optional<primechain::protocol::CompositeRecordV0> composite;
+            if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+                prime = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+                if (!prime.has_value()) { writeAll(fd, "ERROR " + error + "\n"); return; }
+                for (const auto& update : prime->validator_endpoints) latest[update.validator_address] = update;
+            } else {
+                composite = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+                if (!composite.has_value()) { writeAll(fd, "ERROR " + error + "\n"); return; }
+                for (const auto& update : composite->validator_endpoints) latest[update.validator_address] = update;
+            }
+        }
+        std::ostringstream out;
+        out << "VALIDATOR_ENDPOINTS " << latest.size() << "\n";
+        for (const auto& entry : latest) {
+            const auto& update = entry.second;
+            out << "VALIDATOR_ENDPOINT " << update.validator_address << " "
+                << update.host << " " << update.port << " "
+                << update.effective_integer << " " << update.sequence << "\n";
+        }
+        out << "END_VALIDATOR_ENDPOINTS\n";
         writeAll(fd, out.str());
     }
 
@@ -3469,6 +3518,24 @@ private:
         return embeddedValidatorEpoch();
     }
 
+    std::vector<primechain::protocol::ValidatorEndpointUpdateV1> embeddedValidatorEndpointsForNextRecord(
+            const primechain::node::SequentialNode& node) {
+        std::vector<primechain::protocol::ValidatorEndpointUpdateV1> out;
+        for (auto it = pending_endpoint_updates_.begin(); it != pending_endpoint_updates_.end();) {
+            const auto& update = it->second;
+            if (update.effective_integer < node.status().frontier_integer + 1) {
+                it = pending_endpoint_updates_.erase(it);
+                continue;
+            }
+            out.push_back(update);
+            ++it;
+        }
+        std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
+            return left.validator_address < right.validator_address;
+        });
+        return out;
+    }
+
     bool loadEpochVotesInternal(std::string& error) {
         epoch_votes_.clear();
         const auto stored = epoch_store_.loadAll(error);
@@ -3650,11 +3717,83 @@ private:
         writeAll(fd, "EPOCH_VOTE_ACCEPTED " + std::to_string(record.epoch) + " votes=" + std::to_string(epoch_votes_.size()) + "\n");
     }
 
+    void submitValidatorEndpoint(int fd, const std::string& line, bool propagate) {
+        std::istringstream in(line);
+        std::string command, previous_hex, public_hex, signature_hex, extra;
+        primechain::protocol::ValidatorEndpointUpdateV1 update;
+        primechain::PrimeValue record_integer = 0;
+        in >> command >> previous_hex >> record_integer >> update.validator_address
+           >> update.host >> update.port >> update.effective_integer >> update.sequence
+           >> public_hex >> signature_hex;
+        const auto previous = parseHash(previous_hex);
+        if (!in || (in >> extra) ||
+            (command != "SUBMIT_VALIDATOR_ENDPOINT" && command != "SUBMIT_VALIDATOR_ENDPOINT_PEER") ||
+            !previous.has_value()) {
+            writeAll(fd, "ERROR invalid SUBMIT_VALIDATOR_ENDPOINT\n");
+            return;
+        }
+        update.public_key = hexToBytes(public_hex);
+        update.signature = hexToBytes(signature_hex);
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
+        if (*previous != node.status().latest_record_hash ||
+            record_integer != node.status().frontier_integer + 1) {
+            writeAll(fd, "ERROR validator endpoint update does not match current chain state\n");
+            return;
+        }
+        if (!primechain::protocol::verifyValidatorEndpointUpdates(
+                std::vector<primechain::protocol::ValidatorEndpointUpdateV1>{update},
+                node.validatorSet(), *previous, record_integer, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto found = pending_endpoint_updates_.find(update.validator_address);
+        if (found != pending_endpoint_updates_.end() && found->second.sequence > update.sequence) {
+            writeAll(fd, "ERROR stale validator endpoint sequence\n");
+            return;
+        }
+        pending_endpoint_updates_[update.validator_address] = update;
+        if (propagate) {
+            for (const auto& peer : peers_) {
+                std::ostringstream command_out;
+                command_out << "SUBMIT_VALIDATOR_ENDPOINT_PEER " << previous_hex << " " << record_integer
+                            << " " << update.validator_address << " " << update.host << " "
+                            << update.port << " " << update.effective_integer << " "
+                            << update.sequence << " " << public_hex << " " << signature_hex << "\n";
+                std::string peer_error;
+                auto socket = connectToServer(peer.host, peer.port);
+                if (!socket.has_value()) {
+                    peer_error = "could not connect to peer";
+                } else if (!writeCommand(socket->fd(), command_out.str())) {
+                    peer_error = "could not submit validator endpoint";
+                } else {
+                    const auto response = readLine(socket->fd());
+                    if (!response.has_value() ||
+                        response->rfind("VALIDATOR_ENDPOINT_ACCEPTED ", 0) != 0) {
+                        peer_error = response.has_value() ? *response : "peer did not return endpoint response";
+                    }
+                }
+                if (!peer_error.empty()) {
+                    std::cerr << "validator endpoint propagation warning to " << peer.host << ":"
+                              << peer.port << ": " << peer_error << "\n";
+                }
+            }
+        }
+        writeAll(fd, "VALIDATOR_ENDPOINT_ACCEPTED " + update.validator_address + " " +
+            update.host + " " + std::to_string(update.port) + " sequence=" +
+            std::to_string(update.sequence) + "\n");
+    }
+
     void clearEpochVotesAfterRecord() {
         if (epoch_votes_.empty()) return;
         epoch_votes_.clear();
         std::string error;
         if (!persistEpochVotes(error)) std::cerr << "epoch vote cleanup warning: " << error << "\n";
+    }
+
+    void clearEndpointUpdatesAfterRecord() {
+        pending_endpoint_updates_.clear();
     }
 
     void submitSignedCommit(int fd, const std::string& line, bool propagate) {
@@ -4133,6 +4272,11 @@ private:
                 record.version = 2;
                 record.validator_epoch = std::move(validator_epoch);
             }
+            auto endpoint_updates = embeddedValidatorEndpointsForNextRecord(node);
+            if (!endpoint_updates.empty()) {
+                record.version = 3;
+                record.validator_endpoints = std::move(endpoint_updates);
+            }
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
@@ -4154,6 +4298,7 @@ private:
         }
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
+        clearEndpointUpdatesAfterRecord();
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
@@ -4299,6 +4444,11 @@ private:
             record.version = 2;
             record.validator_epoch = std::move(validator_epoch);
         }
+        auto endpoint_updates = embeddedValidatorEndpointsForNextRecord(node);
+        if (!endpoint_updates.empty()) {
+            record.version = 3;
+            record.validator_endpoints = std::move(endpoint_updates);
+        }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
@@ -4314,6 +4464,7 @@ private:
         }
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
+        clearEndpointUpdatesAfterRecord();
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
@@ -4634,6 +4785,7 @@ private:
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::CommitPhaseVote> phase_votes_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
+    std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,

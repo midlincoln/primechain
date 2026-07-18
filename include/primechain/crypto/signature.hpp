@@ -104,6 +104,14 @@ Bytes validatorEpochVoteSigningPayload(
     PrimeValue activation_integer,
     const std::vector<Address>& next_validator_set,
     const Address& validator_address);
+Bytes validatorEndpointSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& validator_address,
+    const std::string& host,
+    std::uint64_t port,
+    PrimeValue effective_integer,
+    std::uint64_t sequence);
 Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,

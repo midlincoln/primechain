@@ -24,6 +24,7 @@ constexpr std::uint64_t kMaxDecodedPrattFactors = 1024;
 constexpr std::uint64_t kMaxDecodedTransactions = 10000;
 constexpr std::uint64_t kMaxDecodedTxInputs = 1024;
 constexpr std::uint64_t kMaxDecodedTxOutputs = 1024;
+constexpr std::uint64_t kMaxDecodedValidatorEndpointUpdates = 64;
 
 bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
     return core::validValidatorSetSize(validators.size()) &&
@@ -267,6 +268,21 @@ void appendValidatorEpochTransition(
     }
 }
 
+void appendValidatorEndpointUpdates(
+    std::vector<std::uint8_t>& out,
+    const std::vector<ValidatorEndpointUpdateV1>& updates) {
+    appendUint64(out, updates.size());
+    for (const auto& update : updates) {
+        appendAddress(out, update.validator_address);
+        appendString(out, update.host);
+        appendUint64(out, update.port);
+        appendUint64(out, update.effective_integer);
+        appendUint64(out, update.sequence);
+        appendBytes(out, update.public_key);
+        appendBytes(out, update.signature);
+    }
+}
+
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
@@ -411,6 +427,27 @@ bool readValidatorEpochTransition(
     return true;
 }
 
+bool readValidatorEndpointUpdates(
+    ByteReader& reader,
+    std::vector<ValidatorEndpointUpdateV1>& updates) {
+    std::uint64_t count = 0;
+    if (!reader.readUint64(count) || count > kMaxDecodedValidatorEndpointUpdates) return false;
+    updates.clear();
+    updates.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        ValidatorEndpointUpdateV1 update;
+        if (!reader.readString(update.validator_address) ||
+            !reader.readString(update.host) ||
+            !reader.readUint64(update.port) ||
+            !reader.readUint64(update.effective_integer) ||
+            !reader.readUint64(update.sequence) ||
+            !reader.readBytes(update.public_key) ||
+            !reader.readBytes(update.signature)) return false;
+        updates.push_back(std::move(update));
+    }
+    return true;
+}
+
 bool readRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
     return reader.readString(vote.validator_address) &&
            reader.readBytes(vote.public_key) &&
@@ -459,6 +496,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendHash(out, record.state_root);
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -476,8 +514,9 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
-    if (record.version >= 1) appendGenesisConfig(out, record.genesis_config);
+    if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -605,6 +644,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
+        (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
@@ -632,8 +672,9 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         !readTransactionBatch(reader, record.tx_batch) ||
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
-        (record.version >= 1 && !readGenesisConfig(reader, record.genesis_config)) ||
+        (record.height == 0 && !readGenesisConfig(reader, record.genesis_config)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
+        (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) ||
         !readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated prime record payload";
         return std::nullopt;
@@ -804,7 +845,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 1 && record.version != 2) ||
+        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3) ||
             !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
@@ -1100,6 +1141,56 @@ bool verifyRecordFinalization(
                 crypto::recordFinalizationVoteSigningPayload(vote.record_hash, vote.round, vote.validator_address),
                 vote.signature, signature_error)) {
             error = "invalid finalization vote signature"; return false;
+        }
+    }
+    return true;
+}
+
+bool validValidatorEndpointHost(const std::string& host) {
+    if (host.empty() || host.size() > 253) return false;
+    return std::all_of(host.begin(), host.end(), [](unsigned char ch) {
+        return ch > 0x20 && ch < 0x7f;
+    });
+}
+
+bool verifyValidatorEndpointUpdates(
+    const std::vector<ValidatorEndpointUpdateV1>& updates,
+    const std::vector<Address>& current_validator_set,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error) {
+    Address previous_validator;
+    for (const auto& update : updates) {
+        if (!previous_validator.empty() && previous_validator >= update.validator_address) {
+            error = "validator endpoint updates are not canonical";
+            return false;
+        }
+        previous_validator = update.validator_address;
+        if (!std::binary_search(current_validator_set.begin(), current_validator_set.end(), update.validator_address)) {
+            error = "validator endpoint update is outside current set";
+            return false;
+        }
+        if (!validValidatorEndpointHost(update.host) || update.port == 0 || update.port > 65535) {
+            error = "invalid validator endpoint";
+            return false;
+        }
+        if (update.effective_integer < record_integer) {
+            error = "validator endpoint effective integer is stale";
+            return false;
+        }
+        if (update.validator_address != crypto::addressFromProtocolPublicKey(update.public_key)) {
+            error = "validator endpoint address mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::verifyProtocolMessageSignature(
+                update.public_key,
+                crypto::validatorEndpointSigningPayload(
+                    previous_record_hash, record_integer, update.validator_address,
+                    update.host, update.port, update.effective_integer, update.sequence),
+                update.signature, signature_error)) {
+            error = "invalid validator endpoint signature";
+            return false;
         }
     }
     return true;

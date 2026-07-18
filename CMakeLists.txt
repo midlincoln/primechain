@@ -958,6 +958,13 @@ add_test(
 )
 
 add_test(
+    NAME validator_endpoint_signed_update_on_chain
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net*; a=$($<TARGET_FILE:primechain-wallet> new-miner ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-a.wallet) && ($<TARGET_FILE:primechain-sync-server> 19082 ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net.dat --validator-set $a --validator-identity ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-a.wallet > ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net.pid) && sleep 0.3 && previous=$($<TARGET_FILE:primechain-sync-query> 127.0.0.1 19082 GET_STATUS | awk '{print $8}') && endpoint=$($<TARGET_FILE:primechain-composite-commitment> sign-endpoint ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-a.wallet $previous 3 127.0.0.1 19082 1) && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19082 $endpoint | grep -q '^VALIDATOR_ENDPOINT_ACCEPTED ' && $<TARGET_FILE:primechain-frontier-miner> 127.0.0.1 19082 3 --prime-identity ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-a.wallet --composite-identity ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net-a.wallet | grep -q 'frontier miner complete frontier=3' && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 19082 GET_VALIDATOR_ENDPOINTS | grep -q '^VALIDATOR_ENDPOINT .* 127.0.0.1 19082 3 1$' && $<TARGET_FILE:primechain-client> validator-endpoints ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net.dat | grep -q '^VALIDATOR_ENDPOINT .* host=127.0.0.1 port=19082 effective_integer=3 sequence=1$' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/endpoint-net.pid)"
+)
+
+add_test(
     NAME finalization_round_change_recovers_stalled_candidate
     COMMAND
         /bin/sh -c

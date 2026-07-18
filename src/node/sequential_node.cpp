@@ -51,15 +51,27 @@ bool hasValidatorEpochTransition(const protocol::ValidatorEpochTransitionV1& tra
            !transition.votes.empty();
 }
 
-bool validateValidatorEpochRecordVersion(
+bool validateRecordMetadataVersion(
     std::uint64_t version,
     const protocol::ValidatorEpochTransitionV1& transition,
+    const std::vector<protocol::ValidatorEndpointUpdateV1>& endpoint_updates,
     std::string& error) {
     const bool has_transition = hasValidatorEpochTransition(transition);
-    if ((version == 2) != has_transition) {
-        error = version == 2
-            ? "version 2 record requires a validator epoch transition"
-            : "validator epoch transition requires record version 2";
+    const bool has_endpoint_updates = !endpoint_updates.empty();
+    if (has_transition && version < 2) {
+        error = "validator epoch transition requires record version 2 or newer";
+        return false;
+    }
+    if (!has_transition && version == 2) {
+        error = "version 2 record requires a validator epoch transition";
+        return false;
+    }
+    if (has_endpoint_updates && version < 3) {
+        error = "validator endpoint updates require record version 3 or newer";
+        return false;
+    }
+    if (!has_endpoint_updates && version >= 3) {
+        error = "version 3 record requires validator endpoint updates";
         return false;
     }
     return true;
@@ -343,9 +355,12 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             if (!decoded.has_value() ||
-                !validateValidatorEpochRecordVersion(decoded->version, decoded->validator_epoch, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyValidatorEndpointUpdates(
+                    decoded->validator_endpoints, validator_set_,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -367,9 +382,12 @@ bool SequentialNode::load(std::string& error) {
                 validator_set_ = decoded->genesis_config.validator_set;
             }
             if (!decoded.has_value() ||
-                !validateValidatorEpochRecordVersion(decoded->version, decoded->validator_epoch, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyValidatorEndpointUpdates(
+                    decoded->validator_endpoints, validator_set_,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -440,9 +458,12 @@ bool SequentialNode::validateCompositeCandidate(
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }
-    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyValidatorEndpointUpdates(
+            record.validator_endpoints, validator_set_,
             record.previous_record_hash, record.integer, error)) return false;
 
     const auto balances_before = balances_;
@@ -472,9 +493,12 @@ bool SequentialNode::validatePrimeCandidate(
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyGenesisConfig(record, error)) return false;
-    if (!validateValidatorEpochRecordVersion(record.version, record.validator_epoch, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyValidatorEndpointUpdates(
+            record.validator_endpoints, validator_set_,
             record.previous_record_hash, record.integer, error)) return false;
     if (totalSupplyMicroUnits(record.integer) != 0) { error = "prime asset already minted"; return false; }
 

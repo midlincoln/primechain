@@ -1132,6 +1132,57 @@ int validatorRegistry(int argc, char** argv) {
     return 0;
 }
 
+int validatorEndpoints(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string store_path = argv[2];
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "validator_endpoint_registry_error: " << error << "\n";
+        return 1;
+    }
+
+    std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
+    std::uint64_t event_count = 0;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode prime record: " << error << "\n";
+                return 1;
+            }
+            for (const auto& update : record->validator_endpoints) {
+                latest[update.validator_address] = update;
+                ++event_count;
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode composite record: " << error << "\n";
+            return 1;
+        }
+        for (const auto& update : record->validator_endpoints) {
+            latest[update.validator_address] = update;
+            ++event_count;
+        }
+    }
+
+    std::cout << "VALIDATOR_ENDPOINT_REGISTRY " << store_path
+              << " active_endpoints=" << latest.size()
+              << " events=" << event_count << "\n";
+    for (const auto& entry : latest) {
+        const auto& update = entry.second;
+        std::cout << "VALIDATOR_ENDPOINT " << update.validator_address
+                  << " host=" << update.host
+                  << " port=" << update.port
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence << "\n";
+    }
+    return 0;
+}
+
 int validatorReputation(int argc, char** argv) {
     if (argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -1670,6 +1721,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-registry <record-store>\n"
+              << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -1754,6 +1806,10 @@ int main(int argc, char** argv) {
     if (command == "validator-registry") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return validatorRegistry(argc, argv);
+    }
+    if (command == "validator-endpoints") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return validatorEndpoints(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

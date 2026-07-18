@@ -348,6 +348,26 @@ Bytes validatorEpochVoteSigningPayload(
     return payload;
 }
 
+Bytes validatorEndpointSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& validator_address,
+    const std::string& host,
+    std::uint64_t port,
+    PrimeValue effective_integer,
+    std::uint64_t sequence) {
+    Bytes payload;
+    appendString(payload, "primechain-validator-endpoint-mldsa65-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, record_integer);
+    appendString(payload, validator_address);
+    appendString(payload, host);
+    appendUint64(payload, port);
+    appendUint64(payload, effective_integer);
+    appendUint64(payload, sequence);
+    return payload;
+}
+
 Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,
