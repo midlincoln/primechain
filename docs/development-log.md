@@ -2,6 +2,15 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-07-18: Validator-Owned Composite Phase Close
+
+Moved composite reveal coordination closer to the target validator-owned model.
+When a quorum validator receives a signed composite reveal for an open commit
+phase, it now signs its own phase vote, asks configured validator peers to close
+the same phase, syncs their phase votes, and finalizes the reveal only after
+quorum is observed. This reduces the miner/client responsibility to submitting
+commitment and reveal evidence; validators coordinate the 2-of-N close.
+
 ## 2026-07-14: Reference Miner Boundary
 
 Clarified that the bundled C++ client/miner is a reference implementation, not

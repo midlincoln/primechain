@@ -3204,6 +3204,30 @@ private:
         return false;
     }
 
+    bool requestPeerCommitPhaseClose(
+        const PeerEndpoint& peer,
+        primechain::PrimeValue integer,
+        std::string& error) const {
+        auto socket = connectToServer(peer.host, peer.port);
+        if (!socket.has_value()) {
+            error = "could not connect to peer";
+            return false;
+        }
+        std::ostringstream command;
+        command << "CLOSE_COMMIT_PHASE " << integer << "\n";
+        if (!writeCommand(socket->fd(), command.str())) {
+            error = "could not request peer commit-phase close";
+            return false;
+        }
+        shutdown(socket->fd(), SHUT_WR);
+        const auto response = readLine(socket->fd());
+        if (response.has_value() &&
+            (response->rfind("PHASE_VOTE_ACCEPTED ", 0) == 0 ||
+             response->rfind("PHASE_VOTE_DUPLICATE ", 0) == 0)) return true;
+        error = response.has_value() ? *response : "peer did not return commit-phase close response";
+        return false;
+    }
+
     void propagatePhaseVote(const primechain::storage::CommitPhaseVote& vote) const {
         for (const auto& peer : peers_) {
             std::string error;
@@ -3289,6 +3313,70 @@ private:
         return true;
     }
 
+    bool buildLocalCommitPhaseVote(
+        primechain::PrimeValue integer,
+        primechain::storage::CommitPhaseVote& vote,
+        std::string& error) const {
+        if (!validator_identity_.has_value()) {
+            error = "this node has no validator identity";
+            return false;
+        }
+        vote.integer = integer;
+        vote.commit_round = activeCommitPhaseRound(integer);
+        vote.snapshot_hash = commitmentSnapshotHash(integer, vote.commit_round);
+        vote.validator_address = validator_identity_->address;
+        vote.public_key = validator_identity_->public_key;
+        const auto signature = primechain::crypto::signProtocolMessage(
+            validator_identity_->private_key,
+            primechain::crypto::commitPhaseVoteSigningPayload(
+                integer, vote.snapshot_hash, vote.validator_address),
+            error);
+        if (!signature.has_value()) return false;
+        vote.signature = *signature;
+        return true;
+    }
+
+    bool acceptLocalCommitPhaseVote(
+        primechain::PrimeValue integer,
+        bool propagate,
+        bool& duplicate,
+        primechain::storage::CommitPhaseVote& vote,
+        std::string& error) {
+        if (!buildLocalCommitPhaseVote(integer, vote, error)) return false;
+        duplicate = phase_votes_.find(
+            std::make_tuple(integer, vote.commit_round, vote.validator_address)) != phase_votes_.end();
+        return acceptPhaseVote(vote, error, propagate);
+    }
+
+    bool closeCommitPhaseQuorum(primechain::PrimeValue integer, std::string& error) {
+        if (!quorumEnabled()) return true;
+        if (phaseClosed(integer)) return true;
+
+        primechain::storage::CommitPhaseVote vote;
+        bool duplicate = false;
+        if (!acceptLocalCommitPhaseVote(integer, true, duplicate, vote, error)) {
+            return false;
+        }
+        if (phaseClosed(integer)) return true;
+
+        for (const auto& peer : peers_) {
+            std::string peer_error;
+            if (!requestPeerCommitPhaseClose(peer, integer, peer_error)) {
+                std::cerr << "commit phase close warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+            }
+            peer_error.clear();
+            if (!syncPhaseVotesFromPeer(peer.host, peer.port, peer_error)) {
+                std::cerr << "phase vote sync warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+            }
+            if (phaseClosed(integer)) return true;
+        }
+
+        error = "could not close commit phase with validator quorum";
+        return false;
+    }
+
     void closeCommitPhase(int fd, const std::string& line) {
         std::istringstream in(line);
         std::string command, extra;
@@ -3298,30 +3386,10 @@ private:
             writeAll(fd, "ERROR invalid CLOSE_COMMIT_PHASE; expected CLOSE_COMMIT_PHASE g\n");
             return;
         }
-        if (!validator_identity_.has_value()) {
-            writeAll(fd, "ERROR this node has no validator identity\n");
-            return;
-        }
         primechain::storage::CommitPhaseVote vote;
-        vote.integer = integer;
-        vote.commit_round = activeCommitPhaseRound(integer);
-        vote.snapshot_hash = commitmentSnapshotHash(integer, vote.commit_round);
-        vote.validator_address = validator_identity_->address;
-        vote.public_key = validator_identity_->public_key;
         std::string error;
-        const auto signature = primechain::crypto::signProtocolMessage(
-            validator_identity_->private_key,
-            primechain::crypto::commitPhaseVoteSigningPayload(
-                integer, vote.snapshot_hash, vote.validator_address),
-            error);
-        if (!signature.has_value()) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-        vote.signature = *signature;
-        const bool duplicate = phase_votes_.find(
-            std::make_tuple(integer, vote.commit_round, vote.validator_address)) != phase_votes_.end();
-        if (!acceptPhaseVote(vote, error, true)) {
+        bool duplicate = false;
+        if (!acceptLocalCommitPhaseVote(integer, true, duplicate, vote, error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
@@ -4072,8 +4140,10 @@ private:
             return;
         }
         if (quorumEnabled() && !phaseClosed(g)) {
-            writeAll(fd, "ERROR commit phase is not closed by validator quorum\n");
-            return;
+            if (!closeCommitPhaseQuorum(g, error)) {
+                writeAll(fd, "ERROR commit phase is not closed by validator quorum: " + error + "\n");
+                return;
+            }
         }
 
         const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
