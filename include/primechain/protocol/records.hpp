@@ -187,6 +187,8 @@ void updateTransactionBatch(CompositeRecordV0& record);
 void updateTransactionBatch(PrimeRecordV0& record);
 Hash256 candidateRecordHash(const CompositeRecordV0& record);
 Hash256 candidateRecordHash(const PrimeRecordV0& record);
+Hash256 legacyCandidateRecordHashWithoutFinalization(const CompositeRecordV0& record);
+Hash256 legacyCandidateRecordHashWithoutFinalization(const PrimeRecordV0& record);
 Hash256 finalizedRecordHash(const CompositeRecordV0& record);
 Hash256 finalizedRecordHash(const PrimeRecordV0& record);
 

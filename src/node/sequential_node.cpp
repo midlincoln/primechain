@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <utility>
 
 #include "primechain/crypto/signature.hpp"
@@ -75,6 +76,13 @@ bool validateRecordMetadataVersion(
         return false;
     }
     return true;
+}
+
+void prefixReplayError(const storage::StoredRecord& record, std::string& error) {
+    std::ostringstream out;
+    out << "stored record " << record.integer << " replay failed";
+    if (!error.empty()) out << ": " << error;
+    error = out.str();
 }
 
 math::Factorization toMathFactorization(const std::vector<protocol::PrimePowerV0>& factors) {
@@ -169,6 +177,99 @@ bool validateCompositeProviderSignature(
         error);
 }
 
+bool verifyLegacyOpaqueFinalizationTarget(
+    const protocol::FinalizationProofV0& proof,
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    if (validator_set.empty() ||
+        (proof.rule != "fixed-2-of-3-mldsa65-v2" && proof.rule != "fixed-2-of-3-mldsa65-rounds-v3") ||
+        proof.votes.size() < core::requiredValidatorQuorum(validator_set.size())) {
+        return false;
+    }
+    std::uint64_t round = 0;
+    std::string round_error;
+    if (!protocol::verifyRoundChangeCertificate(
+            proof, previous_record_hash, integer, validator_set, round, round_error)) {
+        return false;
+    }
+    if (proof.votes.empty() || proof.votes.front().round != round) return false;
+    const auto target_hash = proof.votes.front().record_hash;
+    Address previous_validator;
+    for (const auto& vote : proof.votes) {
+        if (!previous_validator.empty() && previous_validator >= vote.validator_address) return false;
+        previous_validator = vote.validator_address;
+        if (!std::binary_search(validator_set.begin(), validator_set.end(), vote.validator_address) ||
+            vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key) ||
+            vote.record_hash != target_hash || vote.round != round) {
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::verifyProtocolMessageSignature(
+                vote.public_key,
+                crypto::recordFinalizationVoteSigningPayload(
+                    vote.record_hash, vote.round, vote.validator_address),
+                vote.signature, signature_error)) {
+            return false;
+        }
+    }
+    error.clear();
+    return true;
+}
+
+bool verifyRecordFinalizationWithLegacyFallback(
+    const protocol::CompositeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    const auto candidate_hash = protocol::candidateRecordHash(record);
+    if (protocol::verifyRecordFinalization(
+            record.finalized_by, candidate_hash, record.previous_record_hash,
+            record.integer, validator_set, error)) {
+        return true;
+    }
+    if (error != "finalization vote target mismatch") return false;
+    std::string legacy_error;
+    if (protocol::verifyRecordFinalization(
+            record.finalized_by, protocol::legacyCandidateRecordHashWithoutFinalization(record),
+            record.previous_record_hash, record.integer, validator_set, legacy_error)) {
+        error.clear();
+        return true;
+    }
+    if (record.version == 1 && verifyLegacyOpaqueFinalizationTarget(
+            record.finalized_by, record.previous_record_hash, record.integer,
+            validator_set, error)) {
+        return true;
+    }
+    return false;
+}
+
+bool verifyRecordFinalizationWithLegacyFallback(
+    const protocol::PrimeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    const auto candidate_hash = protocol::candidateRecordHash(record);
+    if (protocol::verifyRecordFinalization(
+            record.finalized_by, candidate_hash, record.previous_record_hash,
+            record.integer, validator_set, error)) {
+        return true;
+    }
+    if (error != "finalization vote target mismatch") return false;
+    std::string legacy_error;
+    if (protocol::verifyRecordFinalization(
+            record.finalized_by, protocol::legacyCandidateRecordHashWithoutFinalization(record),
+            record.previous_record_hash, record.integer, validator_set, legacy_error)) {
+        error.clear();
+        return true;
+    }
+    if (record.version == 1 && verifyLegacyOpaqueFinalizationTarget(
+            record.finalized_by, record.previous_record_hash, record.integer,
+            validator_set, error)) {
+        return true;
+    }
+    return false;
+}
+
 bool validateStoredCompositePayload(
     const storage::StoredRecord& stored,
     const Hash256& expected_previous_hash,
@@ -212,9 +313,7 @@ bool validateStoredCompositePayload(
         error = "embedded commit-phase certificate has no validator set";
         return false;
     }
-    if (!protocol::verifyRecordFinalization(
-            decoded->finalized_by, protocol::candidateRecordHash(*decoded),
-            decoded->previous_record_hash, decoded->integer, validator_set, error)) {
+    if (!verifyRecordFinalizationWithLegacyFallback(*decoded, validator_set, error)) {
         return false;
     }
     return true;
@@ -261,9 +360,7 @@ bool validateStoredPrimePayload(
     if (!protocol::verifyGenesisConfig(*decoded, error)) {
         return false;
     }
-    if (!protocol::verifyRecordFinalization(
-            decoded->finalized_by, protocol::candidateRecordHash(*decoded),
-            decoded->previous_record_hash, decoded->integer, validator_set, error)) {
+    if (!verifyRecordFinalizationWithLegacyFallback(*decoded, validator_set, error)) {
         return false;
     }
     return true;
@@ -344,12 +441,13 @@ bool SequentialNode::load(std::string& error) {
         }
         if (record.kind == storage::StoredRecordKind::Composite) {
             if (!validateStoredCompositePayload(record, expected_previous_hash, validator_set_, error)) {
+                prefixReplayError(record, error);
                 return false;
             }
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2) ||
+                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3) ||
                   decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
@@ -375,6 +473,7 @@ bool SequentialNode::load(std::string& error) {
             }
         } else {
             if (!validateStoredPrimePayload(record, expected_previous_hash, validator_set_, error)) {
+                prefixReplayError(record, error);
                 return false;
             }
             const auto decoded = protocol::deserializePrimeRecord(record.payload, error);

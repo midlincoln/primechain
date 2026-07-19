@@ -784,6 +784,48 @@ void updateTransactionBatch(PrimeRecordV0& record) {
     record.tx_batch.transaction_merkle_root = transactionMerkleRoot(record.transactions);
 }
 
+std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const CompositeRecordV0& record) {
+    std::vector<std::uint8_t> out;
+    appendUint64(out, kCompositeRecordTag);
+    appendUint64(out, record.version);
+    appendUint64(out, record.height);
+    appendHash(out, record.previous_record_hash);
+    appendUint64(out, record.integer);
+    appendCompositeProof(out, record.proof);
+    appendTransactionBatch(out, record.tx_batch);
+    appendTransactionList(out, record.transactions);
+    appendHash(out, record.state_root);
+    if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    return out;
+}
+
+std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRecordV0& record) {
+    std::vector<std::uint8_t> out;
+    appendUint64(out, kPrimeRecordTag);
+    appendUint64(out, record.version);
+    appendUint64(out, record.height);
+    appendHash(out, record.previous_record_hash);
+    appendUint64(out, record.integer);
+    appendPrattProof(out, record.proof);
+    appendTransactionBatch(out, record.tx_batch);
+    appendTransactionList(out, record.transactions);
+    appendHash(out, record.state_root);
+    if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    return out;
+}
+
+Hash256 legacyCandidateRecordHashWithoutFinalization(const CompositeRecordV0& record) {
+    return crypto::sha3_256(serializeCompositeRecordWithoutFinalization(record));
+}
+
+Hash256 legacyCandidateRecordHashWithoutFinalization(const PrimeRecordV0& record) {
+    return crypto::sha3_256(serializePrimeRecordWithoutFinalization(record));
+}
+
 Hash256 candidateRecordHash(const CompositeRecordV0& record) {
     return crypto::sha3_256(serializeCompositeRecordInternal(record, false));
 }
