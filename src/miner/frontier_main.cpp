@@ -730,6 +730,7 @@ bool staleOrTransient(const std::string& response) {
            response.find("commit phase is closing or closed") != std::string::npos ||
            response.find("no prior commitment for reveal") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos ||
+           response.find("provider already committed a different hash") != std::string::npos ||
            response.rfind("REVEAL_PENDING ", 0) == 0 ||
            response.rfind("RECORD_CONFLICT", 0) == 0;
 }
