@@ -728,11 +728,21 @@ bool staleOrTransient(const std::string& response) {
            response.find("wrong frontier") != std::string::npos ||
            response.find("current frontier record not found") != std::string::npos ||
            response.find("commit phase is closing or closed") != std::string::npos ||
+           response.find("commit phase is not closed by validator quorum") != std::string::npos ||
+           response.find("could not close commit phase with validator quorum") != std::string::npos ||
            response.find("no prior commitment for reveal") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos ||
            response.find("provider already committed a different hash") != std::string::npos ||
+           response.find("provider already revealed different composite evidence") != std::string::npos ||
            response.rfind("REVEAL_PENDING ", 0) == 0 ||
            response.rfind("RECORD_CONFLICT", 0) == 0;
+}
+
+bool resetsCompositeCommitState(const std::string& response) {
+    return response.find("awaiting_commitment") != std::string::npos ||
+           response.find("no prior commitment for reveal") != std::string::npos ||
+           response.find("reveal does not match prior commitment") != std::string::npos ||
+           response.find("provider already revealed different composite evidence") != std::string::npos;
 }
 
 bool commitAcceptedOrDuplicate(const std::string& response) {
@@ -936,166 +946,67 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::vector<PeerEndpoint> quorum_peers;
-        std::optional<PeerEndpoint> reveal_peer;
-        const auto remote_validator_count = remoteValidatorCount(host, port);
-        const bool needs_quorum_phase = commit_request.has_value() &&
-            composite_identity.has_value() && remote_validator_count > 0;
-        const auto required_quorum_votes = primechain::core::requiredValidatorQuorum(remote_validator_count);
-        if (needs_quorum_phase) {
-            quorum_peers = quorumEndpoints(host, port, configured_validator_endpoints);
-            const auto required_endpoints = required_quorum_votes;
-            if (quorum_peers.size() < required_endpoints) {
-                std::cerr << "quorum node did not advertise enough validator endpoints before commit; "
-                          << "required=" << required_endpoints
-                          << " advertised=" << quorum_peers.size() << "\n";
-                return 1;
-            }
-        }
         const auto local_provider = composite_identity.has_value()
             ? composite_identity->address : composite_miner;
 
-        auto adoptMiningView = [&](const MiningView& view, bool can_reveal_local) -> std::optional<bool> {
-            switch (viewPhaseState(view)) {
-            case CommitPhaseState::Closed:
-                if (view.winner == local_provider && can_reveal_local) {
-                    reveal_peer = view.peer;
-                    return true;
+        if (commit_request.has_value()) {
+            const auto view = requestMiningView({host, port}, next);
+            if (view.has_value()) {
+                switch (viewPhaseState(*view)) {
+                case CommitPhaseState::Closed:
+                    if (view->winner != local_provider || !reused_pending_composite) {
+                        if (view->winner != local_provider) clearPendingComposite(pending_composite_path);
+                        if (retryCurrentInteger("commit phase already won by " + view->winner)) continue;
+                        return 1;
+                    }
+                    break;
+                case CommitPhaseState::Closing:
+                    if (retryCurrentInteger("commit phase is closing on " + host + ":" +
+                                            std::to_string(port))) continue;
+                    return 1;
+                case CommitPhaseState::Open:
+                case CommitPhaseState::Unknown:
+                    break;
                 }
-                if (view.winner != local_provider) {
-                    clearPendingComposite(pending_composite_path);
-                }
-                if (retryCurrentInteger("commit phase already won by " + view.winner)) return false;
-                return std::nullopt;
-            case CommitPhaseState::Closing:
-                if (retryCurrentInteger("commit phase is closing on " + view.peer.host + ":" +
-                                        std::to_string(view.peer.port))) return false;
-                return std::nullopt;
-            case CommitPhaseState::Open:
-                return true;
-            case CommitPhaseState::Unknown:
-                break;
-            }
-            return std::nullopt;
-        };
-
-        if (needs_quorum_phase) {
-            const auto views = requestMiningViews(quorum_peers, next);
-            const auto strongest = strongestMiningView(views);
-            if (strongest.has_value()) {
-                const auto decision = adoptMiningView(*strongest, reused_pending_composite);
-                if (!decision.has_value()) return 1;
-                if (!*decision) continue;
             }
         }
 
-        bool local_commit_available = reused_pending_composite;
-        if (commit_request.has_value() && !reveal_peer.has_value()) {
+        if (commit_request.has_value() && !reused_pending_composite) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
                 return 1;
             }
             std::cout << *commit_response << "\n";
-            const bool phase_already_closed =
-                commit_response->find("commit phase is closing or closed") != std::string::npos;
-            if (!commitAcceptedOrDuplicate(*commit_response) &&
-                !(reused_pending_composite && phase_already_closed)) {
+            if (!commitAcceptedOrDuplicate(*commit_response)) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
             }
-            if (needs_quorum_phase && !phase_already_closed) {
-                warmQuorumCommitments(quorum_peers, *commit_request);
-            }
-            local_commit_available = true;
-            if (needs_quorum_phase && !phase_already_closed) {
-                const auto views = requestMiningViews(quorum_peers, next);
-                const auto strongest = strongestMiningView(views);
-                if (strongest.has_value() && viewPhaseState(*strongest) != CommitPhaseState::Open) {
-                    const auto decision = adoptMiningView(*strongest, local_commit_available);
-                    if (!decision.has_value()) return 1;
-                    if (!*decision) continue;
-                }
-            }
-            if (needs_quorum_phase && !reveal_peer.has_value()) {
-                auto useClosedPhase = [&](const CommitPhaseStatus& closed) -> bool {
-                    if (closed.winner == local_provider) {
-                        reveal_peer = closed.peer;
-                        return true;
-                    }
-                    clearPendingComposite(pending_composite_path);
-                    return false;
-                };
-
-                if (phase_already_closed) {
-                    const auto closed = closedCommitPhase(quorum_peers, next, required_quorum_votes);
-                    if (!closed.has_value()) {
-                        if (retryCurrentInteger("commit phase is closed but no closed peer was found")) continue;
-                        return 1;
-                    }
-                    if (!useClosedPhase(*closed)) {
-                        if (retryCurrentInteger("commit phase already won by " + closed->winner)) continue;
-                        return 1;
-                    }
-                } else {
-                    reveal_peer = closeCommitPhaseQuorum(quorum_peers, next, required_quorum_votes);
-                    if (!reveal_peer.has_value()) {
-                        const auto closed = closedCommitPhase(quorum_peers, next, required_quorum_votes);
-                        if (closed.has_value()) {
-                            if (!useClosedPhase(*closed)) {
-                                if (retryCurrentInteger("commit phase already won by " + closed->winner)) continue;
-                                return 1;
-                            }
-                        } else {
-                            if (retryCurrentInteger("could not close commit phase with validator quorum")) continue;
-                            return 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        std::vector<PeerEndpoint> submit_peers;
-        if (reveal_peer.has_value()) {
-            submit_peers.push_back(*reveal_peer);
-            for (const auto& peer : quorum_peers) {
-                bool known = false;
-                for (const auto& existing : submit_peers) {
-                    if (existing.host == peer.host && existing.port == peer.port) {
-                        known = true;
-                        break;
-                    }
-                }
-                if (!known) submit_peers.push_back(peer);
-            }
-        } else {
-            submit_peers.push_back({host, port});
         }
 
         bool submitted_ok = false;
         bool got_response = false;
         std::string last_rejection;
-        for (const auto& submit_peer : submit_peers) {
-            const auto response = requestLine(submit_peer.host, submit_peer.port, request);
-            if (!response.has_value()) {
-                std::cerr << "node closed connection while submitting " << next
-                          << " to " << submit_peer.host << ":" << submit_peer.port << "\n";
-                continue;
-            }
-            got_response = true;
-            std::cout << *response << "\n";
-            if (accepted(*response)) {
-                submitted_ok = true;
-                break;
-            }
+        const auto response = requestLine(host, port, request);
+        if (!response.has_value()) {
+            if (retryCurrentInteger("node closed connection while submitting")) continue;
+            return 1;
+        }
+        got_response = true;
+        std::cout << *response << "\n";
+        if (accepted(*response)) {
+            submitted_ok = true;
+        } else {
             last_rejection = *response;
-            if (!needs_quorum_phase) break;
         }
         if (!got_response) {
             if (retryCurrentInteger("node closed connection while submitting")) continue;
             return 1;
         }
         if (!submitted_ok) {
+            if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {
+                clearPendingComposite(pending_composite_path);
+            }
             if (staleOrTransient(last_rejection) && retryCurrentInteger(last_rejection)) continue;
             return 1;
         }

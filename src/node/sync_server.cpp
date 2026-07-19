@@ -1669,6 +1669,18 @@ public:
         return !quorumEnabled();
     }
 
+    bool syncFromPeersPastInteger(primechain::PrimeValue integer, std::string& error) {
+        if (!syncFromPeers(peers_, error)) return false;
+        primechain::node::SequentialNode refreshed(store_path_);
+        if (!refreshed.load(error)) return false;
+        if (refreshed.status().has_genesis && refreshed.status().frontier_integer >= integer) {
+            error.clear();
+            return true;
+        }
+        error = "peer sync did not advance past integer " + std::to_string(integer);
+        return false;
+    }
+
     bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) {
         bool synced_any = false;
         for (const auto& peer : peers) {
@@ -2716,6 +2728,11 @@ private:
                 phases_changed = true;
             } else ++it;
         }
+        for (auto it = pending_reveals_.begin(); it != pending_reveals_.end();) {
+            if (std::get<0>(it->first) == integer && std::get<1>(it->first) == commit_round) {
+                it = pending_reveals_.erase(it);
+            } else ++it;
+        }
         if (commitments_changed && !persistCommitments(error)) return false;
         if (phases_changed && !persistPhaseVotes(error)) return false;
         return true;
@@ -3517,7 +3534,7 @@ private:
             + (winner.has_value() ? winner->provider_address : std::string("-")) + "\n");
     }
 
-    void sendMiningView(int fd, const std::string& line) const {
+    void sendMiningView(int fd, const std::string& line) {
         std::istringstream in(line);
         std::string command, extra;
         primechain::PrimeValue requested = 0;
@@ -3533,6 +3550,11 @@ private:
             }
         } else {
             in.clear();
+        }
+
+        if (hasKnownPeers()) {
+            std::string sync_error;
+            syncFromKnownPeers(sync_error);
         }
 
         std::string error;
@@ -4295,6 +4317,12 @@ private:
 
         if (quorumEnabled() && !phaseClosed(reveal.g)) {
             if (!closeCommitPhaseQuorum(reveal.g, error)) {
+                std::string sync_error;
+                if (syncFromPeersPastInteger(reveal.g, sync_error)) {
+                    writeAll(fd, "RECORD_DUPLICATE " + std::to_string(reveal.g) + " synced\n");
+                    pending_reveals_.erase(key);
+                    return;
+                }
                 writeAll(fd, "ERROR commit phase is not closed by validator quorum: " + error + "\n");
                 return;
             }
@@ -4489,6 +4517,11 @@ private:
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
+                std::string sync_error;
+                if (syncFromPeersPastInteger(record.integer, sync_error)) {
+                    writeAll(fd, "RECORD_DUPLICATE " + std::to_string(record.integer) + " synced\n");
+                    return;
+                }
                 std::string timeout_error;
                 if (finalization_timeout_ms_ > 0 &&
                     advanceCommitPhaseRound(record.previous_record_hash, record.integer, timeout_error)) {
@@ -4662,6 +4695,11 @@ private:
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Prime, error)) {
+                std::string sync_error;
+                if (syncFromPeersPastInteger(record.integer, sync_error)) {
+                    writeAll(fd, "RECORD_DUPLICATE " + std::to_string(record.integer) + " synced\n");
+                    return;
+                }
                 writeAll(fd, "ERROR could not finalize prime record: " + error + "\n");
                 return;
             }
@@ -5150,6 +5188,9 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
+#ifdef SIGPIPE
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     auto server = listenOnPort(options.bind_address, options.port);
     if (!server.has_value()) {
@@ -5280,8 +5321,10 @@ int main(int argc, char** argv) {
         }
 
         Socket client(client_fd);
-        setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
-        sync_server.handleClient(client.fd());
+        std::thread([&sync_server, client = std::move(client)]() mutable {
+            setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
+            sync_server.handleClient(client.fd());
+        }).detach();
         runPeriodicSync();
     }
 

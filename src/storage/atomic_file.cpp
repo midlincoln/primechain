@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
+#include <sstream>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -56,6 +59,13 @@ bool syncDirectory(const std::string& path, const std::string& description, std:
 }
 
 } // namespace
+
+std::string uniqueAtomicTempPath(const std::string& path, const std::string& suffix) {
+    std::ostringstream out;
+    out << path << suffix << "." << getpid() << "."
+        << std::hash<std::thread::id>{}(std::this_thread::get_id());
+    return out.str();
+}
 
 bool commitAtomicTemp(
     const std::string& temp_path,

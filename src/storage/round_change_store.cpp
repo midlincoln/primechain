@@ -86,7 +86,7 @@ bool RoundChangeStore::replaceAll(
     const std::vector<protocol::RoundChangeVoteV1>& votes,
     std::string& error) const {
     error.clear();
-    const std::string temp_path = path_ + ".tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(path_);
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) { error = "could not open temporary round-change store"; return false; }
     for (const auto& vote : votes) {

@@ -12,6 +12,8 @@ bool prepareAtomicLoad(
     const FileValidator& validator,
     std::string& error);
 
+std::string uniqueAtomicTempPath(const std::string& path, const std::string& suffix = ".tmp");
+
 bool commitAtomicTemp(
     const std::string& temp_path,
     const std::string& path,

@@ -172,7 +172,7 @@ bool ReplaySnapshotStore::load(ReplaySnapshot& snapshot, bool& found, std::strin
 
 bool ReplaySnapshotStore::replace(const ReplaySnapshot& snapshot, std::string& error) const {
     const auto bytes = encode(snapshot);
-    const std::string temp = path_ + ".tmp";
+    const std::string temp = detail::uniqueAtomicTempPath(path_);
     std::ofstream out(temp, std::ios::binary | std::ios::trunc);
     if (!out) { error = "could not open temporary replay snapshot"; return false; }
     out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());

@@ -125,7 +125,7 @@ bool CommitmentStore::replaceAll(
     const std::vector<StoredCommitment>& commitments,
     std::string& error) const {
     error.clear();
-    const std::string temp_path = path_ + ".tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(path_);
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
         error = "could not open temporary commitment store";

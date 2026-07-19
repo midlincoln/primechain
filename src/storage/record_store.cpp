@@ -6,11 +6,13 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 
 #include "primechain/crypto/hash.hpp"
+#include "primechain/storage/atomic_file.hpp"
 
 namespace primechain::storage {
 
@@ -20,6 +22,11 @@ constexpr std::uint64_t kRecordStoreMagic = 0x3056445243435055ull; // "UPCCRDV0"
 constexpr std::uint64_t kRecordIndexMagic = 0x3158444943435055ull; // "UPCCIDX1"
 constexpr std::uint64_t kRecordHeaderBytes = 72;
 constexpr std::uint64_t kMaxRecordPayloadBytes = 64ull * 1024ull * 1024ull;
+
+std::mutex& recordStoreMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
 
 struct IndexEntry {
     PrimeValue integer{0};
@@ -241,7 +248,7 @@ bool writeIndex(
     const std::vector<IndexEntry>& entries,
     std::string& error) {
     const std::string index_path = store_path + ".idx";
-    const std::string temp_path = index_path + ".tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(index_path);
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
         error = "could not open temporary record index";
@@ -454,7 +461,7 @@ bool writeStoreAtomically(
     std::vector<IndexEntry>& entries,
     std::uint64_t& store_size,
     std::string& error) {
-    const std::string temp_path = path + ".rewrite.tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(path, ".rewrite.tmp");
     const int fd = open(temp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         error = "could not open temporary record store: " + std::string(std::strerror(errno));
@@ -504,11 +511,23 @@ RecordStore::RecordStore(std::string path)
     : path_(std::move(path)) {}
 
 bool RecordStore::append(const StoredRecord& record, std::string& error) const {
+    std::lock_guard<std::mutex> lock(recordStoreMutex());
     if (!validateRecord(record, error)) return false;
 
     std::vector<IndexEntry> entries;
     std::uint64_t store_size = 0;
     if (!prepareIndex(path_, entries, store_size, error)) return false;
+    if (!entries.empty()) {
+        auto latest = readRecordAt(path_, entries.back().offset, error);
+        if (!latest.has_value()) return false;
+        if (latest->integer == record.integer && latest->record_hash == record.record_hash) {
+            return true;
+        }
+        if (latest->integer >= record.integer) {
+            error = "record already exists with a different hash";
+            return false;
+        }
+    }
 
     const auto bytes = encodeRecord(record);
     const int fd = open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -535,6 +554,7 @@ bool RecordStore::replaceTip(
     const Hash256& expected_old_tip_hash,
     const StoredRecord& replacement,
     std::string& error) const {
+    std::lock_guard<std::mutex> lock(recordStoreMutex());
     auto records = loadAll(error);
     if (!error.empty()) return false;
     if (records.empty()) {
@@ -564,6 +584,7 @@ bool RecordStore::replaceTip(
 }
 
 bool RecordStore::installValidatedStore(const std::string& source_path, std::string& error) const {
+    std::lock_guard<std::mutex> lock(recordStoreMutex());
     std::vector<IndexEntry> source_entries;
     std::uint64_t source_size = 0;
     std::uint64_t valid_size = 0;
@@ -575,7 +596,7 @@ bool RecordStore::installValidatedStore(const std::string& source_path, std::str
         return false;
     }
 
-    const std::string temp_path = path_ + ".install.tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(path_, ".install.tmp");
     const int source_fd = open(source_path.c_str(), O_RDONLY);
     if (source_fd < 0) {
         error = "could not open validated store for install: " +

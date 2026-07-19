@@ -95,7 +95,7 @@ std::vector<CommitPhaseVote> PhaseStore::loadAll(std::string& error) const {
 
 bool PhaseStore::replaceAll(const std::vector<CommitPhaseVote>& votes, std::string& error) const {
     error.clear();
-    const std::string temp_path = path_ + ".tmp";
+    const std::string temp_path = detail::uniqueAtomicTempPath(path_);
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
         error = "could not open temporary phase store";
