@@ -14,7 +14,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3150414e53434350ull; // "PCCSNAP1"
-constexpr std::uint64_t kVersion = 1;
+constexpr std::uint64_t kVersion = 2;
 constexpr std::uint64_t kMaxEntries = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxAddressBytes = 64ull * 1024ull;
 constexpr std::uint64_t kMaxSnapshotBytes = 512ull * 1024ull * 1024ull;
@@ -80,6 +80,7 @@ std::vector<std::uint8_t> encode(const ReplaySnapshot& value) {
     put64(out, value.validator_set.size());
     for (const auto& address : value.validator_set) putAddress(out, address);
     put64(out, value.validator_epoch);
+    put64(out, value.transfer_fee_micro_units);
     const auto checksum = crypto::sha3_256(out);
     out.insert(out.end(), checksum.begin(), checksum.end());
     return out;
@@ -107,7 +108,7 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
     Reader reader(bytes, payload_size);
     ReplaySnapshot value;
     std::uint64_t magic = 0, version = 0, count = 0;
-    if (!reader.u64(magic) || magic != kMagic || !reader.u64(version) || version != kVersion ||
+    if (!reader.u64(magic) || magic != kMagic || !reader.u64(version) || (version != 1 && version != kVersion) ||
         !reader.u64(value.height) || !reader.u64(value.frontier_integer) || !reader.hash(value.record_hash)) {
         error = "invalid replay snapshot header"; return false;
     }
@@ -146,7 +147,17 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
         if (!reader.address(address)) { error = "invalid replay snapshot validator"; return false; }
         value.validator_set.push_back(std::move(address));
     }
-    if (!reader.u64(value.validator_epoch) || !reader.done()) {
+    if (!reader.u64(value.validator_epoch)) {
+        error = "invalid replay snapshot trailing data"; return false;
+    }
+    if (version >= 2) {
+        if (!reader.u64(value.transfer_fee_micro_units)) {
+            error = "invalid replay snapshot policy"; return false;
+        }
+    } else {
+        value.transfer_fee_micro_units = 1;
+    }
+    if (value.transfer_fee_micro_units == 0 || !reader.done()) {
         error = "invalid replay snapshot trailing data"; return false;
     }
     result = std::move(value);

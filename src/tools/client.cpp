@@ -1223,6 +1223,60 @@ int validatorEndpoints(int argc, char** argv) {
     return 0;
 }
 
+int economicPolicy(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string store_path = argv[2];
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "economic_policy_error: " << error << "\n";
+        return 1;
+    }
+
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "economic_policy_error: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<std::pair<primechain::PrimeValue, primechain::protocol::EconomicPolicyUpdateV1>> events;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode prime record: " << error << "\n";
+                return 1;
+            }
+            if (record->economic_policy.transfer_fee_micro_units != 0) {
+                events.push_back({record->integer, record->economic_policy});
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode composite record: " << error << "\n";
+            return 1;
+        }
+        if (record->economic_policy.transfer_fee_micro_units != 0) {
+            events.push_back({record->integer, record->economic_policy});
+        }
+    }
+
+    std::cout << "ECONOMIC_POLICY_REGISTRY " << store_path
+              << " active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " events=" << events.size() << "\n";
+    for (const auto& entry : events) {
+        const auto& update = entry.second;
+        std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
+                  << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence
+                  << " votes=" << update.votes.size() << "\n";
+    }
+    return 0;
+}
+
 int validatorReputation(int argc, char** argv) {
     if (argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -1768,6 +1822,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-registry <record-store>\n"
               << "  " << argv0 << " validator-endpoints <record-store>\n"
+              << "  " << argv0 << " economic-policy <record-store>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -1856,6 +1911,10 @@ int main(int argc, char** argv) {
     if (command == "validator-endpoints") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return validatorEndpoints(argc, argv);
+    }
+    if (command == "economic-policy") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return economicPolicy(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

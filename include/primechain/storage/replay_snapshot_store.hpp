@@ -20,6 +20,7 @@ struct ReplaySnapshot {
     std::vector<Address> pending_composite_providers;
     std::vector<Address> validator_set;
     std::uint64_t validator_epoch{0};
+    std::uint64_t transfer_fee_micro_units{1};
 };
 
 class ReplaySnapshotStore {

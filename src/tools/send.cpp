@@ -229,7 +229,7 @@ void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
-              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee=1> <nonce>\n"
+              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
               << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1 1\n";
@@ -253,12 +253,6 @@ int main(int argc, char** argv) {
             ? static_cast<std::uint64_t>(std::stoull(argv[8]))
             : kFixedTransferFeeMicroUnits;
         const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[argc - 1]));
-        if (fee != kFixedTransferFeeMicroUnits) {
-            std::cerr << "authenticated transfer fee must equal fixed protocol fee: "
-                      << kFixedTransferFeeMicroUnits << "\n";
-            return 1;
-        }
-
         primechain::wallet::MinerIdentity sender;
         std::string error;
         if (!primechain::wallet::loadMinerIdentity(sender_wallet_path, sender, error)) {
@@ -287,6 +281,7 @@ int main(int argc, char** argv) {
         }
         shutdown(socket->fd(), SHUT_WR);
 
+        std::string response;
         char buffer[4096];
         while (true) {
             const ssize_t received = recv(socket->fd(), buffer, sizeof(buffer), 0);
@@ -300,9 +295,10 @@ int main(int argc, char** argv) {
                 std::cerr << "recv failed: " << std::strerror(errno) << "\n";
                 return 1;
             }
-            std::cout.write(buffer, received);
+            response.append(buffer, buffer + received);
         }
-        return 0;
+        std::cout << response;
+        return response.rfind("ERROR ", 0) == 0 ? 1 : 0;
     }
 
     if (argc != 9 && argc != 11) {

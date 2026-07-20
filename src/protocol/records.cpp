@@ -25,6 +25,7 @@ constexpr std::uint64_t kMaxDecodedTransactions = 10000;
 constexpr std::uint64_t kMaxDecodedTxInputs = 1024;
 constexpr std::uint64_t kMaxDecodedTxOutputs = 1024;
 constexpr std::uint64_t kMaxDecodedValidatorEndpointUpdates = 64;
+constexpr std::uint64_t kMaxDecodedEconomicPolicyVotes = 64;
 
 bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
     return core::validValidatorSetSize(validators.size()) &&
@@ -291,6 +292,20 @@ void appendValidatorEndpointUpdates(
     }
 }
 
+void appendEconomicPolicyUpdate(
+    std::vector<std::uint8_t>& out,
+    const EconomicPolicyUpdateV1& update) {
+    appendUint64(out, update.transfer_fee_micro_units);
+    appendUint64(out, update.effective_integer);
+    appendUint64(out, update.sequence);
+    appendUint64(out, update.votes.size());
+    for (const auto& vote : update.votes) {
+        appendAddress(out, vote.validator_address);
+        appendBytes(out, vote.public_key);
+        appendBytes(out, vote.signature);
+    }
+}
+
 bool readTransactionBatch(ByteReader& reader, TransactionBatchV0& batch) {
     return reader.readUint64(batch.transaction_count) &&
            reader.readHash(batch.transaction_merkle_root);
@@ -456,6 +471,27 @@ bool readValidatorEndpointUpdates(
     return true;
 }
 
+bool readEconomicPolicyUpdate(
+    ByteReader& reader,
+    EconomicPolicyUpdateV1& update) {
+    std::uint64_t vote_count = 0;
+    update = {};
+    if (!reader.readUint64(update.transfer_fee_micro_units) ||
+        !reader.readUint64(update.effective_integer) ||
+        !reader.readUint64(update.sequence) ||
+        !reader.readUint64(vote_count) ||
+        vote_count > kMaxDecodedEconomicPolicyVotes) return false;
+    update.votes.reserve(static_cast<std::size_t>(vote_count));
+    for (std::uint64_t i = 0; i < vote_count; ++i) {
+        EconomicPolicyVoteV1 vote;
+        if (!reader.readString(vote.validator_address) ||
+            !reader.readBytes(vote.public_key) ||
+            !reader.readBytes(vote.signature)) return false;
+        update.votes.push_back(std::move(vote));
+    }
+    return true;
+}
+
 bool readRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
     return reader.readString(vote.validator_address) &&
            reader.readBytes(vote.public_key) &&
@@ -489,13 +525,21 @@ bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     return true;
 }
 
-bool readOptionalValidatorEndpointUpdatesAndFinalization(
+bool readOptionalMetadataAndFinalization(
     ByteReader& reader,
     std::uint64_t version,
     std::vector<ValidatorEndpointUpdateV1>& updates,
+    EconomicPolicyUpdateV1& policy,
     FinalizationProofV0& finalization) {
+    policy = {};
     if (version < 3) {
+        updates.clear();
         return readFinalizationProof(reader, finalization);
+    }
+    if (version >= 4) {
+        return readValidatorEndpointUpdates(reader, updates) &&
+               readEconomicPolicyUpdate(reader, policy) &&
+               readFinalizationProof(reader, finalization);
     }
 
     auto with_endpoints = reader;
@@ -530,6 +574,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -550,6 +595,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -677,8 +723,8 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
-        !readOptionalValidatorEndpointUpdatesAndFinalization(
-            reader, record.version, record.validator_endpoints, record.finalized_by)) {
+        !readOptionalMetadataAndFinalization(
+            reader, record.version, record.validator_endpoints, record.economic_policy, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -715,6 +761,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         record.genesis_config = {};
         record.validator_epoch = {};
         record.validator_endpoints.clear();
+        record.economic_policy = {};
         record.finalized_by = {};
         if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config)) {
             return false;
@@ -723,9 +770,9 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
             !readValidatorEpochTransition(candidate_reader, record.validator_epoch)) {
             return false;
         }
-        if (!readOptionalValidatorEndpointUpdatesAndFinalization(
+        if (!readOptionalMetadataAndFinalization(
                 candidate_reader, record.version, record.validator_endpoints,
-                record.finalized_by) ||
+                record.economic_policy, record.finalized_by) ||
             !candidate_reader.consumed()) {
             return false;
         }
@@ -798,6 +845,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     return out;
 }
 
@@ -815,6 +863,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     return out;
 }
 
@@ -958,7 +1007,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3) ||
+        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4) ||
             !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
@@ -1303,6 +1352,61 @@ bool verifyValidatorEndpointUpdates(
                     update.host, update.port, update.effective_integer, update.sequence),
                 update.signature, signature_error)) {
             error = "invalid validator endpoint signature";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyEconomicPolicyUpdate(
+    const EconomicPolicyUpdateV1& update,
+    const std::vector<Address>& current_validator_set,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error) {
+    const bool absent = update.transfer_fee_micro_units == 0 &&
+        update.effective_integer == 0 && update.sequence == 0 && update.votes.empty();
+    if (absent) return true;
+    if (!isCanonicalProtocolValidatorSet(current_validator_set)) {
+        error = "economic policy requires an active canonical validator set";
+        return false;
+    }
+    if (update.transfer_fee_micro_units == 0) {
+        error = "economic policy transfer fee must be nonzero";
+        return false;
+    }
+    if (update.effective_integer != record_integer + 1) {
+        error = "economic policy must activate at the next integer";
+        return false;
+    }
+    if (!hasQuorumVoteCount(update.votes.size(), current_validator_set.size())) {
+        error = "economic policy votes do not meet validator quorum";
+        return false;
+    }
+    Address previous_vote;
+    for (const auto& vote : update.votes) {
+        if (!previous_vote.empty() && previous_vote >= vote.validator_address) {
+            error = "economic policy votes are not canonical";
+            return false;
+        }
+        previous_vote = vote.validator_address;
+        if (!std::binary_search(current_validator_set.begin(), current_validator_set.end(),
+                                vote.validator_address)) {
+            error = "economic policy vote is outside current set";
+            return false;
+        }
+        if (vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key)) {
+            error = "economic policy vote address mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::verifyProtocolMessageSignature(
+                vote.public_key,
+                crypto::economicPolicySigningPayload(
+                    previous_record_hash, record_integer, update.transfer_fee_micro_units,
+                    update.effective_integer, update.sequence, vote.validator_address),
+                vote.signature, signature_error)) {
+            error = "invalid economic policy vote signature";
             return false;
         }
     }

@@ -15,7 +15,7 @@ namespace primechain::node {
 
 namespace {
 
-constexpr std::uint64_t kFixedTransferFeeMicroUnits = 1;
+constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
     return crypto::isProtocolSignatureAddress(tx.sender_address);
@@ -23,6 +23,7 @@ bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
 
 bool validateAuthenticatedTransferShape(
     const protocol::TransactionV0& tx,
+    std::uint64_t transfer_fee_micro_units,
     std::string& error) {
     if (!isAuthenticatedTransferV1(tx)) return true;
     if (tx.inputs.size() != 1 || tx.outputs.size() != 1) {
@@ -36,8 +37,8 @@ bool validateAuthenticatedTransferShape(
         return false;
     }
     if (tx.fee.amount.denominator != 1 ||
-        tx.fee.amount.numerator != kFixedTransferFeeMicroUnits) {
-        error = "authenticated transfer v1 fee must equal fixed protocol fee";
+        tx.fee.amount.numerator != transfer_fee_micro_units) {
+        error = "authenticated transfer v1 fee must equal active protocol fee";
         return false;
     }
     return true;
@@ -80,13 +81,22 @@ bool hasValidatorEpochTransition(const protocol::ValidatorEpochTransitionV1& tra
            !transition.votes.empty();
 }
 
+bool hasEconomicPolicyUpdate(const protocol::EconomicPolicyUpdateV1& update) {
+    return update.transfer_fee_micro_units != 0 ||
+           update.effective_integer != 0 ||
+           update.sequence != 0 ||
+           !update.votes.empty();
+}
+
 bool validateRecordMetadataVersion(
     std::uint64_t version,
     const protocol::ValidatorEpochTransitionV1& transition,
     const std::vector<protocol::ValidatorEndpointUpdateV1>& endpoint_updates,
+    const protocol::EconomicPolicyUpdateV1& economic_policy,
     std::string& error) {
     const bool has_transition = hasValidatorEpochTransition(transition);
     const bool has_endpoint_updates = !endpoint_updates.empty();
+    const bool has_policy_update = hasEconomicPolicyUpdate(economic_policy);
     if (has_transition && version < 2) {
         error = "validator epoch transition requires record version 2 or newer";
         return false;
@@ -99,8 +109,16 @@ bool validateRecordMetadataVersion(
         error = "validator endpoint updates require record version 3 or newer";
         return false;
     }
-    if (!has_endpoint_updates && version >= 3) {
+    if (!has_endpoint_updates && version == 3) {
         error = "version 3 record requires validator endpoint updates";
+        return false;
+    }
+    if (has_policy_update && version < 4) {
+        error = "economic policy update requires record version 4 or newer";
+        return false;
+    }
+    if (!has_policy_update && version >= 4) {
+        error = "version 4 record requires an economic policy update";
         return false;
     }
     return true;
@@ -407,6 +425,7 @@ bool SequentialNode::load(std::string& error) {
     pending_composite_providers_.clear();
     validator_set_.clear();
     validator_epoch_ = 0;
+    transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     loaded_from_snapshot_ = false;
 
     const auto latest = store_.latest(error);
@@ -475,18 +494,21 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3) ||
+                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4) ||
                   decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
             }
             if (!decoded.has_value() ||
-                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
                     decoded->previous_record_hash, decoded->integer, error) ||
                 !protocol::verifyValidatorEndpointUpdates(
                     decoded->validator_endpoints, validator_set_,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyEconomicPolicyUpdate(
+                    decoded->economic_policy, validator_set_,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -499,6 +521,9 @@ bool SequentialNode::load(std::string& error) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
                 validator_epoch_ = decoded->validator_epoch.epoch;
             }
+            if (hasEconomicPolicyUpdate(decoded->economic_policy)) {
+                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return false;
+            }
         } else {
             if (!validateStoredPrimePayload(record, expected_previous_hash, validator_set_, error)) {
                 prefixReplayError(record, error);
@@ -509,12 +534,15 @@ bool SequentialNode::load(std::string& error) {
                 validator_set_ = decoded->genesis_config.validator_set;
             }
             if (!decoded.has_value() ||
-                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
                     decoded->previous_record_hash, decoded->integer, error) ||
                 !protocol::verifyValidatorEndpointUpdates(
                     decoded->validator_endpoints, validator_set_,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyEconomicPolicyUpdate(
+                    decoded->economic_policy, validator_set_,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -526,6 +554,9 @@ bool SequentialNode::load(std::string& error) {
             if (hasValidatorEpochTransition(decoded->validator_epoch)) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
                 validator_epoch_ = decoded->validator_epoch.epoch;
+            }
+            if (hasEconomicPolicyUpdate(decoded->economic_policy)) {
+                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return false;
             }
         }
 
@@ -563,6 +594,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     status_.latest_record_hash = stored.record_hash;
     validator_set_ = record.genesis_config.validator_set;
     validator_epoch_ = 0;
+    transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -581,17 +613,20 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2 && record.version != 3) ||
+        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4) ||
          record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }
-    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
             record.previous_record_hash, record.integer, error) ||
         !protocol::verifyValidatorEndpointUpdates(
             record.validator_endpoints, validator_set_,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyEconomicPolicyUpdate(
+            record.economic_policy, validator_set_,
             record.previous_record_hash, record.integer, error)) return false;
 
     const auto balances_before = balances_;
@@ -621,12 +656,15 @@ bool SequentialNode::validatePrimeCandidate(
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyGenesisConfig(record, error)) return false;
-    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
             record.previous_record_hash, record.integer, error) ||
         !protocol::verifyValidatorEndpointUpdates(
             record.validator_endpoints, validator_set_,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyEconomicPolicyUpdate(
+            record.economic_policy, validator_set_,
             record.previous_record_hash, record.integer, error)) return false;
     if (totalSupplyMicroUnits(record.integer) != 0) { error = "prime asset already minted"; return false; }
 
@@ -653,12 +691,14 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
+    const auto fee_before = transfer_fee_micro_units_;
     if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
         !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
+        transfer_fee_micro_units_ = fee_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -667,6 +707,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         total_supply_ = total_supply_before;
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
+        transfer_fee_micro_units_ = fee_before;
         return false;
     }
     status_.height = record.height;
@@ -675,6 +716,9 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     if (hasValidatorEpochTransition(record.validator_epoch)) {
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
+    }
+    if (hasEconomicPolicyUpdate(record.economic_policy)) {
+        if (!applyEconomicPolicy(record.economic_policy, record.integer, error)) return false;
     }
     saveSnapshot();
     return true;
@@ -690,12 +734,14 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
+    const auto fee_before = transfer_fee_micro_units_;
     if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
         !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
+        transfer_fee_micro_units_ = fee_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -704,6 +750,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         total_supply_ = total_supply_before;
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
+        transfer_fee_micro_units_ = fee_before;
         return false;
     }
     status_.height = record.height;
@@ -713,7 +760,24 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
     }
+    if (hasEconomicPolicyUpdate(record.economic_policy)) {
+        if (!applyEconomicPolicy(record.economic_policy, record.integer, error)) return false;
+    }
     saveSnapshot();
+    return true;
+}
+
+bool SequentialNode::applyEconomicPolicy(
+    const protocol::EconomicPolicyUpdateV1& update,
+    PrimeValue record_integer,
+    std::string& error) {
+    if (!hasEconomicPolicyUpdate(update)) return true;
+    if (update.transfer_fee_micro_units == 0 ||
+        update.effective_integer != record_integer + 1) {
+        error = "economic policy update does not match active frontier";
+        return false;
+    }
+    transfer_fee_micro_units_ = update.transfer_fee_micro_units;
     return true;
 }
 
@@ -735,6 +799,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
             crypto::isProtocolSignatureAddress) ||
         !std::all_of(snapshot.account_nonces.begin(), snapshot.account_nonces.end(),
             [](const auto& entry) { return protocol::isProtocolAddress(entry.first); }) ||
+        snapshot.transfer_fee_micro_units == 0 ||
         !std::is_sorted(snapshot.validator_set.begin(), snapshot.validator_set.end()) ||
         std::adjacent_find(snapshot.validator_set.begin(), snapshot.validator_set.end()) !=
             snapshot.validator_set.end()) return false;
@@ -749,6 +814,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     pending_composite_providers_ = snapshot.pending_composite_providers;
     validator_set_ = snapshot.validator_set;
     validator_epoch_ = snapshot.validator_epoch;
+    transfer_fee_micro_units_ = snapshot.transfer_fee_micro_units;
     return true;
 }
 
@@ -766,6 +832,7 @@ void SequentialNode::saveSnapshot(bool force) const {
     snapshot.pending_composite_providers = pending_composite_providers_;
     snapshot.validator_set = validator_set_;
     snapshot.validator_epoch = validator_epoch_;
+    snapshot.transfer_fee_micro_units = transfer_fee_micro_units_;
     std::string ignored;
     snapshot_store_.replace(snapshot, ignored);
 }
@@ -828,7 +895,7 @@ bool SequentialNode::applyTransactions(
             error = "transaction must have inputs and outputs";
             return false;
         }
-        if (!validateAuthenticatedTransferShape(tx, error)) {
+        if (!validateAuthenticatedTransferShape(tx, transfer_fee_micro_units_, error)) {
             return false;
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;

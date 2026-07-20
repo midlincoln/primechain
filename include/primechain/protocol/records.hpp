@@ -140,6 +140,19 @@ struct ValidatorEndpointUpdateV1 {
     Bytes signature;
 };
 
+struct EconomicPolicyVoteV1 {
+    Address validator_address;
+    Bytes public_key;
+    Bytes signature;
+};
+
+struct EconomicPolicyUpdateV1 {
+    std::uint64_t transfer_fee_micro_units{0};
+    PrimeValue effective_integer{0};
+    std::uint64_t sequence{0};
+    std::vector<EconomicPolicyVoteV1> votes;
+};
+
 struct CompositeRecordV0 {
     std::uint64_t version{0};
     std::uint64_t height{0};
@@ -152,6 +165,7 @@ struct CompositeRecordV0 {
     CommitPhaseCertificateV1 commit_phase;
     ValidatorEpochTransitionV1 validator_epoch;
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
+    EconomicPolicyUpdateV1 economic_policy;
     FinalizationProofV0 finalized_by;
 };
 
@@ -167,6 +181,7 @@ struct PrimeRecordV0 {
     GenesisConfigV1 genesis_config;
     ValidatorEpochTransitionV1 validator_epoch;
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
+    EconomicPolicyUpdateV1 economic_policy;
     FinalizationProofV0 finalized_by;
 };
 
@@ -236,6 +251,12 @@ bool verifyValidatorEpochTransition(
     std::string& error);
 bool verifyValidatorEndpointUpdates(
     const std::vector<ValidatorEndpointUpdateV1>& updates,
+    const std::vector<Address>& current_validator_set,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error);
+bool verifyEconomicPolicyUpdate(
+    const EconomicPolicyUpdateV1& update,
     const std::vector<Address>& current_validator_set,
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

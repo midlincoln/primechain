@@ -46,6 +46,7 @@ public:
         std::string& error);
     const std::vector<Address>& validatorSet() const { return validator_set_; }
     std::uint64_t validatorEpoch() const { return validator_epoch_; }
+    std::uint64_t transferFeeMicroUnits() const { return transfer_fee_micro_units_; }
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:
@@ -60,6 +61,10 @@ private:
         std::string& error);
     bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
     bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);
+    bool applyEconomicPolicy(
+        const protocol::EconomicPolicyUpdateV1& update,
+        PrimeValue record_integer,
+        std::string& error);
     bool restoreSnapshot(const storage::ReplaySnapshot& snapshot);
     void saveSnapshot(bool force = false) const;
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
@@ -74,6 +79,7 @@ private:
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
     std::uint64_t validator_epoch_{0};
+    std::uint64_t transfer_fee_micro_units_{1};
     bool loaded_from_snapshot_{false};
 };
 

@@ -74,6 +74,15 @@ struct CommitPhaseTimeoutVote {
     std::vector<std::uint8_t> signature;
 };
 
+struct EconomicPolicyVoteRecord {
+    primechain::Hash256 previous_record_hash{};
+    primechain::PrimeValue record_integer{0};
+    std::uint64_t transfer_fee_micro_units{0};
+    primechain::PrimeValue effective_integer{0};
+    std::uint64_t sequence{0};
+    primechain::protocol::EconomicPolicyVoteV1 vote;
+};
+
 struct SignedCompositeReveal {
     primechain::PrimeValue g{0};
     primechain::PrimeValue d{0};
@@ -1406,6 +1415,10 @@ public:
                 sendValidatorEndpoints(fd);
                 continue;
             }
+            if (*line == "GET_ECONOMIC_POLICY") {
+                sendEconomicPolicy(fd);
+                continue;
+            }
             if (*line == "GET_MINING_VIEW" || line->rfind("GET_MINING_VIEW ", 0) == 0) {
                 sendMiningView(fd, *line);
                 continue;
@@ -1496,6 +1509,18 @@ public:
             }
             if (line->rfind("SUBMIT_VALIDATOR_ENDPOINT_PEER ", 0) == 0) {
                 submitValidatorEndpoint(fd, *line, false);
+                continue;
+            }
+            if (*line == "GET_POLICY_VOTES") {
+                sendPolicyVotes(fd);
+                continue;
+            }
+            if (line->rfind("SUBMIT_POLICY_VOTE ", 0) == 0) {
+                submitPolicyVote(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_POLICY_VOTE_PEER ", 0) == 0) {
+                submitPolicyVote(fd, *line, false);
                 continue;
             }
             if (line->rfind("SIGN_ROUND_CHANGE ", 0) == 0) {
@@ -1643,6 +1668,7 @@ public:
         validator_set_ = reloaded.validatorSet();
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
+        clearPolicyVotesAfterRecord();
         revalidateMempool();
         std::remove(temp_path.c_str());
         return true;
@@ -2029,6 +2055,21 @@ private:
         writeAll(fd, out.str());
     }
 
+    void sendEconomicPolicy(int fd) const {
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        std::ostringstream out;
+        out << "ECONOMIC_POLICY transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+            << " next_integer=" << (node.status().frontier_integer + 1)
+            << " previous_hash=" << primechain::crypto::toHex(node.status().latest_record_hash)
+            << "\n";
+        writeAll(fd, out.str());
+    }
+
     void sendValidatorEndpoints(int fd) const {
         std::string error;
         primechain::storage::RecordStore store(store_path_);
@@ -2248,8 +2289,8 @@ private:
         const auto record = primechain::protocol::deserializeCompositeRecord(
             submitted.payload, error);
         if (!record.has_value()) return false;
-        if (record->version != 1 && record->version != 2 && record->version != 3) {
-            error = "quorum mode requires composite record version 1, 2, or 3";
+        if (record->version != 1 && record->version != 2 && record->version != 3 && record->version != 4) {
+            error = "quorum mode requires composite record version 1, 2, 3, or 4";
             return false;
         }
         if (record->commit_phase.validator_set != validator_set_) {
@@ -3929,6 +3970,163 @@ private:
         writeAll(fd, "EPOCH_VOTE_ACCEPTED " + std::to_string(record.epoch) + " votes=" + std::to_string(epoch_votes_.size()) + "\n");
     }
 
+    bool policyProposalReady() const {
+        return quorumEnabled() && policy_votes_.size() >= validatorQuorumRequired();
+    }
+
+    bool policyProposalTargetsNextRecord(const primechain::node::SequentialNode& node) const {
+        if (policy_votes_.empty()) return false;
+        const auto& proposal = policy_votes_.begin()->second;
+        return proposal.previous_record_hash == node.status().latest_record_hash &&
+               proposal.record_integer == node.status().frontier_integer + 1 &&
+               proposal.effective_integer == proposal.record_integer + 1;
+    }
+
+    primechain::protocol::EconomicPolicyUpdateV1 embeddedEconomicPolicy() const {
+        primechain::protocol::EconomicPolicyUpdateV1 update;
+        if (!policyProposalReady()) return update;
+        const auto& proposal = policy_votes_.begin()->second;
+        update.transfer_fee_micro_units = proposal.transfer_fee_micro_units;
+        update.effective_integer = proposal.effective_integer;
+        update.sequence = proposal.sequence;
+        for (const auto& entry : policy_votes_) update.votes.push_back(entry.second.vote);
+        std::sort(update.votes.begin(), update.votes.end(), [](const auto& left, const auto& right) {
+            return left.validator_address < right.validator_address;
+        });
+        return update;
+    }
+
+    primechain::protocol::EconomicPolicyUpdateV1 embeddedEconomicPolicyForNextRecord(
+            const primechain::node::SequentialNode& node) {
+        if (policy_votes_.empty()) return {};
+        if (!policyProposalTargetsNextRecord(node)) {
+            clearPolicyVotesAfterRecord();
+            return {};
+        }
+        if (!policyProposalReady()) return {};
+        return embeddedEconomicPolicy();
+    }
+
+    void sendPolicyVotes(int fd) const {
+        if (policy_votes_.empty()) {
+            writeAll(fd, "POLICY_VOTES 0\nEND_POLICY_VOTES\n");
+            return;
+        }
+        const auto& proposal = policy_votes_.begin()->second;
+        std::ostringstream header;
+        header << "POLICY_VOTES " << policy_votes_.size() << " "
+            << primechain::crypto::toHex(proposal.previous_record_hash) << " "
+            << proposal.record_integer << " " << proposal.transfer_fee_micro_units << " "
+            << proposal.effective_integer << " " << proposal.sequence << "\n";
+        writeCommand(fd, header.str());
+        for (const auto& entry : policy_votes_) {
+            const auto& vote = entry.second.vote;
+            writeCommand(fd, "POLICY_VOTE " + vote.validator_address + " "
+                + bytesToHex(vote.public_key) + " " + bytesToHex(vote.signature) + "\n");
+        }
+        writeAll(fd, "END_POLICY_VOTES\n");
+    }
+
+    bool submitPolicyVoteToPeer(
+        const PeerEndpoint& peer,
+        const EconomicPolicyVoteRecord& record,
+        std::string& error) const {
+        auto socket = connectToServer(peer.host, peer.port);
+        if (!socket.has_value()) { error = "could not connect to peer"; return false; }
+        std::ostringstream command;
+        command << "SUBMIT_POLICY_VOTE_PEER " << primechain::crypto::toHex(record.previous_record_hash)
+                << " " << record.record_integer << " " << record.transfer_fee_micro_units
+                << " " << record.effective_integer << " " << record.sequence
+                << " " << record.vote.validator_address << " "
+                << bytesToHex(record.vote.public_key) << " " << bytesToHex(record.vote.signature) << "\n";
+        if (!writeCommand(socket->fd(), command.str())) { error = "could not submit policy vote"; return false; }
+        shutdown(socket->fd(), SHUT_WR);
+        const auto response = readLine(socket->fd());
+        if (response.has_value() &&
+            (response->rfind("POLICY_VOTE_ACCEPTED ", 0) == 0 ||
+             response->rfind("POLICY_VOTE_DUPLICATE ", 0) == 0)) return true;
+        error = response.has_value() ? *response : "peer did not return policy vote response";
+        return false;
+    }
+
+    void propagatePolicyVote(const EconomicPolicyVoteRecord& record) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitPolicyVoteToPeer(peer, record, error)) {
+                std::cerr << "policy vote propagation warning to " << peer.host << ":"
+                          << peer.port << ": " << error << "\n";
+            }
+        }
+    }
+
+    void submitPolicyVote(int fd, const std::string& line, bool propagate) {
+        std::istringstream in(line);
+        std::string command, previous_hex, voter, public_hex, signature_hex, extra;
+        EconomicPolicyVoteRecord record;
+        in >> command >> previous_hex >> record.record_integer >> record.transfer_fee_micro_units
+           >> record.effective_integer >> record.sequence >> voter >> public_hex >> signature_hex;
+        const auto previous = parseHash(previous_hex);
+        if (!in || (in >> extra) ||
+            (command != "SUBMIT_POLICY_VOTE" && command != "SUBMIT_POLICY_VOTE_PEER") ||
+            !previous.has_value()) {
+            writeAll(fd, "ERROR invalid SUBMIT_POLICY_VOTE\n");
+            return;
+        }
+        record.previous_record_hash = *previous;
+        record.vote.validator_address = voter;
+        record.vote.public_key = hexToBytes(public_hex);
+        record.vote.signature = hexToBytes(signature_hex);
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
+        if (!quorumEnabled() || record.previous_record_hash != node.status().latest_record_hash ||
+            record.record_integer != node.status().frontier_integer + 1 ||
+            record.effective_integer != record.record_integer + 1 ||
+            record.transfer_fee_micro_units == 0) {
+            writeAll(fd, "ERROR policy proposal does not match current chain state\n");
+            return;
+        }
+        if (std::find(node.validatorSet().begin(), node.validatorSet().end(), voter) ==
+                node.validatorSet().end() ||
+            voter != primechain::crypto::addressFromProtocolPublicKey(record.vote.public_key) ||
+            !primechain::crypto::verifyProtocolMessageSignature(
+                record.vote.public_key,
+                primechain::crypto::economicPolicySigningPayload(
+                    record.previous_record_hash, record.record_integer,
+                    record.transfer_fee_micro_units, record.effective_integer,
+                    record.sequence, voter),
+                record.vote.signature, error)) {
+            writeAll(fd, "ERROR invalid economic policy vote\n");
+            return;
+        }
+        if (!policy_votes_.empty()) {
+            const auto& first = policy_votes_.begin()->second;
+            if (record.previous_record_hash != first.previous_record_hash ||
+                record.record_integer != first.record_integer ||
+                record.transfer_fee_micro_units != first.transfer_fee_micro_units ||
+                record.effective_integer != first.effective_integer ||
+                record.sequence != first.sequence) {
+                writeAll(fd, "ERROR conflicting economic policy proposal\n");
+                return;
+            }
+        }
+        const auto found = policy_votes_.find(voter);
+        if (found != policy_votes_.end()) {
+            if (found->second.vote.signature == record.vote.signature) {
+                writeAll(fd, "POLICY_VOTE_DUPLICATE " + std::to_string(record.sequence) +
+                    " votes=" + std::to_string(policy_votes_.size()) + "\n");
+            } else {
+                writeAll(fd, "ERROR validator already voted for this policy sequence\n");
+            }
+            return;
+        }
+        policy_votes_[voter] = record;
+        if (propagate) propagatePolicyVote(record);
+        writeAll(fd, "POLICY_VOTE_ACCEPTED " + std::to_string(record.sequence) +
+            " votes=" + std::to_string(policy_votes_.size()) + "\n");
+    }
+
     void submitValidatorEndpoint(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
         std::string command, previous_hex, public_hex, signature_hex, extra;
@@ -4006,6 +4204,10 @@ private:
 
     void clearEndpointUpdatesAfterRecord() {
         pending_endpoint_updates_.clear();
+    }
+
+    void clearPolicyVotesAfterRecord() {
+        policy_votes_.clear();
     }
 
     void submitSignedCommit(int fd, const std::string& line, bool propagate) {
@@ -4573,6 +4775,11 @@ private:
                 record.version = 3;
                 record.validator_endpoints = std::move(endpoint_updates);
             }
+            auto economic_policy = embeddedEconomicPolicyForNextRecord(node);
+            if (economic_policy.transfer_fee_micro_units != 0) {
+                record.version = 4;
+                record.economic_policy = std::move(economic_policy);
+            }
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
@@ -4600,6 +4807,7 @@ private:
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
+        clearPolicyVotesAfterRecord();
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
@@ -4783,6 +4991,11 @@ private:
             record.version = 3;
             record.validator_endpoints = std::move(endpoint_updates);
         }
+        auto economic_policy = embeddedEconomicPolicyForNextRecord(node);
+        if (economic_policy.transfer_fee_micro_units != 0) {
+            record.version = 4;
+            record.economic_policy = std::move(economic_policy);
+        }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
@@ -4804,6 +5017,7 @@ private:
         validator_set_ = node.validatorSet();
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
+        clearPolicyVotesAfterRecord();
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
@@ -5128,6 +5342,7 @@ private:
         SignedCompositeReveal> pending_reveals_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
+    std::map<primechain::Address, EconomicPolicyVoteRecord> policy_votes_;
     std::mutex finalization_mutex_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
