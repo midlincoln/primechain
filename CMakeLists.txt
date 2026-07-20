@@ -8,6 +8,7 @@ project(primechain
 add_definitions(-D_FILE_OFFSET_BITS=64)
 
 find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mldsa-native/mldsa/mldsa_native.c")
     message(FATAL_ERROR "missing mldsa-native submodule; run git submodule update --init")
@@ -75,6 +76,7 @@ add_executable(primechain-sync-server
 target_link_libraries(primechain-sync-server
     PRIVATE
         primechain_core
+        Threads::Threads
 )
 
 add_executable(primechain-miner
