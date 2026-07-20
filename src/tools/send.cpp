@@ -21,6 +21,8 @@
 
 namespace {
 
+constexpr std::uint64_t kFixedTransferFeeMicroUnits = 1;
+
 struct DevWallet {
     std::string address;
     std::vector<std::uint8_t> public_key;
@@ -227,10 +229,10 @@ void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
-              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
+              << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee=1> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
-              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1000 1\n";
+              << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1 1\n";
 }
 
 } // namespace
@@ -249,8 +251,13 @@ int main(int argc, char** argv) {
         const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
         const auto fee = argc == 10
             ? static_cast<std::uint64_t>(std::stoull(argv[8]))
-            : 0;
+            : kFixedTransferFeeMicroUnits;
         const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[argc - 1]));
+        if (fee != kFixedTransferFeeMicroUnits) {
+            std::cerr << "authenticated transfer fee must equal fixed protocol fee: "
+                      << kFixedTransferFeeMicroUnits << "\n";
+            return 1;
+        }
 
         primechain::wallet::MinerIdentity sender;
         std::string error;

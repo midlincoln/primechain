@@ -15,6 +15,34 @@ namespace primechain::node {
 
 namespace {
 
+constexpr std::uint64_t kFixedTransferFeeMicroUnits = 1;
+
+bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
+    return crypto::isProtocolSignatureAddress(tx.sender_address);
+}
+
+bool validateAuthenticatedTransferShape(
+    const protocol::TransactionV0& tx,
+    std::string& error) {
+    if (!isAuthenticatedTransferV1(tx)) return true;
+    if (tx.inputs.size() != 1 || tx.outputs.size() != 1) {
+        error = "authenticated transfer v1 requires one input and one output";
+        return false;
+    }
+    const auto& input = tx.inputs.front();
+    const auto& output = tx.outputs.front();
+    if (input.prime != output.prime || tx.fee.prime != input.prime) {
+        error = "authenticated transfer v1 fee must use the transferred prime asset";
+        return false;
+    }
+    if (tx.fee.amount.denominator != 1 ||
+        tx.fee.amount.numerator != kFixedTransferFeeMicroUnits) {
+        error = "authenticated transfer v1 fee must equal fixed protocol fee";
+        return false;
+    }
+    return true;
+}
+
 std::optional<std::uint64_t> microUnits(const protocol::Amount& amount) {
     if (amount.denominator != 1 || amount.numerator == 0) {
         return std::nullopt;
@@ -798,6 +826,9 @@ bool SequentialNode::applyTransactions(
         }
         if (tx.inputs.empty() || tx.outputs.empty()) {
             error = "transaction must have inputs and outputs";
+            return false;
+        }
+        if (!validateAuthenticatedTransferShape(tx, error)) {
             return false;
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;
