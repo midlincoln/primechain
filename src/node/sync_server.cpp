@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -327,6 +328,7 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_PRIME_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
            line.rfind("ACK_MEMPOOL ", 0) == 0 ||
@@ -1228,6 +1230,46 @@ bool submitRevealToPeer(
     return false;
 }
 
+bool submitSignedPrimeToPeer(
+    const PeerEndpoint& peer,
+    const std::string& signed_prime_line,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    const std::string external_prefix = "SUBMIT_SIGNED_PRIME ";
+    std::string command = signed_prime_line;
+    if (command.rfind(external_prefix, 0) != 0) {
+        error = "invalid signed prime command for peer propagation";
+        return false;
+    }
+    command.replace(0, external_prefix.size(), "SUBMIT_SIGNED_PRIME_PEER ");
+    if (command.empty() || command.back() != '\n') command.push_back('\n');
+
+    if (!writeCommand(socket->fd(), command)) {
+        error = "could not submit prime evidence to peer";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "peer did not return prime evidence response";
+        return false;
+    }
+    if (response->rfind("PRIME_EVIDENCE_ACCEPTED ", 0) == 0 ||
+        response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
+        response->rfind("RECORD_DUPLICATE ", 0) == 0 ||
+        response->rfind("RECORD_CONFLICT", 0) == 0) {
+        return true;
+    }
+    error = "peer rejected prime evidence: " + *response;
+    return false;
+}
+
 bool submitRecordToPeer(
     const PeerEndpoint& peer,
     const primechain::storage::StoredRecord& record,
@@ -1488,9 +1530,16 @@ public:
                 submitComposite(fd, *line);
                 continue;
             }
-            if (line->rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
-                line->rfind("SUBMIT_PRIME ", 0) == 0) {
-                submitPrime(fd, *line);
+            if (line->rfind("SUBMIT_SIGNED_PRIME ", 0) == 0) {
+                submitPrime(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_SIGNED_PRIME_PEER ", 0) == 0) {
+                submitPrime(fd, *line, false);
+                continue;
+            }
+            if (line->rfind("SUBMIT_PRIME ", 0) == 0) {
+                submitPrime(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_RECORD ", 0) == 0) {
@@ -2501,6 +2550,7 @@ private:
     }
 
     void clearSignedCandidate(primechain::PrimeValue integer) {
+        std::lock_guard<std::mutex> lock(finalization_mutex_);
         bool changed = false;
         for (auto it = signed_candidates_.begin(); it != signed_candidates_.end();) {
             if (std::get<0>(it->first) == integer) { it = signed_candidates_.erase(it); changed = true; }
@@ -2529,6 +2579,7 @@ private:
             error = "validator quorum identity is not configured";
             return false;
         }
+        std::lock_guard<std::mutex> lock(finalization_mutex_);
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) return false;
 
@@ -4561,7 +4612,17 @@ private:
             + "\n");
     }
 
-    void submitPrime(int fd, const std::string& line) {
+    void propagateSignedPrime(const std::string& line) const {
+        for (const auto& peer : peers_) {
+            std::string error;
+            if (!submitSignedPrimeToPeer(peer, line, error)) {
+                std::cerr << "prime evidence propagation warning to " << peer.host << ":"
+                          << peer.port << ": " << error << "\n";
+            }
+        }
+    }
+
+    void submitPrime(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
         std::string command;
         primechain::math::PrattProof proof;
@@ -4570,7 +4631,8 @@ private:
         std::string public_key_hex;
         std::string signature_hex;
         in >> command >> proof.p >> proof.witness >> factor_count;
-        const bool signed_submission = command == "SUBMIT_SIGNED_PRIME";
+        const bool peer_signed_submission = command == "SUBMIT_SIGNED_PRIME_PEER";
+        const bool signed_submission = command == "SUBMIT_SIGNED_PRIME" || peer_signed_submission;
         if (!in || (command != "SUBMIT_PRIME" && !signed_submission) || factor_count > 64) {
             writeAll(fd, "ERROR invalid prime submission; expected SUBMIT_SIGNED_PRIME p witness factor_count factor exponent ... provider_address public_key signature\n");
             return;
@@ -4684,6 +4746,28 @@ private:
                 << (node.status().frontier_integer + 1) << "\n";
             writeAll(fd, out.str());
             return;
+        }
+
+        if (signed_submission) {
+            std::vector<std::pair<primechain::PrimeValue, std::uint64_t>> factors;
+            for (const auto& factor : proof.factors_of_p_minus_1.factors) {
+                factors.push_back({factor.prime, factor.exponent});
+            }
+            if (!primechain::crypto::verifyPackedPrimeProofAuthentication(
+                    node.status().latest_record_hash, proof.p, proof.witness, factors,
+                    provider_address, authentication, error)) {
+                writeAll(fd, "ERROR invalid prime provider signature: " + error + "\n");
+                return;
+            }
+        }
+
+        if (peer_signed_submission) {
+            writeAll(fd, "PRIME_EVIDENCE_ACCEPTED " + std::to_string(proof.p) + "\n");
+            return;
+        }
+
+        if (quorumEnabled() && propagate && signed_submission) {
+            propagateSignedPrime(line);
         }
 
         auto record = makePrimeRecord(
@@ -5044,6 +5128,7 @@ private:
         SignedCompositeReveal> pending_reveals_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
+    std::mutex finalization_mutex_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
