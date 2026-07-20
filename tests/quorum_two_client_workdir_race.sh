@@ -77,6 +77,10 @@ wait "$(cat "$base/run-b.pid")" || {
 
 cat "$base/run-a.out"
 cat "$base/run-b.out"
+if grep -R "invalid better tip replacement" "$base"/*.log "$base"/*.out >/dev/null 2>&1; then
+    echo "unexpected quorum tip replacement attempt" >&2
+    exit 1
+fi
 grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-a.out"
 grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-b.out"
 

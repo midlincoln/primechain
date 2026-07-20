@@ -2273,6 +2273,14 @@ private:
             writeAll(fd, "RECORD_DUPLICATE " + primechain::crypto::toHex(submitted.record_hash) + "\n");
             return;
         }
+        if (existing.has_value() && quorumEnabled()) {
+            writeAll(fd, "RECORD_CONFLICT_WORSE "
+                + primechain::crypto::toHex(submitted.record_hash)
+                + " "
+                + primechain::crypto::toHex(existing->record_hash)
+                + "\n");
+            return;
+        }
         if (existing.has_value() && submitted.integer == frontier_integer) {
             error.clear();
             const auto submitted_previous = previousRecordHash(submitted, error);
