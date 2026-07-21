@@ -226,6 +226,43 @@ std::optional<primechain::protocol::TransactionV0> makeAuthenticatedTransferTran
     return tx;
 }
 
+
+std::optional<primechain::protocol::TransactionV0> makeValidatorReserveLockTransaction(
+    const primechain::wallet::MinerIdentity& sender,
+    const primechain::Address& validator_address,
+    primechain::PrimeValue prime,
+    std::uint64_t amount,
+    std::uint64_t fee,
+    std::uint64_t nonce,
+    std::string& error) {
+    if (!primechain::crypto::isProtocolSignatureAddress(validator_address) ||
+        prime < 2 || amount == 0) {
+        error = "invalid validator reserve-lock arguments";
+        return std::nullopt;
+    }
+    if (fee > std::numeric_limits<std::uint64_t>::max() - amount) {
+        error = "amount plus fee overflows micro-units";
+        return std::nullopt;
+    }
+
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 4;
+    tx.inputs.push_back({prime, {amount + fee, 1}});
+    tx.outputs.push_back({prime, {amount, 1}, primechain::protocol::validatorReserveAddress(validator_address)});
+    tx.fee = {prime, {fee, 1}};
+    tx.nonce = nonce;
+    tx.sender_address = sender.address;
+    tx.sender_public_key = sender.public_key;
+    const auto signature = primechain::crypto::signProtocolMessage(
+        sender.private_key,
+        primechain::crypto::transactionSigningPayload(
+            primechain::protocol::serializeTransaction(tx, false)),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    tx.signature = *signature;
+    return tx;
+}
+
 std::optional<primechain::protocol::TransactionV0> makeFeePoolDistributionTransaction(
     std::uint64_t epoch,
     primechain::PrimeValue prime,
@@ -308,6 +345,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
               << "  " << argv0 << " distribute-fee-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
+              << "  " << argv0 << " reserve-lock <host> <port> <reserve.wallet> <validator-address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
               << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1 1\n";
@@ -371,6 +409,35 @@ int main(int argc, char** argv) {
             epoch, prime, amount, nonce, std::move(validators), error);
         if (!tx.has_value()) {
             std::cerr << "could not build fee-pool distribution transaction: " << error << "\n";
+            return 1;
+        }
+        return submitTransaction(host, port, *tx) ? 0 : 1;
+    }
+
+    if (argc > 1 && std::string(argv[1]) == "reserve-lock") {
+        if (argc != 10) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        const std::string host = argv[2];
+        const int port = std::stoi(argv[3]);
+        const std::string sender_wallet_path = argv[4];
+        const primechain::Address validator_address = argv[5];
+        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
+        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto fee = static_cast<std::uint64_t>(std::stoull(argv[8]));
+        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[9]));
+
+        primechain::wallet::MinerIdentity sender;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(sender_wallet_path, sender, error)) {
+            std::cerr << "could not load reserve wallet: " << error << "\n";
+            return 1;
+        }
+        const auto tx = makeValidatorReserveLockTransaction(
+            sender, validator_address, prime, amount, fee, nonce, error);
+        if (!tx.has_value()) {
+            std::cerr << "could not sign validator reserve-lock transaction: " << error << "\n";
             return 1;
         }
         return submitTransaction(host, port, *tx) ? 0 : 1;

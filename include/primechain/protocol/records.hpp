@@ -187,8 +187,11 @@ struct PrimeRecordV0 {
 
 bool isDevelopmentAddress(const Address& address);
 bool isProtocolFeePoolAddress(const Address& address);
+bool isProtocolValidatorReserveAddress(const Address& address);
 bool isProtocolAddress(const Address& address);
 Address validatorFeePoolAddress(std::uint64_t validator_epoch);
+Address validatorReserveAddress(const Address& validator_address);
+std::optional<Address> validatorAddressFromReserveAddress(const Address& reserve_address);
 Address developmentAddressFromPublicKey(const Bytes& public_key);
 
 std::vector<std::uint8_t> serializeTransaction(const TransactionV0& tx, bool include_signature);

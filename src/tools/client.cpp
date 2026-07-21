@@ -1036,12 +1036,22 @@ int validatorEligibility(int argc, char** argv) {
     }
     const std::string store_path = argv[2];
     const primechain::Address address = argv[3];
-    const auto reserve_micro_units = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    std::uint64_t reserve_micro_units = 0;
+    std::string error;
+    if (std::string(argv[5]) == "auto") {
+        primechain::node::SequentialNode node(store_path);
+        if (!node.load(error)) {
+            std::cerr << "could not derive validator reserve: " << error << "\n";
+            return 1;
+        }
+        reserve_micro_units = node.lockedValidatorReserveMicroUnits(address);
+    } else {
+        reserve_micro_units = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    }
     const auto successful_observations = static_cast<std::uint64_t>(std::stoull(argv[7]));
     const auto total_observations = static_cast<std::uint64_t>(std::stoull(argv[9]));
 
     primechain::storage::RecordStore store(store_path);
-    std::string error;
     const auto latest = store.latest(error);
     if (!error.empty()) {
         std::cerr << "could not load latest record: " << error << "\n";
@@ -1091,6 +1101,35 @@ int validatorEligibility(int argc, char** argv) {
               << "/" << policy.admission_quorum_denominator
               << " activation_delay_epochs=" << policy.activation_delay_epochs
               << " epoch_length=" << policy.epoch_length << "\n";
+    return 0;
+}
+
+
+int validatorReserve(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const primechain::Address validator_address = argv[3];
+    const auto reserve_address = primechain::protocol::validatorReserveAddress(validator_address);
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "validator_reserve_error: " << error << "\n";
+        return 1;
+    }
+    const auto holdings = node.holdingsForAddress(reserve_address);
+    const auto total_micro_units = node.lockedValidatorReserveMicroUnits(validator_address);
+
+    std::cout << "VALIDATOR_RESERVE " << store_path
+              << " validator=" << validator_address
+              << " reserve_address=" << reserve_address
+              << " holdings=" << holdings.size()
+              << " total_micro_units=" << total_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "RESERVE_HOLDING validator=" << validator_address
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
     return 0;
 }
 
@@ -1846,7 +1885,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
-              << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units> --observed <ok> --total <count>\n"
+              << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units|auto> --observed <ok> --total <count>\n"
+              << "  " << argv0 << " validator-reserve <record-store> <validator-address>\n"
               << "  " << argv0 << " validator-registry <record-store>\n"
               << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " economic-policy <record-store>\n"
@@ -1931,6 +1971,10 @@ int main(int argc, char** argv) {
     if (command == "validator-eligibility") {
         if (argc != 10) { printUsage(argv[0]); return 1; }
         return validatorEligibility(argc, argv);
+    }
+    if (command == "validator-reserve") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorReserve(argc, argv);
     }
     if (command == "validator-registry") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

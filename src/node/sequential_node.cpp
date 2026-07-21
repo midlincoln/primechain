@@ -17,9 +17,15 @@ namespace {
 
 constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
+constexpr std::uint64_t kValidatorReserveLockTxVersion = 4;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
-    return crypto::isProtocolSignatureAddress(tx.sender_address);
+    return tx.version == 2 && crypto::isProtocolSignatureAddress(tx.sender_address);
+}
+
+bool isValidatorReserveLockV1(const protocol::TransactionV0& tx) {
+    return tx.version == kValidatorReserveLockTxVersion &&
+           crypto::isProtocolSignatureAddress(tx.sender_address);
 }
 
 bool isFeePoolDistributionV1(
@@ -64,6 +70,33 @@ bool checkedAdd(std::uint64_t& total, std::uint64_t value) {
         return false;
     }
     total += value;
+    return true;
+}
+
+bool validateValidatorReserveLockShape(
+    const protocol::TransactionV0& tx,
+    std::uint64_t transfer_fee_micro_units,
+    std::string& error) {
+    if (!isValidatorReserveLockV1(tx)) return true;
+    if (tx.inputs.size() != 1 || tx.outputs.size() != 1) {
+        error = "validator reserve lock requires one input and one output";
+        return false;
+    }
+    const auto& input = tx.inputs.front();
+    const auto& output = tx.outputs.front();
+    if (!protocol::isProtocolValidatorReserveAddress(output.receiver_address)) {
+        error = "validator reserve lock output must target a validator reserve address";
+        return false;
+    }
+    if (input.prime != output.prime || tx.fee.prime != input.prime) {
+        error = "validator reserve lock fee must use the locked prime asset";
+        return false;
+    }
+    if (tx.fee.amount.denominator != 1 ||
+        tx.fee.amount.numerator != transfer_fee_micro_units) {
+        error = "validator reserve lock fee must equal active protocol fee";
+        return false;
+    }
     return true;
 }
 
@@ -267,8 +300,8 @@ bool validateTransactionSignature(
         return true;
     }
     if (crypto::isProtocolSignatureAddress(tx.sender_address)) {
-        if (tx.version != 2) {
-            error = "authenticated transaction requires version 2";
+        if (tx.version != 2 && tx.version != kValidatorReserveLockTxVersion) {
+            error = "authenticated transaction requires version 2 or validator reserve-lock version 4";
             return false;
         }
         return protocol::verifyAuthenticatedTransactionSignature(tx, error);
@@ -949,6 +982,14 @@ std::vector<std::pair<PrimeValue, std::uint64_t>> SequentialNode::holdingsForAdd
     return out;
 }
 
+std::uint64_t SequentialNode::lockedValidatorReserveMicroUnits(const Address& validator_address) const {
+    std::uint64_t total = 0;
+    for (const auto& holding : holdingsForAddress(protocol::validatorReserveAddress(validator_address))) {
+        if (!checkedAdd(total, holding.second)) return std::numeric_limits<std::uint64_t>::max();
+    }
+    return total;
+}
+
 bool SequentialNode::validatePendingTransactions(
     const std::vector<protocol::TransactionV0>& transactions,
     std::string& error) {
@@ -986,7 +1027,8 @@ bool SequentialNode::applyTransactions(
                 error)) {
             return false;
         }
-        if (!validateAuthenticatedTransferShape(tx, transfer_fee_micro_units_, error)) {
+        if (!validateAuthenticatedTransferShape(tx, transfer_fee_micro_units_, error) ||
+            !validateValidatorReserveLockShape(tx, transfer_fee_micro_units_, error)) {
             return false;
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;

@@ -627,14 +627,34 @@ bool isProtocolFeePoolAddress(const Address& address) {
     });
 }
 
+std::optional<Address> validatorAddressFromReserveAddress(const Address& reserve_address) {
+    constexpr std::string_view prefix = "pcreserve_validator_";
+    if (reserve_address.size() <= prefix.size() ||
+        reserve_address.compare(0, prefix.size(), prefix.data(), prefix.size()) != 0) {
+        return std::nullopt;
+    }
+    Address validator_address = reserve_address.substr(prefix.size());
+    if (!crypto::isProtocolSignatureAddress(validator_address)) return std::nullopt;
+    return validator_address;
+}
+
+bool isProtocolValidatorReserveAddress(const Address& address) {
+    return validatorAddressFromReserveAddress(address).has_value();
+}
+
 bool isProtocolAddress(const Address& address) {
     return isDevelopmentAddress(address) ||
            isProtocolFeePoolAddress(address) ||
+           isProtocolValidatorReserveAddress(address) ||
            crypto::isProtocolSignatureAddress(address);
 }
 
 Address validatorFeePoolAddress(std::uint64_t validator_epoch) {
     return "pcpool_validator_fees_epoch_" + std::to_string(validator_epoch);
+}
+
+Address validatorReserveAddress(const Address& validator_address) {
+    return "pcreserve_validator_" + validator_address;
 }
 
 Address developmentAddressFromPublicKey(const Bytes& public_key) {

@@ -41,6 +41,7 @@ public:
     std::uint64_t accountNonce(const Address& address) const;
     std::vector<std::pair<PrimeValue, std::uint64_t>> holdingsForAddress(const Address& address) const;
     std::uint64_t totalSupplyMicroUnits(PrimeValue prime) const;
+    std::uint64_t lockedValidatorReserveMicroUnits(const Address& validator_address) const;
     bool validatePendingTransactions(
         const std::vector<protocol::TransactionV0>& transactions,
         std::string& error);

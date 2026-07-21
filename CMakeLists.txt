@@ -983,6 +983,11 @@ add_test(
 )
 
 add_test(
+    NAME validator_reserve_lock_on_chain
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/validator_reserve_lock_smoke.sh $<TARGET_FILE:primechain-client> $<TARGET_FILE:primechain-sync-server> $<TARGET_FILE:primechain-send> ${CMAKE_CURRENT_BINARY_DIR}/validator-reserve-lock
+)
+
+add_test(
     NAME finalization_round_change_recovers_stalled_candidate
     COMMAND
         /bin/sh -c
