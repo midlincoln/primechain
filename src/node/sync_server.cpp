@@ -4761,7 +4761,10 @@ private:
             return;
         }
 
+        revalidateMempool();
         auto record = makeCompositeRecord(node.status(), proof, provider_address);
+        std::vector<primechain::protocol::TransactionV0> included_transactions = mempool_;
+        record.transactions = included_transactions;
         if (quorumEnabled()) {
             record.version = 1;
             record.commit_phase = embeddedCommitPhaseCertificate(g);
@@ -4799,6 +4802,11 @@ private:
                 return;
             }
         }
+        if (!quorumEnabled()) {
+            primechain::protocol::applyDevelopmentFinalization(record);
+        } else {
+            primechain::protocol::updateTransactionBatch(record);
+        }
         error.clear();
         if (!node.appendComposite(record, error)) {
             writeAll(fd, "ERROR could not append composite record: " + error + "\n");
@@ -4808,6 +4816,7 @@ private:
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
+        removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
@@ -4978,8 +4987,11 @@ private:
             propagateSignedPrime(line);
         }
 
+        revalidateMempool();
         auto record = makePrimeRecord(
             node.status(), proof.p, proof, provider_address, authentication);
+        std::vector<primechain::protocol::TransactionV0> included_transactions = mempool_;
+        record.transactions = included_transactions;
         if (quorumEnabled()) record.version = 1;
         auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
         if (validator_epoch.epoch != 0) {
@@ -5009,6 +5021,11 @@ private:
                 return;
             }
         }
+        if (!quorumEnabled()) {
+            primechain::protocol::applyDevelopmentFinalization(record);
+        } else {
+            primechain::protocol::updateTransactionBatch(record);
+        }
         error.clear();
         if (!node.appendPrime(record, error)) {
             writeAll(fd, "ERROR could not append prime record: " + error + "\n");
@@ -5018,6 +5035,7 @@ private:
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
+        removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
         const auto stored = primechain::storage::makeStoredRecord(record);
