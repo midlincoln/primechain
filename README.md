@@ -408,10 +408,25 @@ The TCP node verifies the ML-DSA-65 signature, key-derived sender address,
 confirmed balance, fee conservation, and contiguous sender nonce before storing
 the transaction in its in-memory mempool. The input amount must equal outputs
 plus the fee for each prime asset. When an arithmetic record finalizes the
-batch, its proof provider receives the fees after all transactions are applied.
-Peers forward accepted transactions with the same `SUBMIT_TX` command.
-Duplicate hashes and conflicting sender nonces are rejected, and stale mempool
-entries are pruned after record acceptance or synchronization.
+batch, transaction fees are credited to the deterministic validator fee-pool
+address for the active validator epoch, for example
+`pcpool_validator_fees_epoch_0`. Peers forward accepted transactions with the
+same `SUBMIT_TX` command. Duplicate hashes and conflicting sender nonces are
+rejected, and stale mempool entries are pruned after record acceptance or
+synchronization.
+
+Validator fee-pool balances can be inspected and distributed by a protocol
+transaction. The distribution transaction has no wallet signature; replay
+accepts it only when it spends the full selected fee-pool asset balance and pays
+the active validator set by sorted address order. Validators with a zero share
+are omitted from the transaction outputs.
+
+```bash
+./build/primechain-client fee-pool ./data/send-chain.dat
+./build/primechain-send distribute-fee-pool 127.0.0.1 18889 \
+  0 401 2 1 \
+  pcpq1_validator_a pcpq1_validator_b pcpq1_validator_c
+```
 
 Create a cryptographic miner identity for signed composite mining:
 
@@ -1120,7 +1135,7 @@ Completed prototype milestones:
 - persistent validator anti-equivocation state in `.finalization` sidecars
 - signed 2-of-3 finalization round changes with embedded replay evidence
 - optional timeout-driven retry through `--finalization-timeout-ms`
-- operational transaction fees and contiguous sender nonces
+- operational transaction fees, validator fee pools, deterministic pool distribution, and contiguous sender nonces
 - NIST ML-DSA-65 signatures for transactions, miners, validators, epochs, and round changes
 - framed TCP messages for PQ-sized keys, signatures, and records
 - synchronized chain appends with incomplete-tail recovery

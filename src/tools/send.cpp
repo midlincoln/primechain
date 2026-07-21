@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -225,11 +226,88 @@ std::optional<primechain::protocol::TransactionV0> makeAuthenticatedTransferTran
     return tx;
 }
 
+std::optional<primechain::protocol::TransactionV0> makeFeePoolDistributionTransaction(
+    std::uint64_t epoch,
+    primechain::PrimeValue prime,
+    std::uint64_t amount,
+    std::uint64_t nonce,
+    std::vector<primechain::Address> validators,
+    std::string& error) {
+    if (prime < 2 || amount == 0 || validators.empty()) {
+        error = "invalid fee-pool distribution arguments";
+        return std::nullopt;
+    }
+    std::sort(validators.begin(), validators.end());
+    if (std::adjacent_find(validators.begin(), validators.end()) != validators.end()) {
+        error = "duplicate validator address";
+        return std::nullopt;
+    }
+    for (const auto& validator : validators) {
+        if (!primechain::crypto::isProtocolSignatureAddress(validator)) {
+            error = "validator recipient must be an ML-DSA-65 address";
+            return std::nullopt;
+        }
+    }
+
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 3;
+    tx.inputs.push_back({prime, {amount, 1}});
+    tx.fee = {prime, {0, 1}};
+    tx.nonce = nonce;
+    tx.sender_address = primechain::protocol::validatorFeePoolAddress(epoch);
+
+    const auto base_share = amount / validators.size();
+    const auto remainder = static_cast<std::size_t>(amount % validators.size());
+    tx.outputs.reserve(validators.size());
+    for (std::size_t i = 0; i < validators.size(); ++i) {
+        const auto share = base_share + (i < remainder ? 1 : 0);
+        if (share == 0) continue;
+        tx.outputs.push_back({prime, {share, 1}, validators[i]});
+    }
+    return tx;
+}
+
+bool submitTransaction(
+    const std::string& host,
+    int port,
+    const primechain::protocol::TransactionV0& tx) {
+    const std::string tx_hex = bytesToHex(primechain::protocol::serializeTransaction(tx, true));
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        return false;
+    }
+    if (!writeCommand(socket->fd(), "SUBMIT_TX " + tx_hex)) {
+        std::cerr << "could not send transaction\n";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    std::string response;
+    char buffer[4096];
+    while (true) {
+        const ssize_t received = recv(socket->fd(), buffer, sizeof(buffer), 0);
+        if (received == 0) {
+            break;
+        }
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "recv failed: " << std::strerror(errno) << "\n";
+            return false;
+        }
+        response.append(buffer, buffer + received);
+    }
+    std::cout << response;
+    return response.rfind("ERROR ", 0) != 0;
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " <limit> <text_log_path> <record_store_path> <sender.wallet> <receiver_address> <prime> <amount> <target_integer> [--composite-miner address]\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
+              << "  " << argv0 << " distribute-fee-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
               << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1 1\n";
@@ -270,35 +348,32 @@ int main(int argc, char** argv) {
             std::cerr << "could not sign transaction: " << error << "\n";
             return 1;
         }
-        const std::string tx_hex = bytesToHex(primechain::protocol::serializeTransaction(*tx, true));
-        auto socket = connectToServer(host, port);
-        if (!socket.has_value()) {
-            return 1;
-        }
-        if (!writeCommand(socket->fd(), "SUBMIT_TX " + tx_hex)) {
-            std::cerr << "could not send transaction\n";
-            return 1;
-        }
-        shutdown(socket->fd(), SHUT_WR);
+        return submitTransaction(host, port, *tx) ? 0 : 1;
+    }
 
-        std::string response;
-        char buffer[4096];
-        while (true) {
-            const ssize_t received = recv(socket->fd(), buffer, sizeof(buffer), 0);
-            if (received == 0) {
-                break;
-            }
-            if (received < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                std::cerr << "recv failed: " << std::strerror(errno) << "\n";
-                return 1;
-            }
-            response.append(buffer, buffer + received);
+    if (argc > 1 && std::string(argv[1]) == "distribute-fee-pool") {
+        if (argc < 9) {
+            printUsage(argv[0]);
+            return 1;
         }
-        std::cout << response;
-        return response.rfind("ERROR ", 0) == 0 ? 1 : 0;
+        const std::string host = argv[2];
+        const int port = std::stoi(argv[3]);
+        const auto epoch = static_cast<std::uint64_t>(std::stoull(argv[4]));
+        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[5]));
+        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[6]));
+        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        std::vector<primechain::Address> validators;
+        validators.reserve(static_cast<std::size_t>(argc - 8));
+        for (int i = 8; i < argc; ++i) validators.push_back(argv[i]);
+
+        std::string error;
+        const auto tx = makeFeePoolDistributionTransaction(
+            epoch, prime, amount, nonce, std::move(validators), error);
+        if (!tx.has_value()) {
+            std::cerr << "could not build fee-pool distribution transaction: " << error << "\n";
+            return 1;
+        }
+        return submitTransaction(host, port, *tx) ? 0 : 1;
     }
 
     if (argc != 9 && argc != 11) {

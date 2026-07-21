@@ -16,9 +16,17 @@ namespace primechain::node {
 namespace {
 
 constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
+constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
     return crypto::isProtocolSignatureAddress(tx.sender_address);
+}
+
+bool isFeePoolDistributionV1(
+    const protocol::TransactionV0& tx,
+    const Address& active_fee_pool_address) {
+    return tx.version == kFeePoolDistributionTxVersion &&
+           tx.sender_address == active_fee_pool_address;
 }
 
 bool validateAuthenticatedTransferShape(
@@ -56,6 +64,67 @@ bool checkedAdd(std::uint64_t& total, std::uint64_t value) {
         return false;
     }
     total += value;
+    return true;
+}
+
+bool validateFeePoolDistributionShape(
+    const protocol::TransactionV0& tx,
+    const Address& active_fee_pool_address,
+    const std::vector<Address>& validator_set,
+    std::uint64_t pool_balance_micro_units,
+    std::string& error) {
+    if (!isFeePoolDistributionV1(tx, active_fee_pool_address)) return true;
+    if (validator_set.empty()) {
+        error = "fee pool distribution requires an active validator set";
+        return false;
+    }
+    if (!tx.sender_public_key.empty() || !tx.signature.empty()) {
+        error = "fee pool distribution must not carry a wallet signature";
+        return false;
+    }
+    if (tx.inputs.size() != 1) {
+        error = "fee pool distribution must spend one asset";
+        return false;
+    }
+    if (tx.fee.prime != tx.inputs.front().prime ||
+        tx.fee.amount.numerator != 0 ||
+        tx.fee.amount.denominator != 1) {
+        error = "fee pool distribution must have zero fee in the distributed asset";
+        return false;
+    }
+    const auto distributed = microUnits(tx.inputs.front().amount);
+    if (!distributed.has_value()) {
+        error = "fee pool distribution input must be positive integer micro-units";
+        return false;
+    }
+    if (*distributed != pool_balance_micro_units) {
+        error = "fee pool distribution must spend the full active pool balance";
+        return false;
+    }
+
+    const auto base_share = *distributed / validator_set.size();
+    const auto remainder = static_cast<std::size_t>(*distributed % validator_set.size());
+    std::size_t output_index = 0;
+    for (std::size_t i = 0; i < validator_set.size(); ++i) {
+        const auto expected_share = base_share + (i < remainder ? 1 : 0);
+        if (expected_share == 0) continue;
+        if (output_index >= tx.outputs.size()) {
+            error = "fee pool distribution is missing validator outputs";
+            return false;
+        }
+        const auto& output = tx.outputs[output_index++];
+        if (output.receiver_address != validator_set[i] ||
+            output.prime != tx.inputs.front().prime ||
+            output.amount.denominator != 1 ||
+            output.amount.numerator != expected_share) {
+            error = "fee pool distribution outputs do not match deterministic validator split";
+            return false;
+        }
+    }
+    if (output_index != tx.outputs.size()) {
+        error = "fee pool distribution has extra validator outputs";
+        return false;
+    }
     return true;
 }
 
@@ -187,8 +256,16 @@ bool validatePrimeProviderSignature(
 
 bool validateTransactionSignature(
     const protocol::TransactionV0& tx,
+    const Address& active_fee_pool_address,
     bool allow_development,
     std::string& error) {
+    if (isFeePoolDistributionV1(tx, active_fee_pool_address)) {
+        if (!tx.sender_public_key.empty() || !tx.signature.empty()) {
+            error = "fee pool distribution must not be wallet-signed";
+            return false;
+        }
+        return true;
+    }
     if (crypto::isProtocolSignatureAddress(tx.sender_address)) {
         if (tx.version != 2) {
             error = "authenticated transaction requires version 2";
@@ -891,7 +968,8 @@ bool SequentialNode::applyTransactions(
     std::string& error) {
     std::map<PrimeValue, std::uint64_t> collected_fees;
     for (const auto& tx : transactions) {
-        if (!validateTransactionSignature(tx, validator_set_.empty(), error)) {
+        const auto active_fee_pool_address = validatorFeePoolAddress();
+        if (!validateTransactionSignature(tx, active_fee_pool_address, validator_set_.empty(), error)) {
             error = "invalid transaction signature: " + error;
             return false;
         }
@@ -899,12 +977,23 @@ bool SequentialNode::applyTransactions(
             error = "transaction must have inputs and outputs";
             return false;
         }
+        const bool fee_pool_distribution =
+            isFeePoolDistributionV1(tx, active_fee_pool_address);
+        if (fee_pool_distribution &&
+            !validateFeePoolDistributionShape(
+                tx, active_fee_pool_address, validator_set_,
+                balanceMicroUnits(active_fee_pool_address, tx.inputs.front().prime),
+                error)) {
+            return false;
+        }
         if (!validateAuthenticatedTransferShape(tx, transfer_fee_micro_units_, error)) {
             return false;
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;
         if (expected_nonce == 0 || tx.nonce != expected_nonce) {
-            error = "transaction nonce must be the next sender nonce";
+            error = fee_pool_distribution
+                ? "fee pool distribution nonce must be the next pool nonce"
+                : "transaction nonce must be the next sender nonce";
             return false;
         }
         if (tx.fee.amount.denominator != 1 ||

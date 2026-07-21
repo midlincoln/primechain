@@ -2234,7 +2234,8 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        if (!primechain::protocol::verifyAuthenticatedTransactionSignature(*tx, error)) {
+        if (!primechain::protocol::isProtocolFeePoolAddress(tx->sender_address) &&
+            !primechain::protocol::verifyAuthenticatedTransactionSignature(*tx, error)) {
             writeAll(fd, "ERROR invalid transaction signature: " + error + "\n");
             return;
         }
