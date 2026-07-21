@@ -1,6 +1,7 @@
 #include "primechain/protocol/records.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <sstream>
 #include <set>
@@ -615,8 +616,25 @@ bool isDevelopmentAddress(const Address& address) {
     });
 }
 
+bool isProtocolFeePoolAddress(const Address& address) {
+    constexpr std::string_view prefix = "pcpool_validator_fees_epoch_";
+    if (address.size() <= prefix.size() ||
+        address.compare(0, prefix.size(), prefix.data(), prefix.size()) != 0) {
+        return false;
+    }
+    return std::all_of(address.begin() + static_cast<std::ptrdiff_t>(prefix.size()), address.end(), [](unsigned char ch) {
+        return ch >= '0' && ch <= '9';
+    });
+}
+
 bool isProtocolAddress(const Address& address) {
-    return isDevelopmentAddress(address) || crypto::isProtocolSignatureAddress(address);
+    return isDevelopmentAddress(address) ||
+           isProtocolFeePoolAddress(address) ||
+           crypto::isProtocolSignatureAddress(address);
+}
+
+Address validatorFeePoolAddress(std::uint64_t validator_epoch) {
+    return "pcpool_validator_fees_epoch_" + std::to_string(validator_epoch);
 }
 
 Address developmentAddressFromPublicKey(const Bytes& public_key) {

@@ -667,7 +667,6 @@ int rewardsWorkdir(int argc, char** argv) {
                 return 1;
             }
             if (record->proof.provider_address == *composite_address) ++summary.composite_records;
-            if (record->proof.provider_address == *composite_address) summary.fee_micro_units += transactionFees(record->transactions);
             pending_composite_providers.push_back(record->proof.provider_address);
             continue;
         }
@@ -677,7 +676,6 @@ int rewardsWorkdir(int argc, char** argv) {
             std::cerr << "could not decode prime record: " << error << "\n";
             return 1;
         }
-        if (record->proof.provider_address == *prime_address) summary.fee_micro_units += transactionFees(record->transactions);
         if (record->proof.provider_address == *prime_address) ++summary.prime_records;
 
         if (pending_composite_providers.empty()) {
@@ -851,9 +849,8 @@ void addDiscoveryReward(
 
 void addFeeReward(
     BoardReportStats& stats,
-    const primechain::Address& address,
+    const primechain::Address& /*address*/,
     std::uint64_t micro_units) {
-    stats.miners[address].fee_micro_units += micro_units;
     stats.fee_micro_units += micro_units;
 }
 
@@ -1277,6 +1274,38 @@ int economicPolicy(int argc, char** argv) {
     return 0;
 }
 
+int feePool(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string store_path = argv[2];
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "fee_pool_error: " << error << "\n";
+        return 1;
+    }
+
+    const std::uint64_t epoch = argc == 4 ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+                                         : node.validatorEpoch();
+    const auto pool_address = primechain::protocol::validatorFeePoolAddress(epoch);
+    const auto holdings = node.holdingsForAddress(pool_address);
+
+    std::uint64_t total_micro_units = 0;
+    for (const auto& holding : holdings) total_micro_units += holding.second;
+
+    std::cout << "VALIDATOR_FEE_POOL " << store_path
+              << " epoch=" << epoch
+              << " address=" << pool_address
+              << " holdings=" << holdings.size()
+              << " total_micro_units=" << total_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "FEE_POOL_HOLDING epoch=" << epoch
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    return 0;
+}
+
 int validatorReputation(int argc, char** argv) {
     if (argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -1310,7 +1339,6 @@ int validatorReputation(int argc, char** argv) {
             }
             if (record->proof.provider_address == address) {
                 ++composite_records;
-                fee_micro_units += transactionFees(record->transactions);
             }
             for (const auto& vote : record->commit_phase.votes) {
                 if (vote.validator_address == address) ++commit_phase_votes;
@@ -1335,7 +1363,6 @@ int validatorReputation(int argc, char** argv) {
         }
         if (record->proof.provider_address == address) {
             ++prime_records;
-            fee_micro_units += transactionFees(record->transactions);
         }
         for (const auto& vote : record->finalized_by.votes) {
             if (vote.validator_address == address) ++finalization_votes;
@@ -1823,6 +1850,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-registry <record-store>\n"
               << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " economic-policy <record-store>\n"
+              << "  " << argv0 << " fee-pool <record-store> [epoch]\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -1915,6 +1943,10 @@ int main(int argc, char** argv) {
     if (command == "economic-policy") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return economicPolicy(argc, argv);
+    }
+    if (command == "fee-pool") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return feePool(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

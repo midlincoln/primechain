@@ -47,6 +47,7 @@ public:
     const std::vector<Address>& validatorSet() const { return validator_set_; }
     std::uint64_t validatorEpoch() const { return validator_epoch_; }
     std::uint64_t transferFeeMicroUnits() const { return transfer_fee_micro_units_; }
+    Address validatorFeePoolAddress() const;
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:

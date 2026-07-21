@@ -404,8 +404,12 @@ int main(int argc, char** argv) {
     if (!expect(tx_reloaded.balanceMicroUnits(miner_address, 3) == 648000, "miner paid transfers and fees")) {
         return 1;
     }
-    if (!expect(tx_reloaded.balanceMicroUnits("pcdev1_composite_miner", 3) == 2000,
-                "record producer received transaction fees")) {
+    if (!expect(tx_reloaded.balanceMicroUnits("pcdev1_composite_miner", 3) == 0,
+                "record producer does not receive transaction fees directly")) {
+        return 1;
+    }
+    if (!expect(tx_reloaded.balanceMicroUnits(primechain::protocol::validatorFeePoolAddress(0), 3) == 2000,
+                "validator fee pool received transaction fees")) {
         return 1;
     }
     if (!expect(tx_reloaded.accountNonce(miner_address) == 2, "sender nonce reconstructs during replay")) {

@@ -513,7 +513,7 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, decoded->proof.provider_address, error) ||
+                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
                 !applyCompositeLedger(*decoded, error)) {
                 return false;
             }
@@ -547,7 +547,7 @@ bool SequentialNode::load(std::string& error) {
                 return false;
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, decoded->proof.provider_address, error) ||
+                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
                 !applyPrimeLedger(*decoded, error)) {
                 return false;
             }
@@ -633,7 +633,7 @@ bool SequentialNode::validateCompositeCandidate(
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, record.proof.provider_address, error) &&
+    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), error) &&
         applyCompositeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
@@ -672,7 +672,7 @@ bool SequentialNode::validatePrimeCandidate(
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, record.proof.provider_address, error) &&
+    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), error) &&
         applyPrimeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
@@ -692,7 +692,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
     const auto fee_before = transfer_fee_micro_units_;
-    if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
+    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
@@ -735,7 +735,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
     const auto fee_before = transfer_fee_micro_units_;
-    if (!applyTransactions(record.transactions, record.proof.provider_address, error) ||
+    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
@@ -848,6 +848,10 @@ std::uint64_t SequentialNode::balanceMicroUnits(const Address& address, PrimeVal
 std::uint64_t SequentialNode::accountNonce(const Address& address) const {
     const auto found = account_nonces_.find(address);
     return found == account_nonces_.end() ? 0 : found->second;
+}
+
+Address SequentialNode::validatorFeePoolAddress() const {
+    return protocol::validatorFeePoolAddress(validator_epoch_);
 }
 
 std::uint64_t SequentialNode::totalSupplyMicroUnits(PrimeValue prime) const {
