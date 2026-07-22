@@ -140,6 +140,18 @@ struct ValidatorEndpointUpdateV1 {
     Bytes signature;
 };
 
+struct ValidatorApplicationV1 {
+    Address candidate_address;
+    std::string host;
+    std::uint64_t port{0};
+    PrimeValue record_integer{0};
+    std::uint64_t sequence{0};
+    std::uint64_t observed_successful{0};
+    std::uint64_t observed_total{0};
+    Bytes public_key;
+    Bytes signature;
+};
+
 struct EconomicPolicyVoteV1 {
     Address validator_address;
     Bytes public_key;
@@ -166,6 +178,7 @@ struct CompositeRecordV0 {
     ValidatorEpochTransitionV1 validator_epoch;
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     EconomicPolicyUpdateV1 economic_policy;
+    std::vector<ValidatorApplicationV1> validator_applications;
     FinalizationProofV0 finalized_by;
 };
 
@@ -182,6 +195,7 @@ struct PrimeRecordV0 {
     ValidatorEpochTransitionV1 validator_epoch;
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     EconomicPolicyUpdateV1 economic_policy;
+    std::vector<ValidatorApplicationV1> validator_applications;
     FinalizationProofV0 finalized_by;
 };
 
@@ -263,6 +277,11 @@ bool verifyValidatorEndpointUpdates(
 bool verifyEconomicPolicyUpdate(
     const EconomicPolicyUpdateV1& update,
     const std::vector<Address>& current_validator_set,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error);
+bool verifyValidatorApplications(
+    const std::vector<ValidatorApplicationV1>& applications,
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::string& error);

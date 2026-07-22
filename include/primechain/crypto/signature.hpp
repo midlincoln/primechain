@@ -112,6 +112,15 @@ Bytes validatorEndpointSigningPayload(
     std::uint64_t port,
     PrimeValue effective_integer,
     std::uint64_t sequence);
+Bytes validatorApplicationSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& candidate_address,
+    const std::string& host,
+    std::uint64_t port,
+    std::uint64_t sequence,
+    std::uint64_t observed_successful,
+    std::uint64_t observed_total);
 Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

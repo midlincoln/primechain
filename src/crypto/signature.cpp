@@ -368,6 +368,28 @@ Bytes validatorEndpointSigningPayload(
     return payload;
 }
 
+Bytes validatorApplicationSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& candidate_address,
+    const std::string& host,
+    std::uint64_t port,
+    std::uint64_t sequence,
+    std::uint64_t observed_successful,
+    std::uint64_t observed_total) {
+    Bytes payload;
+    appendString(payload, "primechain-validator-application-mldsa65-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, record_integer);
+    appendString(payload, candidate_address);
+    appendString(payload, host);
+    appendUint64(payload, port);
+    appendUint64(payload, sequence);
+    appendUint64(payload, observed_successful);
+    appendUint64(payload, observed_total);
+    return payload;
+}
+
 Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

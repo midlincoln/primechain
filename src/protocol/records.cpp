@@ -26,6 +26,7 @@ constexpr std::uint64_t kMaxDecodedTransactions = 10000;
 constexpr std::uint64_t kMaxDecodedTxInputs = 1024;
 constexpr std::uint64_t kMaxDecodedTxOutputs = 1024;
 constexpr std::uint64_t kMaxDecodedValidatorEndpointUpdates = 64;
+constexpr std::uint64_t kMaxDecodedValidatorApplications = 64;
 constexpr std::uint64_t kMaxDecodedEconomicPolicyVotes = 64;
 
 bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
@@ -39,6 +40,14 @@ bool hasQuorumVoteCount(std::size_t vote_count, std::size_t validator_count) {
     return vote_count >= core::requiredValidatorQuorum(validator_count) &&
            vote_count <= validator_count;
 }
+
+class ByteReader;
+void appendValidatorApplications(
+    std::vector<std::uint8_t>& out,
+    const std::vector<ValidatorApplicationV1>& applications);
+bool readValidatorApplications(
+    ByteReader& reader,
+    std::vector<ValidatorApplicationV1>& applications);
 
 class ByteReader {
 public:
@@ -293,6 +302,23 @@ void appendValidatorEndpointUpdates(
     }
 }
 
+void appendValidatorApplications(
+    std::vector<std::uint8_t>& out,
+    const std::vector<ValidatorApplicationV1>& applications) {
+    appendUint64(out, applications.size());
+    for (const auto& application : applications) {
+        appendAddress(out, application.candidate_address);
+        appendString(out, application.host);
+        appendUint64(out, application.port);
+        appendUint64(out, application.record_integer);
+        appendUint64(out, application.sequence);
+        appendUint64(out, application.observed_successful);
+        appendUint64(out, application.observed_total);
+        appendBytes(out, application.public_key);
+        appendBytes(out, application.signature);
+    }
+}
+
 void appendEconomicPolicyUpdate(
     std::vector<std::uint8_t>& out,
     const EconomicPolicyUpdateV1& update) {
@@ -472,6 +498,29 @@ bool readValidatorEndpointUpdates(
     return true;
 }
 
+bool readValidatorApplications(
+    ByteReader& reader,
+    std::vector<ValidatorApplicationV1>& applications) {
+    std::uint64_t count = 0;
+    if (!reader.readUint64(count) || count > kMaxDecodedValidatorApplications) return false;
+    applications.clear();
+    applications.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        ValidatorApplicationV1 application;
+        if (!reader.readString(application.candidate_address) ||
+            !reader.readString(application.host) ||
+            !reader.readUint64(application.port) ||
+            !reader.readUint64(application.record_integer) ||
+            !reader.readUint64(application.sequence) ||
+            !reader.readUint64(application.observed_successful) ||
+            !reader.readUint64(application.observed_total) ||
+            !reader.readBytes(application.public_key) ||
+            !reader.readBytes(application.signature)) return false;
+        applications.push_back(std::move(application));
+    }
+    return true;
+}
+
 bool readEconomicPolicyUpdate(
     ByteReader& reader,
     EconomicPolicyUpdateV1& update) {
@@ -531,11 +580,19 @@ bool readOptionalMetadataAndFinalization(
     std::uint64_t version,
     std::vector<ValidatorEndpointUpdateV1>& updates,
     EconomicPolicyUpdateV1& policy,
+    std::vector<ValidatorApplicationV1>& applications,
     FinalizationProofV0& finalization) {
     policy = {};
+    applications.clear();
     if (version < 3) {
         updates.clear();
         return readFinalizationProof(reader, finalization);
+    }
+    if (version >= 5) {
+        return readValidatorEndpointUpdates(reader, updates) &&
+               readEconomicPolicyUpdate(reader, policy) &&
+               readValidatorApplications(reader, applications) &&
+               readFinalizationProof(reader, finalization);
     }
     if (version >= 4) {
         return readValidatorEndpointUpdates(reader, updates) &&
@@ -576,6 +633,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -597,6 +655,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -762,7 +821,8 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
         !readOptionalMetadataAndFinalization(
-            reader, record.version, record.validator_endpoints, record.economic_policy, record.finalized_by)) {
+            reader, record.version, record.validator_endpoints, record.economic_policy,
+            record.validator_applications, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -800,6 +860,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         record.validator_epoch = {};
         record.validator_endpoints.clear();
         record.economic_policy = {};
+        record.validator_applications.clear();
         record.finalized_by = {};
         if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config)) {
             return false;
@@ -810,7 +871,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         }
         if (!readOptionalMetadataAndFinalization(
                 candidate_reader, record.version, record.validator_endpoints,
-                record.economic_policy, record.finalized_by) ||
+                record.economic_policy, record.validator_applications, record.finalized_by) ||
             !candidate_reader.consumed()) {
             return false;
         }
@@ -884,6 +945,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     return out;
 }
 
@@ -902,6 +964,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     return out;
 }
 
@@ -946,7 +1009,8 @@ bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record,
     std::string& error) {
     if (record.version == 0) return true;
-    if (record.version != 1 && record.version != 2 && record.version != 3) {
+    if (record.version != 1 && record.version != 2 && record.version != 3 &&
+        record.version != 4 && record.version != 5) {
         error = "unsupported composite record version";
         return false;
     }
@@ -1045,7 +1109,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4) ||
+        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5) ||
             !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
@@ -1445,6 +1509,43 @@ bool verifyEconomicPolicyUpdate(
                     update.effective_integer, update.sequence, vote.validator_address),
                 vote.signature, signature_error)) {
             error = "invalid economic policy vote signature";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyValidatorApplications(
+    const std::vector<ValidatorApplicationV1>& applications,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error) {
+    Address previous_candidate;
+    for (const auto& application : applications) {
+        if (!previous_candidate.empty() && previous_candidate >= application.candidate_address) {
+            error = "validator applications are not canonical";
+            return false;
+        }
+        previous_candidate = application.candidate_address;
+        if (!crypto::isProtocolSignatureAddress(application.candidate_address) ||
+            application.candidate_address != crypto::addressFromProtocolPublicKey(application.public_key)) {
+            error = "validator application address mismatch";
+            return false;
+        }
+        if (!validValidatorEndpointHost(application.host) || application.port == 0 || application.port > 65535 ||
+            application.record_integer != record_integer) {
+            error = "validator application does not match record metadata";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::verifyProtocolMessageSignature(
+                application.public_key,
+                crypto::validatorApplicationSigningPayload(
+                    previous_record_hash, record_integer, application.candidate_address,
+                    application.host, application.port, application.sequence,
+                    application.observed_successful, application.observed_total),
+                application.signature, signature_error)) {
+            error = "invalid validator application signature";
             return false;
         }
     }

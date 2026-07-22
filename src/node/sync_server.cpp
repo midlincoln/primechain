@@ -30,6 +30,7 @@
 #include "primechain/math/number_theory.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
+#include "primechain/protocol/validator_governance.hpp"
 #include "primechain/storage/commitment_store.hpp"
 #include "primechain/storage/finalization_store.hpp"
 #include "primechain/storage/phase_store.hpp"
@@ -91,6 +92,11 @@ struct SignedCompositeReveal {
     primechain::Address provider_address;
     std::vector<std::uint8_t> public_key;
     std::vector<std::uint8_t> signature;
+};
+
+struct ValidatorCandidateStats {
+    std::uint64_t prime_records{0};
+    std::uint64_t composite_records{0};
 };
 
 bool samePeer(const PeerEndpoint& left, const PeerEndpoint& right) {
@@ -1501,6 +1507,18 @@ public:
             }
             if (line->rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0) {
                 submitEpochVote(fd, *line, false);
+                continue;
+            }
+            if (*line == "GET_VALIDATOR_APPLICATIONS") {
+                sendValidatorApplications(fd);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_APPLICATION ", 0) == 0) {
+                submitValidatorApplication(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_APPLICATION_PEER ", 0) == 0) {
+                submitValidatorApplication(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_VALIDATOR_ENDPOINT ", 0) == 0) {
@@ -3952,6 +3970,17 @@ private:
                 return;
             }
         }
+        std::vector<primechain::Address> added_validators;
+        std::set_difference(
+            record.next_validator_set.begin(), record.next_validator_set.end(),
+            node.validatorSet().begin(), node.validatorSet().end(),
+            std::back_inserter(added_validators));
+        for (const auto& candidate : added_validators) {
+            if (!validatorAdmissionEligible(node, candidate, error)) {
+                writeAll(fd, "ERROR candidate validator admission failed: " + error + "\n");
+                return;
+            }
+        }
         const auto found = epoch_votes_.find(voter);
         if (found != epoch_votes_.end()) {
             if (found->second.vote.signature == record.vote.signature) {
@@ -4128,6 +4157,195 @@ private:
             " votes=" + std::to_string(policy_votes_.size()) + "\n");
     }
 
+    std::map<primechain::Address, primechain::protocol::ValidatorApplicationV1> validatorApplicationsFromChain() const {
+        std::map<primechain::Address, primechain::protocol::ValidatorApplicationV1> out;
+        primechain::storage::RecordStore store(store_path_);
+        std::string error;
+        const auto records = store.loadAll(error);
+        if (!error.empty()) return out;
+        for (const auto& stored : records) {
+            if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+                const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+                if (!record.has_value()) return out;
+                for (const auto& application : record->validator_applications) out[application.candidate_address] = application;
+                continue;
+            }
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) return out;
+            for (const auto& application : record->validator_applications) out[application.candidate_address] = application;
+        }
+        return out;
+    }
+
+    ValidatorCandidateStats validatorCandidateStatsFromChain(const primechain::Address& candidate) const {
+        ValidatorCandidateStats stats;
+        primechain::storage::RecordStore store(store_path_);
+        std::string error;
+        const auto records = store.loadAll(error);
+        if (!error.empty()) return stats;
+        for (const auto& stored : records) {
+            if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+                const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+                if (!record.has_value()) return stats;
+                if (record->proof.provider_address == candidate) ++stats.prime_records;
+                continue;
+            }
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) return stats;
+            if (record->proof.provider_address == candidate) ++stats.composite_records;
+        }
+        return stats;
+    }
+
+    std::optional<primechain::protocol::ValidatorApplicationV1> validatorApplicationFor(
+            const primechain::Address& candidate) const {
+        const auto pending = pending_validator_applications_.find(candidate);
+        if (pending != pending_validator_applications_.end()) return pending->second;
+        const auto chain = validatorApplicationsFromChain();
+        const auto found = chain.find(candidate);
+        if (found != chain.end()) return found->second;
+        return std::nullopt;
+    }
+
+    bool validatorAdmissionEligible(
+            const primechain::node::SequentialNode& node,
+            const primechain::Address& candidate,
+            std::string& error) const {
+        const auto application = validatorApplicationFor(candidate);
+        if (!application.has_value()) {
+            error = "candidate has no validator application";
+            return false;
+        }
+        const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+        const ValidatorCandidateStats raw_stats = validatorCandidateStatsFromChain(candidate);
+        const primechain::protocol::ValidatorWorkStatsV0 work_stats{
+            raw_stats.prime_records,
+            raw_stats.composite_records,
+            0};
+        if (!primechain::protocol::validatorMeetsWorkMinimumV0(work_stats, policy)) {
+            error = "candidate does not meet validator work minimum";
+            return false;
+        }
+        if (!primechain::protocol::validatorMeetsReserveMinimumV0(
+                node.lockedValidatorReserveMicroUnits(candidate), policy)) {
+            error = "candidate does not meet validator reserve minimum";
+            return false;
+        }
+        if (!primechain::protocol::validatorMeetsEndpointUptimeMinimumV0(
+                application->observed_successful, application->observed_total, policy)) {
+            error = "candidate does not meet endpoint observation minimum";
+            return false;
+        }
+        return true;
+    }
+
+    std::vector<primechain::protocol::ValidatorApplicationV1> embeddedValidatorApplicationsForNextRecord(
+            const primechain::node::SequentialNode& node) {
+        std::vector<primechain::protocol::ValidatorApplicationV1> out;
+        for (auto it = pending_validator_applications_.begin(); it != pending_validator_applications_.end();) {
+            const auto& application = it->second;
+            if (application.record_integer < node.status().frontier_integer + 1) {
+                it = pending_validator_applications_.erase(it);
+                continue;
+            }
+            if (application.record_integer == node.status().frontier_integer + 1) out.push_back(application);
+            ++it;
+        }
+        std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
+            return left.candidate_address < right.candidate_address;
+        });
+        return out;
+    }
+
+    void sendValidatorApplications(int fd) const {
+        auto applications = validatorApplicationsFromChain();
+        for (const auto& pending : pending_validator_applications_) applications[pending.first] = pending.second;
+        writeAll(fd, "VALIDATOR_APPLICATIONS " + std::to_string(applications.size()) + "\n");
+        for (const auto& entry : applications) {
+            const auto& application = entry.second;
+            writeCommand(fd, "VALIDATOR_APPLICATION " + application.candidate_address + " " +
+                application.host + " " + std::to_string(application.port) + " " +
+                std::to_string(application.record_integer) + " " + std::to_string(application.sequence) + " " +
+                std::to_string(application.observed_successful) + " " +
+                std::to_string(application.observed_total) + " " +
+                bytesToHex(application.public_key) + " " + bytesToHex(application.signature) + "\n");
+        }
+        writeAll(fd, "END_VALIDATOR_APPLICATIONS\n");
+    }
+
+    void submitValidatorApplication(int fd, const std::string& line, bool propagate) {
+        std::istringstream in(line);
+        std::string command, previous_hex, public_hex, signature_hex, extra;
+        primechain::protocol::ValidatorApplicationV1 application;
+        in >> command >> previous_hex >> application.record_integer >> application.candidate_address
+           >> application.host >> application.port >> application.sequence
+           >> application.observed_successful >> application.observed_total
+           >> public_hex >> signature_hex;
+        const auto previous = parseHash(previous_hex);
+        if (!in || (in >> extra) ||
+            (command != "SUBMIT_VALIDATOR_APPLICATION" && command != "SUBMIT_VALIDATOR_APPLICATION_PEER") ||
+            !previous.has_value()) {
+            writeAll(fd, "ERROR invalid SUBMIT_VALIDATOR_APPLICATION\n");
+            return;
+        }
+        application.public_key = hexToBytes(public_hex);
+        application.signature = hexToBytes(signature_hex);
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
+        if (*previous != node.status().latest_record_hash ||
+            application.record_integer != node.status().frontier_integer + 1) {
+            writeAll(fd, "ERROR validator application does not match current chain state\n");
+            return;
+        }
+        if (std::binary_search(node.validatorSet().begin(), node.validatorSet().end(), application.candidate_address)) {
+            writeAll(fd, "ERROR candidate is already an active validator\n");
+            return;
+        }
+        if (!primechain::protocol::verifyValidatorApplications(
+                std::vector<primechain::protocol::ValidatorApplicationV1>{application},
+                *previous, application.record_integer, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto found = pending_validator_applications_.find(application.candidate_address);
+        if (found != pending_validator_applications_.end() && found->second.sequence > application.sequence) {
+            writeAll(fd, "ERROR stale validator application sequence\n");
+            return;
+        }
+        pending_validator_applications_[application.candidate_address] = application;
+        if (propagate) {
+            for (const auto& peer : peers_) {
+                std::ostringstream command_out;
+                command_out << "SUBMIT_VALIDATOR_APPLICATION_PEER " << previous_hex << " "
+                            << application.record_integer << " " << application.candidate_address << " "
+                            << application.host << " " << application.port << " "
+                            << application.sequence << " " << application.observed_successful << " "
+                            << application.observed_total << " " << public_hex << " " << signature_hex << "\n";
+                std::string peer_error;
+                auto socket = connectToServer(peer.host, peer.port);
+                if (!socket.has_value()) {
+                    peer_error = "could not connect to peer";
+                } else if (!writeCommand(socket->fd(), command_out.str())) {
+                    peer_error = "could not submit validator application";
+                } else {
+                    const auto response = readLine(socket->fd());
+                    if (!response.has_value() ||
+                        response->rfind("VALIDATOR_APPLICATION_ACCEPTED ", 0) != 0) {
+                        peer_error = response.has_value() ? *response : "peer did not return application response";
+                    }
+                }
+                if (!peer_error.empty()) {
+                    std::cerr << "validator application propagation warning to " << peer.host << ":"
+                              << peer.port << ": " << peer_error << "\n";
+                }
+            }
+        }
+        writeAll(fd, "VALIDATOR_APPLICATION_ACCEPTED " + application.candidate_address +
+            " " + application.host + " " + std::to_string(application.port) +
+            " sequence=" + std::to_string(application.sequence) + "\n");
+    }
+
     void submitValidatorEndpoint(int fd, const std::string& line, bool propagate) {
         std::istringstream in(line);
         std::string command, previous_hex, public_hex, signature_hex, extra;
@@ -4205,6 +4423,10 @@ private:
 
     void clearEndpointUpdatesAfterRecord() {
         pending_endpoint_updates_.clear();
+    }
+
+    void clearValidatorApplicationsAfterRecord() {
+        pending_validator_applications_.clear();
     }
 
     void clearPolicyVotesAfterRecord() {
@@ -4784,6 +5006,11 @@ private:
                 record.version = 4;
                 record.economic_policy = std::move(economic_policy);
             }
+            auto validator_applications = embeddedValidatorApplicationsForNextRecord(node);
+            if (!validator_applications.empty()) {
+                record.version = 5;
+                record.validator_applications = std::move(validator_applications);
+            }
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
@@ -4817,6 +5044,7 @@ private:
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
+        clearValidatorApplicationsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
@@ -5036,6 +5264,7 @@ private:
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
+        clearValidatorApplicationsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
@@ -5361,6 +5590,7 @@ private:
         SignedCompositeReveal> pending_reveals_;
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
+    std::map<primechain::Address, primechain::protocol::ValidatorApplicationV1> pending_validator_applications_;
     std::map<primechain::Address, EconomicPolicyVoteRecord> policy_votes_;
     std::mutex finalization_mutex_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
