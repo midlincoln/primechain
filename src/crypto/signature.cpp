@@ -390,6 +390,22 @@ Bytes validatorApplicationSigningPayload(
     return payload;
 }
 
+Bytes validatorWorkBindingMinerSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& candidate_address,
+    const Address& miner_address,
+    std::uint64_t sequence) {
+    Bytes payload;
+    appendString(payload, "primechain-validator-work-binding-miner-mldsa65-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, record_integer);
+    appendString(payload, candidate_address);
+    appendString(payload, miner_address);
+    appendUint64(payload, sequence);
+    return payload;
+}
+
 Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

@@ -27,6 +27,7 @@ constexpr std::uint64_t kMaxDecodedTxInputs = 1024;
 constexpr std::uint64_t kMaxDecodedTxOutputs = 1024;
 constexpr std::uint64_t kMaxDecodedValidatorEndpointUpdates = 64;
 constexpr std::uint64_t kMaxDecodedValidatorApplications = 64;
+constexpr std::uint64_t kMaxDecodedValidatorWorkBindings = 64;
 constexpr std::uint64_t kMaxDecodedEconomicPolicyVotes = 64;
 
 bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
@@ -48,6 +49,12 @@ void appendValidatorApplications(
 bool readValidatorApplications(
     ByteReader& reader,
     std::vector<ValidatorApplicationV1>& applications);
+void appendValidatorWorkBindings(
+    std::vector<std::uint8_t>& out,
+    const std::vector<ValidatorWorkBindingV1>& bindings);
+bool readValidatorWorkBindings(
+    ByteReader& reader,
+    std::vector<ValidatorWorkBindingV1>& bindings);
 
 class ByteReader {
 public:
@@ -319,6 +326,20 @@ void appendValidatorApplications(
     }
 }
 
+void appendValidatorWorkBindings(
+    std::vector<std::uint8_t>& out,
+    const std::vector<ValidatorWorkBindingV1>& bindings) {
+    appendUint64(out, bindings.size());
+    for (const auto& binding : bindings) {
+        appendAddress(out, binding.candidate_address);
+        appendAddress(out, binding.miner_address);
+        appendUint64(out, binding.record_integer);
+        appendUint64(out, binding.sequence);
+        appendBytes(out, binding.miner_public_key);
+        appendBytes(out, binding.miner_signature);
+    }
+}
+
 void appendEconomicPolicyUpdate(
     std::vector<std::uint8_t>& out,
     const EconomicPolicyUpdateV1& update) {
@@ -521,6 +542,26 @@ bool readValidatorApplications(
     return true;
 }
 
+bool readValidatorWorkBindings(
+    ByteReader& reader,
+    std::vector<ValidatorWorkBindingV1>& bindings) {
+    std::uint64_t count = 0;
+    if (!reader.readUint64(count) || count > kMaxDecodedValidatorWorkBindings) return false;
+    bindings.clear();
+    bindings.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        ValidatorWorkBindingV1 binding;
+        if (!reader.readString(binding.candidate_address) ||
+            !reader.readString(binding.miner_address) ||
+            !reader.readUint64(binding.record_integer) ||
+            !reader.readUint64(binding.sequence) ||
+            !reader.readBytes(binding.miner_public_key) ||
+            !reader.readBytes(binding.miner_signature)) return false;
+        bindings.push_back(std::move(binding));
+    }
+    return true;
+}
+
 bool readEconomicPolicyUpdate(
     ByteReader& reader,
     EconomicPolicyUpdateV1& update) {
@@ -581,12 +622,21 @@ bool readOptionalMetadataAndFinalization(
     std::vector<ValidatorEndpointUpdateV1>& updates,
     EconomicPolicyUpdateV1& policy,
     std::vector<ValidatorApplicationV1>& applications,
+    std::vector<ValidatorWorkBindingV1>& work_bindings,
     FinalizationProofV0& finalization) {
     policy = {};
     applications.clear();
+    work_bindings.clear();
     if (version < 3) {
         updates.clear();
         return readFinalizationProof(reader, finalization);
+    }
+    if (version >= 6) {
+        return readValidatorEndpointUpdates(reader, updates) &&
+               readEconomicPolicyUpdate(reader, policy) &&
+               readValidatorApplications(reader, applications) &&
+               readValidatorWorkBindings(reader, work_bindings) &&
+               readFinalizationProof(reader, finalization);
     }
     if (version >= 5) {
         return readValidatorEndpointUpdates(reader, updates) &&
@@ -634,6 +684,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
+    if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -656,6 +707,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
+    if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -822,7 +874,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
         !readOptionalMetadataAndFinalization(
             reader, record.version, record.validator_endpoints, record.economic_policy,
-            record.validator_applications, record.finalized_by)) {
+            record.validator_applications, record.validator_work_bindings, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -861,6 +913,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         record.validator_endpoints.clear();
         record.economic_policy = {};
         record.validator_applications.clear();
+        record.validator_work_bindings.clear();
         record.finalized_by = {};
         if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config)) {
             return false;
@@ -871,7 +924,8 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         }
         if (!readOptionalMetadataAndFinalization(
                 candidate_reader, record.version, record.validator_endpoints,
-                record.economic_policy, record.validator_applications, record.finalized_by) ||
+                record.economic_policy, record.validator_applications,
+                record.validator_work_bindings, record.finalized_by) ||
             !candidate_reader.consumed()) {
             return false;
         }
@@ -946,6 +1000,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
+    if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     return out;
 }
 
@@ -965,6 +1020,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
+    if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     return out;
 }
 
@@ -1010,7 +1066,7 @@ bool verifyCommitPhaseCertificate(
     std::string& error) {
     if (record.version == 0) return true;
     if (record.version != 1 && record.version != 2 && record.version != 3 &&
-        record.version != 4 && record.version != 5) {
+        record.version != 4 && record.version != 5 && record.version != 6) {
         error = "unsupported composite record version";
         return false;
     }
@@ -1109,7 +1165,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5) ||
+        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6) ||
             !record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
@@ -1509,6 +1565,42 @@ bool verifyEconomicPolicyUpdate(
                     update.effective_integer, update.sequence, vote.validator_address),
                 vote.signature, signature_error)) {
             error = "invalid economic policy vote signature";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyValidatorWorkBindings(
+    const std::vector<ValidatorWorkBindingV1>& bindings,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error) {
+    std::pair<Address, Address> previous_key;
+    bool has_previous = false;
+    for (const auto& binding : bindings) {
+        const std::pair<Address, Address> key{binding.candidate_address, binding.miner_address};
+        if (has_previous && previous_key >= key) {
+            error = "validator work bindings are not canonical";
+            return false;
+        }
+        has_previous = true;
+        previous_key = key;
+        if (!crypto::isProtocolSignatureAddress(binding.candidate_address) ||
+            !crypto::isProtocolSignatureAddress(binding.miner_address) ||
+            binding.miner_address != crypto::addressFromProtocolPublicKey(binding.miner_public_key) ||
+            binding.record_integer != record_integer) {
+            error = "validator work binding address or record mismatch";
+            return false;
+        }
+        std::string signature_error;
+        if (!crypto::verifyProtocolMessageSignature(
+                binding.miner_public_key,
+                crypto::validatorWorkBindingMinerSigningPayload(
+                    previous_record_hash, record_integer, binding.candidate_address,
+                    binding.miner_address, binding.sequence),
+                binding.miner_signature, signature_error)) {
+            error = "invalid validator work binding miner signature";
             return false;
         }
     }

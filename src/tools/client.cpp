@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1029,6 +1030,32 @@ primechain::protocol::ValidatorWorkStatsV0 validatorWorkStatsFromBoardStats(
         stats.discovery_micro_units};
 }
 
+std::vector<primechain::Address> validatorWorkSponsorsFromStore(
+    const std::string& store_path,
+    const primechain::Address& candidate) {
+    std::set<primechain::Address> sponsors;
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) return {};
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) return {};
+            for (const auto& binding : record->validator_work_bindings) {
+                if (binding.candidate_address == candidate) sponsors.insert(binding.miner_address);
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return {};
+        for (const auto& binding : record->validator_work_bindings) {
+            if (binding.candidate_address == candidate) sponsors.insert(binding.miner_address);
+        }
+    }
+    return {sponsors.begin(), sponsors.end()};
+}
+
 int validatorEligibility(int argc, char** argv) {
     if (argc != 10 || std::string(argv[4]) != "--reserve" ||
         std::string(argv[6]) != "--observed" || std::string(argv[8]) != "--total") {
@@ -1068,10 +1095,19 @@ int validatorEligibility(int argc, char** argv) {
         return 1;
     }
 
+    AddressBoardStats address_stats;
     const auto found = report.miners.find(address);
-    const AddressBoardStats address_stats = found == report.miners.end()
-        ? AddressBoardStats{}
-        : found->second;
+    if (found != report.miners.end()) address_stats = found->second;
+    const auto sponsors = validatorWorkSponsorsFromStore(store_path, address);
+    for (const auto& sponsor : sponsors) {
+        if (sponsor == address) continue;
+        const auto sponsor_found = report.miners.find(sponsor);
+        if (sponsor_found == report.miners.end()) continue;
+        address_stats.prime_records += sponsor_found->second.prime_records;
+        address_stats.composite_records += sponsor_found->second.composite_records;
+        address_stats.discovery_micro_units += sponsor_found->second.discovery_micro_units;
+        address_stats.fee_micro_units += sponsor_found->second.fee_micro_units;
+    }
     const auto work_stats = validatorWorkStatsFromBoardStats(address_stats);
     const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
     const auto work_score = primechain::protocol::validatorWorkScoreV0(work_stats);
@@ -1089,6 +1125,9 @@ int validatorEligibility(int argc, char** argv) {
     std::cout << "WORK_SCORE score=" << work_score
               << " min=" << policy.min_work_score
               << " pass=" << (work_ok ? 1 : 0) << "\n";
+    std::cout << "WORK_SPONSORS count=" << sponsors.size();
+    for (const auto& sponsor : sponsors) std::cout << " " << sponsor;
+    std::cout << "\n";
     std::cout << "RESERVE locked_micro_units=" << reserve_micro_units
               << " min=" << policy.min_reserve_micro_units
               << " pass=" << (reserve_ok ? 1 : 0) << "\n";

@@ -20,6 +20,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " sign-epoch <validator-identity> previous_hash record_integer epoch next_validator...\n"
               << "  " << argv0 << " sign-endpoint <validator-identity> previous_hash record_integer host port sequence [effective_integer]\n"
               << "  " << argv0 << " sign-application <candidate-identity> previous_hash record_integer host port sequence observed_successful observed_total\n"
+              << "  " << argv0 << " sign-work-binding <miner-identity> previous_hash record_integer candidate_address sequence\n"
               << "  " << argv0 << " sign-policy <validator-identity> previous_hash record_integer transfer_fee_micro_units sequence [effective_integer]\n";
 }
 
@@ -114,6 +115,41 @@ int main(int argc, char** argv) {
                   << record_integer << " " << identity.address << " "
                   << host << " " << port << " " << sequence << " "
                   << observed_successful << " " << observed_total << " "
+                  << primechain::wallet::bytesToHex(identity.public_key) << " "
+                  << primechain::wallet::bytesToHex(*signature) << "\n";
+        return 0;
+    }
+
+    if (argc == 7 && std::string(argv[1]) == "sign-work-binding") {
+        primechain::wallet::MinerIdentity identity;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        const auto previous_bytes = primechain::wallet::hexToBytes(argv[3]);
+        if (previous_bytes.size() != 32) {
+            std::cerr << "invalid previous record hash\n";
+            return 1;
+        }
+        primechain::Hash256 previous_hash{};
+        std::copy(previous_bytes.begin(), previous_bytes.end(), previous_hash.begin());
+        const auto record_integer = static_cast<primechain::PrimeValue>(std::stoull(argv[4]));
+        const primechain::Address candidate_address = argv[5];
+        const auto sequence = static_cast<std::uint64_t>(std::stoull(argv[6]));
+        const auto signature = primechain::crypto::signProtocolMessage(
+            identity.private_key,
+            primechain::crypto::validatorWorkBindingMinerSigningPayload(
+                previous_hash, record_integer, candidate_address, identity.address, sequence),
+            error);
+        if (!signature.has_value()) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << "SUBMIT_VALIDATOR_WORK_BINDING "
+                  << primechain::crypto::toHex(previous_hash) << " "
+                  << record_integer << " " << candidate_address << " "
+                  << identity.address << " " << sequence << " "
                   << primechain::wallet::bytesToHex(identity.public_key) << " "
                   << primechain::wallet::bytesToHex(*signature) << "\n";
         return 0;

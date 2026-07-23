@@ -152,6 +152,15 @@ struct ValidatorApplicationV1 {
     Bytes signature;
 };
 
+struct ValidatorWorkBindingV1 {
+    Address candidate_address;
+    Address miner_address;
+    PrimeValue record_integer{0};
+    std::uint64_t sequence{0};
+    Bytes miner_public_key;
+    Bytes miner_signature;
+};
+
 struct EconomicPolicyVoteV1 {
     Address validator_address;
     Bytes public_key;
@@ -179,6 +188,7 @@ struct CompositeRecordV0 {
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     EconomicPolicyUpdateV1 economic_policy;
     std::vector<ValidatorApplicationV1> validator_applications;
+    std::vector<ValidatorWorkBindingV1> validator_work_bindings;
     FinalizationProofV0 finalized_by;
 };
 
@@ -196,6 +206,7 @@ struct PrimeRecordV0 {
     std::vector<ValidatorEndpointUpdateV1> validator_endpoints;
     EconomicPolicyUpdateV1 economic_policy;
     std::vector<ValidatorApplicationV1> validator_applications;
+    std::vector<ValidatorWorkBindingV1> validator_work_bindings;
     FinalizationProofV0 finalized_by;
 };
 
@@ -282,6 +293,11 @@ bool verifyEconomicPolicyUpdate(
     std::string& error);
 bool verifyValidatorApplications(
     const std::vector<ValidatorApplicationV1>& applications,
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    std::string& error);
+bool verifyValidatorWorkBindings(
+    const std::vector<ValidatorWorkBindingV1>& bindings,
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::string& error);

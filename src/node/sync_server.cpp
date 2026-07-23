@@ -1513,12 +1513,24 @@ public:
                 sendValidatorApplications(fd);
                 continue;
             }
+            if (*line == "GET_VALIDATOR_WORK_BINDINGS") {
+                sendValidatorWorkBindings(fd);
+                continue;
+            }
             if (line->rfind("SUBMIT_VALIDATOR_APPLICATION ", 0) == 0) {
                 submitValidatorApplication(fd, *line, true);
                 continue;
             }
             if (line->rfind("SUBMIT_VALIDATOR_APPLICATION_PEER ", 0) == 0) {
                 submitValidatorApplication(fd, *line, false);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_WORK_BINDING ", 0) == 0) {
+                submitValidatorWorkBinding(fd, *line, true);
+                continue;
+            }
+            if (line->rfind("SUBMIT_VALIDATOR_WORK_BINDING_PEER ", 0) == 0) {
+                submitValidatorWorkBinding(fd, *line, false);
                 continue;
             }
             if (line->rfind("SUBMIT_VALIDATOR_ENDPOINT ", 0) == 0) {
@@ -4207,6 +4219,55 @@ private:
         return std::nullopt;
     }
 
+
+    std::map<std::pair<primechain::Address, primechain::Address>, primechain::protocol::ValidatorWorkBindingV1>
+    validatorWorkBindingsFromChain() const {
+        std::map<std::pair<primechain::Address, primechain::Address>, primechain::protocol::ValidatorWorkBindingV1> out;
+        primechain::storage::RecordStore store(store_path_);
+        std::string error;
+        const auto records = store.loadAll(error);
+        if (!error.empty()) return out;
+        for (const auto& stored : records) {
+            if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+                const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+                if (!record.has_value()) return out;
+                for (const auto& binding : record->validator_work_bindings) {
+                    out[{binding.candidate_address, binding.miner_address}] = binding;
+                }
+                continue;
+            }
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) return out;
+            for (const auto& binding : record->validator_work_bindings) {
+                out[{binding.candidate_address, binding.miner_address}] = binding;
+            }
+        }
+        return out;
+    }
+
+    std::vector<primechain::Address> validatorWorkSponsorsFor(const primechain::Address& candidate) const {
+        std::set<primechain::Address> sponsors;
+        const auto chain = validatorWorkBindingsFromChain();
+        for (const auto& entry : chain) {
+            if (entry.second.candidate_address == candidate) sponsors.insert(entry.second.miner_address);
+        }
+        for (const auto& entry : pending_validator_work_bindings_) {
+            if (entry.second.candidate_address == candidate) sponsors.insert(entry.second.miner_address);
+        }
+        return {sponsors.begin(), sponsors.end()};
+    }
+
+    ValidatorCandidateStats validatorSponsoredStatsFromChain(const primechain::Address& candidate) const {
+        ValidatorCandidateStats stats = validatorCandidateStatsFromChain(candidate);
+        for (const auto& sponsor : validatorWorkSponsorsFor(candidate)) {
+            if (sponsor == candidate) continue;
+            const auto sponsor_stats = validatorCandidateStatsFromChain(sponsor);
+            stats.prime_records += sponsor_stats.prime_records;
+            stats.composite_records += sponsor_stats.composite_records;
+        }
+        return stats;
+    }
+
     bool validatorAdmissionEligible(
             const primechain::node::SequentialNode& node,
             const primechain::Address& candidate,
@@ -4217,7 +4278,7 @@ private:
             return false;
         }
         const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
-        const ValidatorCandidateStats raw_stats = validatorCandidateStatsFromChain(candidate);
+        const ValidatorCandidateStats raw_stats = validatorSponsoredStatsFromChain(candidate);
         const primechain::protocol::ValidatorWorkStatsV0 work_stats{
             raw_stats.prime_records,
             raw_stats.composite_records,
@@ -4271,6 +4332,110 @@ private:
                 bytesToHex(application.public_key) + " " + bytesToHex(application.signature) + "\n");
         }
         writeAll(fd, "END_VALIDATOR_APPLICATIONS\n");
+    }
+
+
+    std::vector<primechain::protocol::ValidatorWorkBindingV1> embeddedValidatorWorkBindingsForNextRecord(
+            const primechain::node::SequentialNode& node) {
+        std::vector<primechain::protocol::ValidatorWorkBindingV1> out;
+        for (auto it = pending_validator_work_bindings_.begin(); it != pending_validator_work_bindings_.end();) {
+            const auto& binding = it->second;
+            if (binding.record_integer < node.status().frontier_integer + 1) {
+                it = pending_validator_work_bindings_.erase(it);
+                continue;
+            }
+            if (binding.record_integer == node.status().frontier_integer + 1) out.push_back(binding);
+            ++it;
+        }
+        std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
+            if (left.candidate_address != right.candidate_address) return left.candidate_address < right.candidate_address;
+            return left.miner_address < right.miner_address;
+        });
+        return out;
+    }
+
+    void sendValidatorWorkBindings(int fd) const {
+        auto bindings = validatorWorkBindingsFromChain();
+        for (const auto& pending : pending_validator_work_bindings_) bindings[pending.first] = pending.second;
+        writeAll(fd, "VALIDATOR_WORK_BINDINGS " + std::to_string(bindings.size()) + "\n");
+        for (const auto& entry : bindings) {
+            const auto& binding = entry.second;
+            writeCommand(fd, "VALIDATOR_WORK_BINDING " + binding.candidate_address + " " +
+                binding.miner_address + " " + std::to_string(binding.record_integer) + " " +
+                std::to_string(binding.sequence) + " " + bytesToHex(binding.miner_public_key) +
+                " " + bytesToHex(binding.miner_signature) + "\n");
+        }
+        writeAll(fd, "END_VALIDATOR_WORK_BINDINGS\n");
+    }
+
+    void submitValidatorWorkBinding(int fd, const std::string& line, bool propagate) {
+        std::istringstream in(line);
+        std::string command, previous_hex, public_hex, signature_hex, extra;
+        primechain::protocol::ValidatorWorkBindingV1 binding;
+        in >> command >> previous_hex >> binding.record_integer >> binding.candidate_address
+           >> binding.miner_address >> binding.sequence >> public_hex >> signature_hex;
+        const auto previous = parseHash(previous_hex);
+        if (!in || (in >> extra) ||
+            (command != "SUBMIT_VALIDATOR_WORK_BINDING" && command != "SUBMIT_VALIDATOR_WORK_BINDING_PEER") ||
+            !previous.has_value()) {
+            writeAll(fd, "ERROR invalid SUBMIT_VALIDATOR_WORK_BINDING\n");
+            return;
+        }
+        binding.miner_public_key = hexToBytes(public_hex);
+        binding.miner_signature = hexToBytes(signature_hex);
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
+        if (*previous != node.status().latest_record_hash ||
+            binding.record_integer != node.status().frontier_integer + 1) {
+            writeAll(fd, "ERROR validator work binding does not match current chain state\n");
+            return;
+        }
+        if (std::binary_search(node.validatorSet().begin(), node.validatorSet().end(), binding.candidate_address)) {
+            writeAll(fd, "ERROR candidate is already an active validator\n");
+            return;
+        }
+        if (!primechain::protocol::verifyValidatorWorkBindings(
+                std::vector<primechain::protocol::ValidatorWorkBindingV1>{binding},
+                *previous, binding.record_integer, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto key = std::make_pair(binding.candidate_address, binding.miner_address);
+        const auto found = pending_validator_work_bindings_.find(key);
+        if (found != pending_validator_work_bindings_.end() && found->second.sequence > binding.sequence) {
+            writeAll(fd, "ERROR stale validator work binding sequence\n");
+            return;
+        }
+        pending_validator_work_bindings_[key] = binding;
+        if (propagate) {
+            for (const auto& peer : peers_) {
+                std::ostringstream command_out;
+                command_out << "SUBMIT_VALIDATOR_WORK_BINDING_PEER " << previous_hex << " "
+                            << binding.record_integer << " " << binding.candidate_address << " "
+                            << binding.miner_address << " " << binding.sequence << " "
+                            << public_hex << " " << signature_hex << "\n";
+                std::string peer_error;
+                auto socket = connectToServer(peer.host, peer.port);
+                if (!socket.has_value()) {
+                    peer_error = "could not connect to peer";
+                } else if (!writeCommand(socket->fd(), command_out.str())) {
+                    peer_error = "could not submit validator work binding";
+                } else {
+                    const auto response = readLine(socket->fd());
+                    if (!response.has_value() ||
+                        response->rfind("VALIDATOR_WORK_BINDING_ACCEPTED ", 0) != 0) {
+                        peer_error = response.has_value() ? *response : "peer did not return work binding response";
+                    }
+                }
+                if (!peer_error.empty()) {
+                    std::cerr << "validator work binding propagation warning to " << peer.host << ":"
+                              << peer.port << ": " << peer_error << "\n";
+                }
+            }
+        }
+        writeAll(fd, "VALIDATOR_WORK_BINDING_ACCEPTED " + binding.candidate_address +
+            " miner=" + binding.miner_address + " sequence=" + std::to_string(binding.sequence) + "\n");
     }
 
     void submitValidatorApplication(int fd, const std::string& line, bool propagate) {
@@ -4427,6 +4592,10 @@ private:
 
     void clearValidatorApplicationsAfterRecord() {
         pending_validator_applications_.clear();
+    }
+
+    void clearValidatorWorkBindingsAfterRecord() {
+        pending_validator_work_bindings_.clear();
     }
 
     void clearPolicyVotesAfterRecord() {
@@ -5011,6 +5180,11 @@ private:
                 record.version = 5;
                 record.validator_applications = std::move(validator_applications);
             }
+            auto validator_work_bindings = embeddedValidatorWorkBindingsForNextRecord(node);
+            if (!validator_work_bindings.empty()) {
+                record.version = 6;
+                record.validator_work_bindings = std::move(validator_work_bindings);
+            }
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
@@ -5045,6 +5219,7 @@ private:
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
         clearValidatorApplicationsAfterRecord();
+        clearValidatorWorkBindingsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
@@ -5237,6 +5412,16 @@ private:
             record.version = 4;
             record.economic_policy = std::move(economic_policy);
         }
+        auto validator_applications = embeddedValidatorApplicationsForNextRecord(node);
+        if (!validator_applications.empty()) {
+            record.version = 5;
+            record.validator_applications = std::move(validator_applications);
+        }
+        auto validator_work_bindings = embeddedValidatorWorkBindingsForNextRecord(node);
+        if (!validator_work_bindings.empty()) {
+            record.version = 6;
+            record.validator_work_bindings = std::move(validator_work_bindings);
+        }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
             if (!finalizeRecordCandidate(
@@ -5265,6 +5450,7 @@ private:
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
         clearValidatorApplicationsAfterRecord();
+        clearValidatorWorkBindingsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
 
@@ -5591,6 +5777,7 @@ private:
     std::map<primechain::Address, primechain::storage::ValidatorEpochVoteRecord> epoch_votes_;
     std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> pending_endpoint_updates_;
     std::map<primechain::Address, primechain::protocol::ValidatorApplicationV1> pending_validator_applications_;
+    std::map<std::pair<primechain::Address, primechain::Address>, primechain::protocol::ValidatorWorkBindingV1> pending_validator_work_bindings_;
     std::map<primechain::Address, EconomicPolicyVoteRecord> policy_votes_;
     std::mutex finalization_mutex_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,

@@ -121,6 +121,12 @@ Bytes validatorApplicationSigningPayload(
     std::uint64_t sequence,
     std::uint64_t observed_successful,
     std::uint64_t observed_total);
+Bytes validatorWorkBindingMinerSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue record_integer,
+    const Address& candidate_address,
+    const Address& miner_address,
+    std::uint64_t sequence);
 Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,

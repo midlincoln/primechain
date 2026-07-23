@@ -196,11 +196,13 @@ bool validateRecordMetadataVersion(
     const std::vector<protocol::ValidatorEndpointUpdateV1>& endpoint_updates,
     const protocol::EconomicPolicyUpdateV1& economic_policy,
     const std::vector<protocol::ValidatorApplicationV1>& validator_applications,
+    const std::vector<protocol::ValidatorWorkBindingV1>& validator_work_bindings,
     std::string& error) {
     const bool has_transition = hasValidatorEpochTransition(transition);
     const bool has_endpoint_updates = !endpoint_updates.empty();
     const bool has_policy_update = hasEconomicPolicyUpdate(economic_policy);
     const bool has_validator_applications = !validator_applications.empty();
+    const bool has_validator_work_bindings = !validator_work_bindings.empty();
     if (has_transition && version < 2) {
         error = "validator epoch transition requires record version 2 or newer";
         return false;
@@ -229,8 +231,16 @@ bool validateRecordMetadataVersion(
         error = "validator applications require record version 5 or newer";
         return false;
     }
-    if (!has_validator_applications && version >= 5) {
+    if (!has_validator_applications && version == 5) {
         error = "version 5 record requires validator applications";
+        return false;
+    }
+    if (has_validator_work_bindings && version < 6) {
+        error = "validator work bindings require record version 6 or newer";
+        return false;
+    }
+    if (!has_validator_work_bindings && version >= 6) {
+        error = "version 6 record requires validator work bindings";
         return false;
     }
     return true;
@@ -614,13 +624,13 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5) ||
+                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6) ||
                   decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
             }
             if (!decoded.has_value() ||
-                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, decoded->validator_applications, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, decoded->validator_applications, decoded->validator_work_bindings, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
                     decoded->previous_record_hash, decoded->integer, error) ||
@@ -632,6 +642,9 @@ bool SequentialNode::load(std::string& error) {
                     decoded->previous_record_hash, decoded->integer, error) ||
                 !protocol::verifyValidatorApplications(
                     decoded->validator_applications,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyValidatorWorkBindings(
+                    decoded->validator_work_bindings,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -657,7 +670,7 @@ bool SequentialNode::load(std::string& error) {
                 validator_set_ = decoded->genesis_config.validator_set;
             }
             if (!decoded.has_value() ||
-                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, decoded->validator_applications, error) ||
+                !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, decoded->validator_applications, decoded->validator_work_bindings, error) ||
                 !protocol::verifyValidatorEpochTransition(
                     decoded->validator_epoch, validator_set_, validator_epoch_,
                     decoded->previous_record_hash, decoded->integer, error) ||
@@ -669,6 +682,9 @@ bool SequentialNode::load(std::string& error) {
                     decoded->previous_record_hash, decoded->integer, error) ||
                 !protocol::verifyValidatorApplications(
                     decoded->validator_applications,
+                    decoded->previous_record_hash, decoded->integer, error) ||
+                !protocol::verifyValidatorWorkBindings(
+                    decoded->validator_work_bindings,
                     decoded->previous_record_hash, decoded->integer, error)) {
                 return false;
             }
@@ -739,12 +755,12 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5) ||
+        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6) ||
          record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }
-    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, record.validator_applications, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, record.validator_applications, record.validator_work_bindings, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
             record.previous_record_hash, record.integer, error) ||
@@ -756,6 +772,9 @@ bool SequentialNode::validateCompositeCandidate(
             record.previous_record_hash, record.integer, error) ||
         !protocol::verifyValidatorApplications(
             record.validator_applications,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyValidatorWorkBindings(
+            record.validator_work_bindings,
             record.previous_record_hash, record.integer, error)) return false;
 
     const auto balances_before = balances_;
@@ -785,7 +804,7 @@ bool SequentialNode::validatePrimeCandidate(
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyGenesisConfig(record, error)) return false;
-    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, record.validator_applications, error) ||
+    if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, record.validator_applications, record.validator_work_bindings, error) ||
         !protocol::verifyValidatorEpochTransition(
             record.validator_epoch, validator_set_, validator_epoch_,
             record.previous_record_hash, record.integer, error) ||
@@ -797,6 +816,9 @@ bool SequentialNode::validatePrimeCandidate(
             record.previous_record_hash, record.integer, error) ||
         !protocol::verifyValidatorApplications(
             record.validator_applications,
+            record.previous_record_hash, record.integer, error) ||
+        !protocol::verifyValidatorWorkBindings(
+            record.validator_work_bindings,
             record.previous_record_hash, record.integer, error)) return false;
     if (totalSupplyMicroUnits(record.integer) != 0) { error = "prime asset already minted"; return false; }
 
