@@ -3634,9 +3634,9 @@ private:
                 std::cerr << "phase vote sync warning from " << peer.host << ":"
                           << peer.port << ": " << peer_error << "\n";
             }
-            if (phaseClosed(integer)) return true;
         }
 
+        if (phaseClosed(integer)) return true;
         error = "could not close commit phase with validator quorum";
         return false;
     }
