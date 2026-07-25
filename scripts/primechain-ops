@@ -9,6 +9,7 @@ usage:
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
+  primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -46,6 +47,13 @@ evidence options:
   --validator <host:port>               repeat once per validator
   --client <primechain-client>          default: <repo>/build/primechain-client
   --output <file>                       optional report file path
+  --out-dir <dir>                       default: <workdir>/reports
+
+launch-summary options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --output <file>                       optional summary file path
   --out-dir <dir>                       default: <workdir>/reports
 USAGE
 }
@@ -519,6 +527,105 @@ cmd_evidence() {
   [ "$failed" -eq 0 ] || exit 1
 }
 
+
+cmd_launch_summary() {
+  local client="$default_client"
+  local workdir=""
+  local output=""
+  local out_dir=""
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --output) require_value "$1" "${2:-}"; output="$2"; shift 2 ;;
+      --out-dir) require_value "$1" "${2:-}"; out_dir="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+  [ -n "$out_dir" ] || out_dir="$workdir/reports"
+  if [ -z "$output" ]; then
+    mkdir -p "$out_dir"
+    output="$out_dir/launch-summary-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  else
+    mkdir -p "$(dirname "$output")"
+  fi
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+    sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+    die "sync-peer failed"
+  }
+  "$client" launch-report "$chain" >"$tmpdir/launch.out" 2>"$tmpdir/launch.err" || {
+    sed 's/^/  /' "$tmpdir/launch.err" >&2 || true
+    die "launch-report failed"
+  }
+
+  local doctor_args=(--client "$client")
+  local validator
+  for validator in "${validators[@]}"; do
+    doctor_args+=(--validator "$validator")
+  done
+  if cmd_doctor_network "${doctor_args[@]}" >"$tmpdir/doctor.out" 2>"$tmpdir/doctor.err"; then
+    :
+  else
+    cat "$tmpdir/doctor.out" >&2 || true
+    sed 's/^/  /' "$tmpdir/doctor.err" >&2 || true
+    die "doctor-network failed"
+  fi
+
+  local chain_line validator_state evidence_summary board_line policy_line fee_pool_line network_line
+  chain_line="$(grep '^CHAIN ' "$tmpdir/launch.out")"
+  validator_state="$(grep '^VALIDATOR_STATE ' "$tmpdir/launch.out")"
+  evidence_summary="$(grep '^VALIDATOR_EVIDENCE_SUMMARY ' "$tmpdir/launch.out")"
+  board_line="$(grep '^BOARD ' "$tmpdir/launch.out")"
+  policy_line="$(grep '^ECONOMIC_POLICY ' "$tmpdir/launch.out")"
+  fee_pool_line="$(grep '^VALIDATOR_FEE_POOL ' "$tmpdir/launch.out")"
+  network_line="$(grep '^NETWORK_OK ' "$tmpdir/doctor.out")"
+
+  {
+    echo "PRIMECHAIN_LAUNCH_SUMMARY generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "WORKDIR $workdir"
+    echo "NETWORK ${network_line#NETWORK_OK }"
+    echo "CHAIN ${chain_line#CHAIN }"
+    echo "VALIDATOR_STATE ${validator_state#VALIDATOR_STATE }"
+    echo "VALIDATOR_EVIDENCE_SUMMARY ${evidence_summary#VALIDATOR_EVIDENCE_SUMMARY }"
+    echo "ECONOMICS ${policy_line#ECONOMIC_POLICY } ${fee_pool_line#VALIDATOR_FEE_POOL }"
+    echo "BOARD ${board_line#BOARD }"
+    while read -r _ address rest; do
+      [ -n "${address:-}" ] || continue
+      local endpoint reserve evidence endpoint_display reserve_display evidence_display
+      endpoint="$(grep "^VALIDATOR_ENDPOINT $address " "$tmpdir/launch.out" || true)"
+      reserve="$(grep "^VALIDATOR_RESERVE_SUMMARY $address " "$tmpdir/launch.out" || true)"
+      evidence="$(grep "^VALIDATOR_EVIDENCE $address " "$tmpdir/launch.out" || true)"
+      endpoint_display="missing_endpoint=1"
+      if [ -n "$endpoint" ]; then endpoint_display="${endpoint#VALIDATOR_ENDPOINT $address }"; fi
+      reserve_display="missing_reserve=1"
+      if [ -n "$reserve" ]; then reserve_display="${reserve#VALIDATOR_RESERVE_SUMMARY $address }"; fi
+      evidence_display="missing_evidence=1"
+      if [ -n "$evidence" ]; then evidence_display="${evidence#VALIDATOR_EVIDENCE $address }"; fi
+      echo "VALIDATOR $address $reserve_display $endpoint_display $evidence_display"
+    done < <(grep '^VALIDATOR_RESERVE_SUMMARY ' "$tmpdir/launch.out")
+  } > "$output"
+
+  cat "$output"
+  echo "LAUNCH_SUMMARY_REPORT $output"
+  rm -rf "$tmpdir"
+}
+
 main() {
   [ "$#" -gt 0 ] || { usage; exit 1; }
   local cmd="$1"
@@ -529,6 +636,7 @@ main() {
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
     evidence) cmd_evidence "$@" ;;
+    launch-summary) cmd_launch_summary "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac

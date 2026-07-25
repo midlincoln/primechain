@@ -88,6 +88,19 @@ cd ~/primechain
 
 The report is written under `~/pc-launch-testnet/reports/` by default and includes `sync-peer`, `launch-report`, and `doctor-network` output.
 
+Create a shorter investor/demo summary after the full evidence report is clean:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops launch-summary \
+  --workdir ~/pc-launch-testnet \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339
+```
+
+The summary is written under `~/pc-launch-testnet/reports/` by default and keeps only the chain state, network agreement, validator set, endpoint, reserve, economic policy, and vote evidence lines.
+
 To preview the generated service without touching systemd:
 
 ```bash

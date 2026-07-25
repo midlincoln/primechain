@@ -70,6 +70,17 @@ case "$cmd" in
     echo "LAUNCH_REPORT $2"
     echo "CHAIN has_genesis=1 height=121 frontier=123 latest_hash=abc123 records=122 prime_records=30 composite_records=92 transactions=21"
     echo "VALIDATOR_STATE epoch=2 active_validators=2 registry_events=2 endpoint_events=2 active_endpoints=2 transfer_fee_micro_units=1"
+    echo "VALIDATOR_EVIDENCE_SUMMARY active=2 historical=0 bootstrap_dev=2"
+    echo "ACTIVE_VALIDATORS pcpq1_a pcpq1_b"
+    echo "VALIDATOR_ENDPOINT pcpq1_a host=192.0.2.10 port=8339 effective_integer=101 sequence=1"
+    echo "VALIDATOR_ENDPOINT pcpq1_b host=192.0.2.11 port=8339 effective_integer=101 sequence=1"
+    echo "VALIDATOR_RESERVE_SUMMARY pcpq1_a admission=genesis holdings=0 total_micro_units=0"
+    echo "VALIDATOR_RESERVE_SUMMARY pcpq1_b admission=reserve holdings=10 total_micro_units=5000000"
+    echo "ECONOMIC_POLICY active_transfer_fee_micro_units=1 events=0"
+    echo "VALIDATOR_FEE_POOL epoch=2 address=pcpool_validator_fees_epoch_2 holdings=0 total_micro_units=0"
+    echo "BOARD records=122 prime=30 composite=92 transactions=21 discovery_micro_units=30000000 fee_micro_units=21 unique_miners=3 pending_composites_after_range=1"
+    echo "VALIDATOR_EVIDENCE pcpq1_a class=active finalization_votes=121 commit_phase_votes=92 round_change_votes=0"
+    echo "VALIDATOR_EVIDENCE pcpq1_b class=active finalization_votes=89 commit_phase_votes=70 round_change_votes=0"
     ;;
   query)
     q="${4:-}"
@@ -129,3 +140,16 @@ grep -q '^RESULT sync-peer OK$' "$tmp/evidence.txt"
 grep -q '^RESULT launch-report OK$' "$tmp/evidence.txt"
 grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$' "$tmp/evidence.txt"
 grep -q '^RESULT doctor-network OK$' "$tmp/evidence.txt"
+
+
+"$ops" launch-summary \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 \
+  --output "$tmp/summary.txt" | grep -q '^LAUNCH_SUMMARY_REPORT '
+
+grep -q '^PRIMECHAIN_LAUNCH_SUMMARY generated_at=' "$tmp/summary.txt"
+grep -q '^NETWORK validators=2 frontier=123 hash=abc123$' "$tmp/summary.txt"
+grep -q '^VALIDATOR_EVIDENCE_SUMMARY active=2 historical=0 bootstrap_dev=2$' "$tmp/summary.txt"
+grep -q '^VALIDATOR pcpq1_b admission=reserve holdings=10 total_micro_units=5000000 host=192.0.2.11 port=8339 effective_integer=101 sequence=1 class=active finalization_votes=89 commit_phase_votes=70 round_change_votes=0$' "$tmp/summary.txt"
