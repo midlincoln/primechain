@@ -25,6 +25,55 @@ desktop terminal          = mines, locks reserves, sponsors validator work
 
 Do not press Ctrl-C in a validator server terminal unless you intend to stop that validator. A foreground server that appears idle is normally just waiting for network requests.
 
+## Preferred Systemd Startup
+
+For long-running validators, prefer `primechain-ops` over hand-editing systemd units. It generates the full `ExecStart` line, checks that the binary supports chain-derived startup flags, writes the service, enables it, and restarts it.
+
+Validator 1:
+
+```bash
+cd ~/primechain
+sudo ./scripts/primechain-ops install-validator-service \
+  --identity /home/primechain/validator-1.wallet \
+  --genesis-validator pcpq1_bea711ba725254459f479f9b48f1b292b7688304
+```
+
+Validator 2:
+
+```bash
+cd ~/primechain
+sudo ./scripts/primechain-ops install-validator-service \
+  --identity /home/primechain/validator-2.wallet \
+  --genesis-validator pcpq1_bea711ba725254459f479f9b48f1b292b7688304 \
+  --bootstrap 192.81.209.230:8339
+```
+
+Validator 3:
+
+```bash
+cd ~/primechain
+sudo ./scripts/primechain-ops install-validator-service \
+  --identity /home/primechain/validator-3.wallet \
+  --genesis-validator pcpq1_bea711ba725254459f479f9b48f1b292b7688304 \
+  --bootstrap 192.81.209.230:8339
+```
+
+Check a validator:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops doctor-validator --host 127.0.0.1 --port 8339 --identity /home/primechain/validator-1.wallet
+```
+
+To preview the generated service without touching systemd:
+
+```bash
+./scripts/primechain-ops print-validator-service \
+  --identity /home/primechain/validator-2.wallet \
+  --genesis-validator pcpq1_bea711ba725254459f479f9b48f1b292b7688304 \
+  --bootstrap 192.81.209.230:8339
+```
+
 ## Addresses Used In The 8339 Test
 
 ```text
@@ -252,26 +301,27 @@ Mine the voted integer from the desktop to put the epoch transition on-chain:
 
 A newly admitted validator syncs from a bootstrap peer, but its command line gives only the genesis validator anchor. Replay derives the active validator set from on-chain epoch transitions. With `--use-chain-endpoints`, the node also learns active validator peer addresses from on-chain endpoint records.
 
-Use this pattern on validator 2 or validator 3:
+Use `primechain-ops` for validator 2, validator 3, or later candidates:
 
 ```bash
 cd ~/primechain
-set -a
-source /home/primechain/primechain-wallet.env
-set +a
+sudo ./scripts/primechain-ops install-validator-service \
+  --identity /home/primechain/<validator-wallet>.wallet \
+  --genesis-validator pcpq1_bea711ba725254459f479f9b48f1b292b7688304 \
+  --bootstrap 192.81.209.230:8339
+```
 
-rm -rf /home/primechain/primechain-launch-data
-mkdir -p /home/primechain/primechain-launch-data
+Equivalent foreground command shape, for debugging only:
 
-v1=pcpq1_bea711ba725254459f479f9b48f1b292b7688304
-
+```bash
 ~/primechain/build/primechain-sync-server \
   8339 \
   /home/primechain/primechain-launch-data/chain.dat \
   --bind 0.0.0.0 \
-  --peer 192.81.209.230 8339 \
-  --validator-set "$v1" \
+  --bootstrap-peer 192.81.209.230 8339 \
+  --genesis-validator-set pcpq1_bea711ba725254459f479f9b48f1b292b7688304 \
   --validator-identity /home/primechain/<validator-wallet>.wallet \
+  --use-chain-endpoints \
   --finalization-timeout-ms 5000
 ```
 

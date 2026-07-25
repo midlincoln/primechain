@@ -26,6 +26,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/primechain-ops
+    ${CMAKE_CURRENT_BINARY_DIR}/primechain-ops
+    COPYONLY
+)
+
 add_library(primechain_core
     src/core/consensus.cpp
     src/crypto/hash.cpp
@@ -330,6 +336,14 @@ target_link_libraries(primechain-round-change-tests
 )
 
 enable_testing()
+add_test(
+    NAME primechain_ops_service_generation
+    COMMAND
+        /bin/bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/primechain_ops_smoke.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/primechain-ops
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
 add_test(NAME consensus COMMAND primechain-tests)
 add_test(
     NAME arithmetic_bench_output

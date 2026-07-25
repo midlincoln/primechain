@@ -98,7 +98,9 @@ foundation for later on-chain validator admission, reserve locks, and endpoint
 updates.
 
 The tested one-validator-to-three-validator launch procedure is documented in
-[`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md).
+[`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). For service setup, use
+`./scripts/primechain-ops install-validator-service` instead of hand-editing
+systemd unit files.
 
 `add-mine-job` records the target frontier, `run-jobs` syncs before mining,
 runs the authenticated frontier miner only when the target is still ahead, then

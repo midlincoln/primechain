@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage:
+  primechain-ops install-validator-service --identity <wallet> --genesis-validator <addr> [options]
+  primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
+  primechain-ops doctor-validator [options]
+
+install-validator-service options:
+  --port <port>                         default: 8339
+  --data <chain.dat>                    default: /home/primechain/primechain-launch-data/chain.dat
+  --binary <primechain-sync-server>     default: /home/primechain/primechain/build/primechain-sync-server
+  --identity <wallet>                   required
+  --genesis-validator <addr>            required
+  --bootstrap <host:port>               optional bootstrap peer
+  --bind <address>                      default: 0.0.0.0
+  --env-file <path>                     default: /home/primechain/primechain-wallet.env
+  --working-dir <path>                  default: /home/primechain/primechain
+  --unit <name>                         default: primechain-launch-node
+  --user <user>                         default: primechain
+  --finalization-timeout-ms <ms>        default: 5000
+  --no-chain-endpoints                  disable on-chain endpoint peer discovery
+  --dry-run                             print the unit, do not write or restart systemd
+  --no-restart                          write unit but do not restart/enable it
+
+doctor-validator options:
+  --host <host>                         default: 127.0.0.1
+  --port <port>                         default: 8339
+  --binary <primechain-sync-server>     default: /home/primechain/primechain/build/primechain-sync-server
+  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
+  --identity <wallet>                   optional wallet path check
+  --unit <name>                         default: primechain-launch-node
+USAGE
+}
+
+die() {
+  echo "ERROR $*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+require_value() {
+  local flag="$1"
+  local value="${2:-}"
+  [ -n "$value" ] || die "$flag requires a value"
+}
+
+default_port=8339
+default_data=/home/primechain/primechain-launch-data/chain.dat
+default_binary=/home/primechain/primechain/build/primechain-sync-server
+default_client=/home/primechain/primechain/build/primechain-client
+default_env_file=/home/primechain/primechain-wallet.env
+default_working_dir=/home/primechain/primechain
+default_unit=primechain-launch-node
+default_user=primechain
+default_bind=0.0.0.0
+default_timeout=5000
+
+render_unit() {
+  local unit_user="$1"
+  local working_dir="$2"
+  local env_file="$3"
+  local binary="$4"
+  local port="$5"
+  local data="$6"
+  local bind_addr="$7"
+  local bootstrap="$8"
+  local genesis_validator="$9"
+  local identity="${10}"
+  local finalization_timeout_ms="${11}"
+  local use_chain_endpoints="${12}"
+
+  local exec_start=("$binary" "$port" "$data" --bind "$bind_addr")
+  if [ -n "$bootstrap" ]; then
+    local bootstrap_host="${bootstrap%:*}"
+    local bootstrap_port="${bootstrap##*:}"
+    [ "$bootstrap_host" != "$bootstrap" ] || die "--bootstrap must be host:port"
+    [ -n "$bootstrap_host" ] || die "--bootstrap host is empty"
+    [ -n "$bootstrap_port" ] || die "--bootstrap port is empty"
+    exec_start+=(--bootstrap-peer "$bootstrap_host" "$bootstrap_port")
+  fi
+  exec_start+=(--genesis-validator-set "$genesis_validator")
+  exec_start+=(--validator-identity "$identity")
+  if [ "$use_chain_endpoints" = "1" ]; then
+    exec_start+=(--use-chain-endpoints)
+  fi
+  exec_start+=(--finalization-timeout-ms "$finalization_timeout_ms")
+
+  cat <<UNIT
+[Unit]
+Description=Primechain launch validator node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$unit_user
+WorkingDirectory=$working_dir
+EnvironmentFile=$env_file
+ExecStart=${exec_start[*]}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+check_binary_flags() {
+  local binary="$1"
+  [ -x "$binary" ] || die "sync server binary is not executable: $binary"
+  local help
+  help="$("$binary" --help 2>&1 || true)"
+  echo "$help" | grep -q -- "--genesis-validator-set" || die "binary does not support --genesis-validator-set: $binary"
+  echo "$help" | grep -q -- "--bootstrap-peer" || die "binary does not support --bootstrap-peer: $binary"
+  echo "$help" | grep -q -- "--use-chain-endpoints" || die "binary does not support --use-chain-endpoints: $binary"
+}
+
+cmd_install_or_print() {
+  local mode="$1"
+  shift
+
+  local port="$default_port"
+  local data="$default_data"
+  local binary="$default_binary"
+  local identity=""
+  local genesis_validator=""
+  local bootstrap=""
+  local bind_addr="$default_bind"
+  local env_file="$default_env_file"
+  local working_dir="$default_working_dir"
+  local unit="$default_unit"
+  local unit_user="$default_user"
+  local finalization_timeout_ms="$default_timeout"
+  local use_chain_endpoints=1
+  local dry_run=0
+  local no_restart=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --port) require_value "$1" "${2:-}"; port="$2"; shift 2 ;;
+      --data) require_value "$1" "${2:-}"; data="$2"; shift 2 ;;
+      --binary) require_value "$1" "${2:-}"; binary="$2"; shift 2 ;;
+      --identity) require_value "$1" "${2:-}"; identity="$2"; shift 2 ;;
+      --genesis-validator) require_value "$1" "${2:-}"; genesis_validator="$2"; shift 2 ;;
+      --bootstrap) require_value "$1" "${2:-}"; bootstrap="$2"; shift 2 ;;
+      --bind) require_value "$1" "${2:-}"; bind_addr="$2"; shift 2 ;;
+      --env-file) require_value "$1" "${2:-}"; env_file="$2"; shift 2 ;;
+      --working-dir) require_value "$1" "${2:-}"; working_dir="$2"; shift 2 ;;
+      --unit) require_value "$1" "${2:-}"; unit="$2"; shift 2 ;;
+      --user) require_value "$1" "${2:-}"; unit_user="$2"; shift 2 ;;
+      --finalization-timeout-ms) require_value "$1" "${2:-}"; finalization_timeout_ms="$2"; shift 2 ;;
+      --no-chain-endpoints) use_chain_endpoints=0; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      --no-restart) no_restart=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$identity" ] || die "--identity is required"
+  [ -n "$genesis_validator" ] || die "--genesis-validator is required"
+  [ -f "$identity" ] || die "identity wallet not found: $identity"
+  [ -d "$working_dir" ] || die "working directory not found: $working_dir"
+  [ -f "$env_file" ] || die "environment file not found: $env_file"
+  check_binary_flags "$binary"
+
+  local unit_text
+  unit_text="$(render_unit "$unit_user" "$working_dir" "$env_file" "$binary" "$port" "$data" "$bind_addr" "$bootstrap" "$genesis_validator" "$identity" "$finalization_timeout_ms" "$use_chain_endpoints")"
+
+  if [ "$mode" = "print" ] || [ "$dry_run" -eq 1 ]; then
+    printf '%s\n' "$unit_text"
+    exit 0
+  fi
+
+  [ "$(id -u)" -eq 0 ] || die "install-validator-service must run as root; use sudo"
+  mkdir -p "$(dirname "$data")"
+  have systemctl || die "systemctl not found"
+
+  local service_path="/etc/systemd/system/${unit}.service"
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$unit_text" > "$tmp"
+  install -m 0644 "$tmp" "$service_path"
+  rm -f "$tmp"
+
+  systemctl daemon-reload
+  if [ "$no_restart" -eq 0 ]; then
+    systemctl enable --now "$unit"
+    systemctl restart "$unit"
+    systemctl --no-pager -l status "$unit"
+  else
+    echo "UNIT_WRITTEN $service_path"
+  fi
+}
+
+cmd_doctor() {
+  local host=127.0.0.1
+  local port="$default_port"
+  local binary="$default_binary"
+  local client="$default_client"
+  local identity=""
+  local unit="$default_unit"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --host) require_value "$1" "${2:-}"; host="$2"; shift 2 ;;
+      --port) require_value "$1" "${2:-}"; port="$2"; shift 2 ;;
+      --binary) require_value "$1" "${2:-}"; binary="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --identity) require_value "$1" "${2:-}"; identity="$2"; shift 2 ;;
+      --unit) require_value "$1" "${2:-}"; unit="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  local failed=0
+
+  check() {
+    local label="$1"
+    shift
+    if "$@" >/tmp/primechain-ops-check.out 2>/tmp/primechain-ops-check.err; then
+      echo "OK $label"
+    else
+      echo "FAIL $label"
+      sed 's/^/  /' /tmp/primechain-ops-check.err >&2 || true
+      failed=1
+    fi
+  }
+
+  check "sync-server-flags" check_binary_flags "$binary"
+  check "client-executable" test -x "$client"
+  if [ -n "$identity" ]; then
+    check "identity-wallet" test -f "$identity"
+  fi
+  if have systemctl; then
+    check "service-enabled" systemctl is-enabled "$unit"
+    check "service-active" systemctl is-active "$unit"
+  else
+    echo "SKIP systemctl not found"
+  fi
+  if have ss; then
+    if ss -ltn | grep -q ":$port "; then
+      echo "OK port-listening $port"
+    else
+      echo "FAIL port-listening $port"
+      failed=1
+    fi
+  else
+    echo "SKIP ss not found"
+  fi
+  check "node-status" "$client" status "$host" "$port"
+  check "validators-query" "$client" query "$host" "$port" GET_VALIDATORS
+  check "validator-epoch-query" "$client" query "$host" "$port" GET_VALIDATOR_EPOCH
+  check "validator-endpoints-query" "$client" query "$host" "$port" GET_VALIDATOR_ENDPOINTS
+  check "peers-query" "$client" query "$host" "$port" GET_PEERS
+
+  rm -f /tmp/primechain-ops-check.out /tmp/primechain-ops-check.err
+  [ "$failed" -eq 0 ] || exit 1
+}
+
+main() {
+  [ "$#" -gt 0 ] || { usage; exit 1; }
+  local cmd="$1"
+  shift
+  case "$cmd" in
+    install-validator-service) cmd_install_or_print install "$@" ;;
+    print-validator-service) cmd_install_or_print print "$@" ;;
+    doctor-validator) cmd_doctor "$@" ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
