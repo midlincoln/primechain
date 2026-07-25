@@ -12,6 +12,7 @@ usage:
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
   primechain-ops fee-distribution-status --workdir <client-workdir> [options]
+  primechain-ops launch-status-json --workdir <client-workdir> --validator <host:port> ... [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -77,6 +78,13 @@ fee-distribution-status options:
   --workdir <client-workdir>            required; contains data/chain.dat and peer config
   --interval-records <count>            default: 1000
   --client <primechain-client>          default: <repo>/build/primechain-client
+
+launch-status-json options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --validator <host:port>               repeat once per validator
+  --interval-records <count>            default: 1000
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --output <file>                       optional JSON output path
 USAGE
 }
 
@@ -588,6 +596,19 @@ mempool_count() {
 }
 
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
+json_string() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
+
 cmd_fee_distribution_status() {
   local client="$default_client"
   local workdir=""
@@ -611,6 +632,172 @@ cmd_fee_distribution_status() {
 
   "$client" sync-peer "$workdir" >/dev/null
   "$client" fee-distribution-status "$chain" "$interval_records"
+}
+
+
+cmd_launch_status_json() {
+  local client="$default_client"
+  local workdir=""
+  local interval_records=1000
+  local output=""
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --interval-records) require_value "$1" "${2:-}"; interval_records="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --output) require_value "$1" "${2:-}"; output="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  local summary_file="$tmpdir/summary.txt"
+  local fee_file="$tmpdir/fee.txt"
+
+  local summary_args=(--client "$client" --workdir "$workdir" --output "$summary_file")
+  local validator
+  for validator in "${validators[@]}"; do
+    summary_args+=(--validator "$validator")
+  done
+  cmd_launch_summary "${summary_args[@]}" >/dev/null
+  cmd_fee_distribution_status --client "$client" --workdir "$workdir" --interval-records "$interval_records" > "$fee_file"
+
+  local generated_at network_line chain_line validator_state evidence_summary economics_line board_line fee_line last_fee_line event_line
+  generated_at="$(awk '/^PRIMECHAIN_LAUNCH_SUMMARY / { for (i=1; i<=NF; ++i) { split($i,a,"="); if (a[1] == "generated_at") { print a[2]; exit } } }' "$summary_file")"
+  network_line="$(grep '^NETWORK ' "$summary_file")"
+  chain_line="$(grep '^CHAIN ' "$summary_file")"
+  validator_state="$(grep '^VALIDATOR_STATE ' "$summary_file")"
+  evidence_summary="$(grep '^VALIDATOR_EVIDENCE_SUMMARY ' "$summary_file")"
+  economics_line="$(grep '^ECONOMICS ' "$summary_file")"
+  board_line="$(grep '^BOARD ' "$summary_file")"
+  fee_line="$(grep '^FEE_DISTRIBUTION_STATUS ' "$fee_file")"
+  last_fee_line="$(grep '^LAST_FEE_DISTRIBUTION ' "$fee_file" || true)"
+  event_line="$(grep '^FEE_DISTRIBUTION_EVENT ' "$fee_file" | tail -1 || true)"
+
+  [ -n "$output" ] || output="$workdir/reports/launch-status.json"
+  mkdir -p "$(dirname "$output")"
+
+  {
+    echo "{"
+    printf '  "generated_at": '; json_string "$generated_at"; echo ","
+    printf '  "workdir": '; json_string "$workdir"; echo ","
+    echo "  \"network\": {"
+    echo "    \"validators\": $(field_value "$network_line" validators),"
+    printf '    "frontier": %s,\n' "$(field_value "$network_line" frontier)"
+    printf '    "hash": '; json_string "$(field_value "$network_line" hash)"; echo
+    echo "  },"
+    echo "  \"chain\": {"
+    printf '    "height": %s,\n' "$(field_value "$chain_line" height)"
+    printf '    "frontier": %s,\n' "$(field_value "$chain_line" frontier)"
+    printf '    "latest_hash": '; json_string "$(field_value "$chain_line" latest_hash)"; echo ","
+    printf '    "records": %s,\n' "$(field_value "$chain_line" records)"
+    printf '    "prime_records": %s,\n' "$(field_value "$chain_line" prime_records)"
+    printf '    "composite_records": %s,\n' "$(field_value "$chain_line" composite_records)"
+    printf '    "transactions": %s\n' "$(field_value "$chain_line" transactions)"
+    echo "  },"
+    echo "  \"validator_state\": {"
+    printf '    "epoch": %s,\n' "$(field_value "$validator_state" epoch)"
+    printf '    "active_validators": %s,\n' "$(field_value "$validator_state" active_validators)"
+    printf '    "registry_events": %s,\n' "$(field_value "$validator_state" registry_events)"
+    printf '    "endpoint_events": %s,\n' "$(field_value "$validator_state" endpoint_events)"
+    printf '    "active_endpoints": %s,\n' "$(field_value "$validator_state" active_endpoints)"
+    printf '    "transfer_fee_micro_units": %s\n' "$(field_value "$validator_state" transfer_fee_micro_units)"
+    echo "  },"
+    echo "  \"validator_evidence_summary\": {"
+    printf '    "active": %s,\n' "$(field_value "$evidence_summary" active)"
+    printf '    "historical": %s,\n' "$(field_value "$evidence_summary" historical)"
+    printf '    "bootstrap_dev": %s\n' "$(field_value "$evidence_summary" bootstrap_dev)"
+    echo "  },"
+    echo "  \"economics\": {"
+    printf '    "active_transfer_fee_micro_units": %s,\n' "$(field_value "$economics_line" active_transfer_fee_micro_units)"
+    printf '    "fee_pool_epoch": %s,\n' "$(field_value "$economics_line" epoch)"
+    printf '    "fee_pool_address": '; json_string "$(field_value "$economics_line" address)"; echo ","
+    printf '    "fee_pool_holdings": %s,\n' "$(field_value "$economics_line" holdings)"
+    printf '    "fee_pool_total_micro_units": %s\n' "$(field_value "$economics_line" total_micro_units)"
+    echo "  },"
+    echo "  \"board\": {"
+    printf '    "records": %s,\n' "$(field_value "$board_line" records)"
+    printf '    "prime": %s,\n' "$(field_value "$board_line" prime)"
+    printf '    "composite": %s,\n' "$(field_value "$board_line" composite)"
+    printf '    "transactions": %s,\n' "$(field_value "$board_line" transactions)"
+    printf '    "discovery_micro_units": %s,\n' "$(field_value "$board_line" discovery_micro_units)"
+    printf '    "fee_micro_units": %s,\n' "$(field_value "$board_line" fee_micro_units)"
+    printf '    "unique_miners": %s,\n' "$(field_value "$board_line" unique_miners)"
+    printf '    "pending_composites_after_range": %s\n' "$(field_value "$board_line" pending_composites_after_range)"
+    echo "  },"
+    echo "  \"fee_distribution\": {"
+    printf '    "interval_records": %s,\n' "$(field_value "$fee_line" interval_records)"
+    printf '    "current_frontier": %s,\n' "$(field_value "$fee_line" current_frontier)"
+    printf '    "last_distribution_integer": %s,\n' "$(field_value "$fee_line" last_distribution_integer)"
+    printf '    "next_distribution_integer": %s,\n' "$(field_value "$fee_line" next_distribution_integer)"
+    printf '    "due": %s,\n' "$(field_value "$fee_line" due)"
+    printf '    "current_epoch": %s,\n' "$(field_value "$fee_line" current_epoch)"
+    printf '    "pool_address": '; json_string "$(field_value "$fee_line" pool_address)"; echo ","
+    printf '    "pool_holdings": %s,\n' "$(field_value "$fee_line" pool_holdings)"
+    printf '    "pool_total_micro_units": %s,\n' "$(field_value "$fee_line" pool_total_micro_units)"
+    printf '    "distributions": %s' "$(field_value "$fee_line" distributions)"
+    if [ -n "$last_fee_line" ]; then
+      echo ","
+      echo "    \"last\": {"
+      printf '      "integer": %s,\n' "$(field_value "$last_fee_line" integer)"
+      printf '      "epoch": %s,\n' "$(field_value "$last_fee_line" epoch)"
+      printf '      "prime": %s,\n' "$(field_value "$last_fee_line" prime)"
+      printf '      "micro_units": %s\n' "$(field_value "$last_fee_line" micro_units)"
+      printf '    }'
+    fi
+    if [ -n "$event_line" ]; then
+      echo ","
+      echo "    \"last_event\": {"
+      printf '      "integer": %s,\n' "$(field_value "$event_line" integer)"
+      printf '      "epoch": %s,\n' "$(field_value "$event_line" epoch)"
+      printf '      "prime": %s,\n' "$(field_value "$event_line" prime)"
+      printf '      "micro_units": %s,\n' "$(field_value "$event_line" micro_units)"
+      printf '      "recipients": %s\n' "$(field_value "$event_line" recipients)"
+      printf '    }'
+    fi
+    echo
+    echo "  },"
+    echo "  \"validators\": ["
+    local first=1 line address
+    while IFS= read -r line; do
+      address="$(awk '{print $2}' <<<"$line")"
+      [ "$first" -eq 1 ] || echo ","
+      first=0
+      echo "    {"
+      printf '      "address": '; json_string "$address"; echo ","
+      printf '      "admission": '; json_string "$(field_value "$line" admission)"; echo ","
+      printf '      "holdings": %s,\n' "$(field_value "$line" holdings)"
+      printf '      "total_micro_units": %s,\n' "$(field_value "$line" total_micro_units)"
+      printf '      "host": '; json_string "$(field_value "$line" host)"; echo ","
+      printf '      "port": %s,\n' "$(field_value "$line" port)"
+      printf '      "effective_integer": %s,\n' "$(field_value "$line" effective_integer)"
+      printf '      "sequence": %s,\n' "$(field_value "$line" sequence)"
+      printf '      "class": '; json_string "$(field_value "$line" class)"; echo ","
+      printf '      "finalization_votes": %s,\n' "$(field_value "$line" finalization_votes)"
+      printf '      "commit_phase_votes": %s,\n' "$(field_value "$line" commit_phase_votes)"
+      printf '      "round_change_votes": %s\n' "$(field_value "$line" round_change_votes)"
+      printf '    }'
+    done < <(grep '^VALIDATOR ' "$summary_file")
+    echo
+    echo "  ]"
+    echo "}"
+  } > "$output"
+
+  cat "$output"
+  echo "LAUNCH_STATUS_JSON $output"
+  rm -rf "$tmpdir"
 }
 
 cmd_transaction_evidence() {
@@ -896,6 +1083,7 @@ main() {
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;
     fee-distribution-status) cmd_fee_distribution_status "$@" ;;
+    launch-status-json) cmd_launch_status_json "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac

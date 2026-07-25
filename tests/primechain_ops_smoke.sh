@@ -228,6 +228,20 @@ grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=123 
 grep -q '^LAST_FEE_DISTRIBUTION integer=23 epoch=2 prime=101 micro_units=3$' "$tmp/fee-distribution-status.txt"
 
 
+"$ops" launch-status-json \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 \
+  --interval-records 1000 \
+  --output "$tmp/status.json" | grep -q '^LAUNCH_STATUS_JSON '
+
+python3 -m json.tool "$tmp/status.json" >/dev/null
+grep -q '"frontier": 123' "$tmp/status.json"
+grep -q '"next_distribution_integer": 1023' "$tmp/status.json"
+grep -q '"address": "pcpq1_b"' "$tmp/status.json"
+
+
 touch "$tmp/sender.wallet"
 rm -f "$tmp/tx-included"
 "$ops" transaction-evidence \

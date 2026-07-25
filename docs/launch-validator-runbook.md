@@ -130,6 +130,26 @@ cd ~/primechain
 
 The status prints the current frontier, last distribution integer, next distribution integer, due flag, current epoch fee-pool balance, and any historical distribution events found on chain.
 
+Generate the live JSON used by the MidLincoln launch-proof page:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops launch-status-json \
+  --workdir ~/pc-launch-testnet \
+  --interval-records 1000 \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339 \
+  --output ~/pc-launch-testnet/reports/status.json
+```
+
+To publish that JSON to MidLincoln after mining:
+
+```bash
+rsync -av ~/pc-launch-testnet/reports/status.json \
+  midlincoln-old:~/public_html/opportunities/prime-mining/launch-proof/status.json
+```
+
 To preview the generated service without touching systemd:
 
 ```bash
