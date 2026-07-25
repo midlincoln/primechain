@@ -100,7 +100,8 @@ updates.
 The tested one-validator-to-three-validator launch procedure is documented in
 [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). For service setup, use
 `./scripts/primechain-ops install-validator-service` instead of hand-editing
-systemd unit files.
+systemd unit files. Use `./scripts/primechain-ops doctor-network` from a desktop
+or operator host to verify all validators agree on frontier, hash, peers, and endpoints.
 
 `add-mine-job` records the target frontier, `run-jobs` syncs before mining,
 runs the authenticated frontier miner only when the target is still ahead, then

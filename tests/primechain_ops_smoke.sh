@@ -52,3 +52,56 @@ fi
   --genesis-validator pcpq1_genesis \
   --no-restart \
   --dry-run >/dev/null
+
+
+cat > "$tmp/bin/primechain-client" <<'EOF'
+#!/usr/bin/env bash
+cmd="${1:-}"
+host="${2:-}"
+port="${3:-}"
+case "$cmd" in
+  status)
+    echo "STATUS 122 30 92 1 121 123 abc123"
+    ;;
+  query)
+    q="${4:-}"
+    case "$q" in
+      GET_VALIDATORS)
+        echo "VALIDATORS 2 pcpq1_a pcpq1_b"
+        ;;
+      GET_VALIDATOR_EPOCH)
+        echo "VALIDATOR_EPOCH 1 124 abc123"
+        ;;
+      GET_VALIDATOR_ENDPOINTS)
+        echo "VALIDATOR_ENDPOINTS 2"
+        echo "VALIDATOR_ENDPOINT pcpq1_a 192.0.2.10 8339 101 1"
+        echo "VALIDATOR_ENDPOINT pcpq1_b 192.0.2.11 8339 101 1"
+        echo "END_VALIDATOR_ENDPOINTS"
+        ;;
+      GET_PEERS)
+        echo "PEERS 1"
+        if [ "$host" = "192.0.2.10" ]; then
+          echo "PEER 192.0.2.11 8339"
+        else
+          echo "PEER 192.0.2.10 8339"
+        fi
+        echo "END_PEERS"
+        ;;
+      *)
+        echo "unexpected query $q" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected command $cmd" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$tmp/bin/primechain-client"
+
+"$ops" doctor-network \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 | grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$'

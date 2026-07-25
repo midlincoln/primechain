@@ -65,6 +65,17 @@ cd ~/primechain
 ./scripts/primechain-ops doctor-validator --host 127.0.0.1 --port 8339 --identity /home/primechain/validator-1.wallet
 ```
 
+Check the full validator network from the desktop:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops doctor-network \
+  --client ~/primechain/build/primechain-client \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339
+```
+
 To preview the generated service without touching systemd:
 
 ```bash

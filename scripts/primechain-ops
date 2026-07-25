@@ -7,6 +7,7 @@ usage:
   primechain-ops install-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops doctor-validator [options]
+  primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -34,6 +35,10 @@ doctor-validator options:
   --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
   --identity <wallet>                   optional wallet path check
   --unit <name>                         default: primechain-launch-node
+
+doctor-network options:
+  --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
 USAGE
 }
 
@@ -302,6 +307,128 @@ cmd_doctor() {
   [ "$failed" -eq 0 ] || exit 1
 }
 
+
+cmd_doctor_network() {
+  local client="$default_client"
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  local expected_frontier=""
+  local expected_hash=""
+  local expected_validators=""
+  local expected_epoch=""
+  local expected_endpoints=""
+  local failed=0
+
+  local node
+  for node in "${validators[@]}"; do
+    local host="${node%:*}"
+    local port="${node##*:}"
+    if [ "$host" = "$node" ] || [ -z "$host" ] || [ -z "$port" ]; then
+      echo "FAIL invalid-validator $node" >&2
+      failed=1
+      continue
+    fi
+
+    local status validators_out epoch_out endpoints_out peers_out
+    if ! status="$($client status "$host" "$port" 2>&1)"; then
+      echo "FAIL status $node"
+      echo "  $status" >&2
+      failed=1
+      continue
+    fi
+    if ! validators_out="$($client query "$host" "$port" GET_VALIDATORS 2>&1)"; then
+      echo "FAIL validators $node"
+      echo "  $validators_out" >&2
+      failed=1
+      continue
+    fi
+    if ! epoch_out="$($client query "$host" "$port" GET_VALIDATOR_EPOCH 2>&1)"; then
+      echo "FAIL validator-epoch $node"
+      echo "  $epoch_out" >&2
+      failed=1
+      continue
+    fi
+    if ! endpoints_out="$($client query "$host" "$port" GET_VALIDATOR_ENDPOINTS 2>&1)"; then
+      echo "FAIL validator-endpoints $node"
+      echo "  $endpoints_out" >&2
+      failed=1
+      continue
+    fi
+    if ! peers_out="$($client query "$host" "$port" GET_PEERS 2>&1)"; then
+      echo "FAIL peers $node"
+      echo "  $peers_out" >&2
+      failed=1
+      continue
+    fi
+
+    local frontier hash
+    frontier="$(echo "$status" | awk '{print $7}')"
+    hash="$(echo "$status" | awk '{print $8}')"
+    echo "NODE $node frontier=$frontier hash=$hash"
+
+    if [ -z "$expected_frontier" ]; then
+      expected_frontier="$frontier"
+      expected_hash="$hash"
+      expected_validators="$validators_out"
+      expected_epoch="$epoch_out"
+      expected_endpoints="$endpoints_out"
+    else
+      if [ "$frontier" != "$expected_frontier" ] || [ "$hash" != "$expected_hash" ]; then
+        echo "FAIL chain-disagreement $node expected_frontier=$expected_frontier expected_hash=$expected_hash got_frontier=$frontier got_hash=$hash"
+        failed=1
+      fi
+      if [ "$validators_out" != "$expected_validators" ]; then
+        echo "FAIL validator-set-disagreement $node"
+        failed=1
+      fi
+      if [ "$epoch_out" != "$expected_epoch" ]; then
+        echo "FAIL validator-epoch-disagreement $node"
+        failed=1
+      fi
+      if [ "$endpoints_out" != "$expected_endpoints" ]; then
+        echo "FAIL validator-endpoints-disagreement $node"
+        failed=1
+      fi
+    fi
+
+    local other other_host other_port
+    for other in "${validators[@]}"; do
+      [ "$other" != "$node" ] || continue
+      other_host="${other%:*}"
+      other_port="${other##*:}"
+      if echo "$peers_out" | grep -q "^PEER ${other_host} ${other_port}$"; then
+        echo "OK peer $node -> $other"
+      else
+        echo "FAIL missing-peer $node -> $other"
+        failed=1
+      fi
+      if echo "$endpoints_out" | grep -q " ${other_host} ${other_port} "; then
+        echo "OK endpoint-visible $other"
+      else
+        echo "FAIL endpoint-missing $other from $node"
+        failed=1
+      fi
+    done
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "NETWORK_OK validators=${#validators[@]} frontier=$expected_frontier hash=$expected_hash"
+  fi
+  [ "$failed" -eq 0 ] || exit 1
+}
+
 main() {
   [ "$#" -gt 0 ] || { usage; exit 1; }
   local cmd="$1"
@@ -310,6 +437,7 @@ main() {
     install-validator-service) cmd_install_or_print install "$@" ;;
     print-validator-service) cmd_install_or_print print "$@" ;;
     doctor-validator) cmd_doctor "$@" ;;
+    doctor-network) cmd_doctor_network "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac
