@@ -68,3 +68,9 @@ for port in 19110 19111 19112; do
     cat "$base/status-$port.out"
     grep -q '^STATUS 9 4 5 1 8 10 ' "$base/status-$port.out"
 done
+
+"$client" launch-report "$base/work/data/chain.dat" > "$base/launch-report.out"
+cat "$base/launch-report.out"
+grep -q '^VALIDATOR_EVIDENCE_SUMMARY active=3 historical=0 bootstrap_dev=2$' "$base/launch-report.out"
+active_evidence_count=$(grep -c '^VALIDATOR_EVIDENCE pcpq1_.* class=active ' "$base/launch-report.out")
+[ "$active_evidence_count" -eq 3 ]

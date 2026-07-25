@@ -3186,7 +3186,6 @@ private:
             !acceptFinalizationVote(local_vote, candidate_hash, round,
                 record.finalized_by.votes, error)) return false;
         for (const auto& peer : peers_) {
-            if (record.finalized_by.votes.size() >= validatorQuorumRequired()) break;
             std::string peer_error;
             const auto vote = requestRecordFinalizationVote(peer, kind, payload, local_vote, peer_error);
             if (!vote.has_value()) {
