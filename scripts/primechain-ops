@@ -10,6 +10,7 @@ usage:
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
+  primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -54,6 +55,21 @@ launch-summary options:
   --validator <host:port>               repeat once per validator
   --client <primechain-client>          default: <repo>/build/primechain-client
   --output <file>                       optional summary file path
+  --out-dir <dir>                       default: <workdir>/reports
+
+transaction-evidence options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --sender-wallet <wallet>              required sender wallet
+  --receiver-wallet <wallet>            required receiver wallet; created if missing
+  --prime <p>                           required prime asset to transfer
+  --amount <micro-units>                required transfer amount
+  --fee <micro-units>                   default: active policy fee from launch-report
+  --nonce <n|auto>                      default: auto from first validator
+  --target <integer>                    required mine target after submitting transaction
+  --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --send <primechain-send>              default: <repo>/build/primechain-send
+  --output <file>                       optional transaction evidence file path
   --out-dir <dir>                       default: <workdir>/reports
 USAGE
 }
@@ -528,6 +544,189 @@ cmd_evidence() {
 }
 
 
+
+parse_node() {
+  local node="$1"
+  local __host_var="$2"
+  local __port_var="$3"
+  local host="${node%:*}"
+  local port="${node##*:}"
+  [ "$host" != "$node" ] || die "invalid host:port: $node"
+  [ -n "$host" ] || die "host is empty: $node"
+  [ -n "$port" ] || die "port is empty: $node"
+  printf -v "$__host_var" '%s' "$host"
+  printf -v "$__port_var" '%s' "$port"
+}
+
+balance_for_prime() {
+  local balance_file="$1"
+  local prime="$2"
+  awk -v p="$prime" '$1 == p { print $2; found=1 } END { if (!found) print 0 }' "$balance_file"
+}
+
+fee_pool_for_prime() {
+  local pool_file="$1"
+  local prime="$2"
+  awk -v p="$prime" '$1 == "FEE_POOL_HOLDING" { for (i=1; i<=NF; ++i) { if ($i == "prime=" p) prime_seen=1; if ($i ~ /^micro_units=/) { split($i, a, "="); amount=a[2]; } } if (prime_seen) { print amount; found=1 } prime_seen=0; amount=0 } END { if (!found) print 0 }' "$pool_file"
+}
+
+field_value() {
+  local line="$1"
+  local field="$2"
+  awk -v key="$field" '{ for (i=1; i<=NF; ++i) { split($i, a, "="); if (a[1] == key) { print a[2]; exit } } }' <<<"$line"
+}
+
+cmd_transaction_evidence() {
+  local client="$default_client"
+  local send="$repo_root/build/primechain-send"
+  local workdir=""
+  local sender_wallet=""
+  local receiver_wallet=""
+  local prime=""
+  local amount=""
+  local fee=""
+  local nonce="auto"
+  local target=""
+  local output=""
+  local out_dir=""
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --sender-wallet) require_value "$1" "${2:-}"; sender_wallet="$2"; shift 2 ;;
+      --receiver-wallet) require_value "$1" "${2:-}"; receiver_wallet="$2"; shift 2 ;;
+      --prime) require_value "$1" "${2:-}"; prime="$2"; shift 2 ;;
+      --amount) require_value "$1" "${2:-}"; amount="$2"; shift 2 ;;
+      --fee) require_value "$1" "${2:-}"; fee="$2"; shift 2 ;;
+      --nonce) require_value "$1" "${2:-}"; nonce="$2"; shift 2 ;;
+      --target) require_value "$1" "${2:-}"; target="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --send) require_value "$1" "${2:-}"; send="$2"; shift 2 ;;
+      --output) require_value "$1" "${2:-}"; output="$2"; shift 2 ;;
+      --out-dir) require_value "$1" "${2:-}"; out_dir="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -n "$sender_wallet" ] || die "--sender-wallet is required"
+  [ -n "$receiver_wallet" ] || die "--receiver-wallet is required"
+  [ -n "$prime" ] || die "--prime is required"
+  [ -n "$amount" ] || die "--amount is required"
+  [ -n "$target" ] || die "--target is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -x "$send" ] || die "send executable is not executable: $send"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -f "$sender_wallet" ] || die "sender wallet not found: $sender_wallet"
+  if [ ! -f "$receiver_wallet" ]; then
+    "$client" new-miner "$receiver_wallet" >/dev/null
+  fi
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+  [ -n "$out_dir" ] || out_dir="$workdir/reports"
+  if [ -z "$output" ]; then
+    mkdir -p "$out_dir"
+    output="$out_dir/transaction-evidence-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  else
+    mkdir -p "$(dirname "$output")"
+  fi
+
+  local primary_host primary_port
+  parse_node "${validators[0]}" primary_host primary_port
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  "$client" sync-peer "$workdir" >"$tmpdir/sync-before.out"
+  "$client" launch-report "$chain" >"$tmpdir/launch-before.out"
+  if [ -z "$fee" ]; then
+    fee="$(field_value "$(grep '^ECONOMIC_POLICY ' "$tmpdir/launch-before.out")" active_transfer_fee_micro_units)"
+  fi
+  [ -n "$fee" ] || die "could not determine transfer fee"
+
+  local sender_address receiver_address
+  sender_address="$($client address "$sender_wallet")"
+  receiver_address="$($client address "$receiver_wallet")"
+
+  if [ "$nonce" = "auto" ]; then
+    local nonce_line
+    nonce_line="$($client query "$primary_host" "$primary_port" GET_NONCE "$sender_address")"
+    nonce="$(echo "$nonce_line" | awk '{print $4}')"
+  fi
+  [ -n "$nonce" ] || die "could not determine nonce"
+
+  "$client" balance "$chain" "$sender_wallet" >"$tmpdir/sender-before.out"
+  "$client" balance "$chain" "$receiver_wallet" >"$tmpdir/receiver-before.out"
+  "$client" fee-pool "$chain" >"$tmpdir/pool-before.out"
+
+  local sender_before receiver_before pool_before
+  sender_before="$(balance_for_prime "$tmpdir/sender-before.out" "$prime")"
+  receiver_before="$(balance_for_prime "$tmpdir/receiver-before.out" "$prime")"
+  pool_before="$(fee_pool_for_prime "$tmpdir/pool-before.out" "$prime")"
+
+  "$send" submit "$primary_host" "$primary_port" "$sender_wallet" "$receiver_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out"
+  grep -q '^TX_ACCEPTED ' "$tmpdir/submit.out" || {
+    cat "$tmpdir/submit.out" >&2
+    rm -rf "$tmpdir"
+    die "transaction was not accepted"
+  }
+
+  "$client" add-mine-job "$workdir" --target "$target" >"$tmpdir/add-job.out"
+  "$client" run-jobs "$workdir" >"$tmpdir/mine.out"
+  "$client" sync-peer "$workdir" >"$tmpdir/sync-after.out"
+  "$client" balance "$chain" "$sender_wallet" >"$tmpdir/sender-after.out"
+  "$client" balance "$chain" "$receiver_wallet" >"$tmpdir/receiver-after.out"
+  "$client" fee-pool "$chain" >"$tmpdir/pool-after.out"
+  "$client" launch-report "$chain" >"$tmpdir/launch-after.out"
+
+  local doctor_args=(--client "$client")
+  local validator
+  for validator in "${validators[@]}"; do
+    doctor_args+=(--validator "$validator")
+  done
+  cmd_doctor_network "${doctor_args[@]}" >"$tmpdir/doctor.out"
+
+  local sender_after receiver_after pool_after expected_sender expected_receiver expected_pool tx_hash network_line chain_line board_line
+  sender_after="$(balance_for_prime "$tmpdir/sender-after.out" "$prime")"
+  receiver_after="$(balance_for_prime "$tmpdir/receiver-after.out" "$prime")"
+  pool_after="$(fee_pool_for_prime "$tmpdir/pool-after.out" "$prime")"
+  expected_sender=$((sender_before - amount - fee))
+  expected_receiver=$((receiver_before + amount))
+  expected_pool=$((pool_before + fee))
+  tx_hash="$(awk '/^TX_ACCEPTED / { print $2; exit }' "$tmpdir/submit.out")"
+  network_line="$(grep '^NETWORK_OK ' "$tmpdir/doctor.out")"
+  chain_line="$(grep '^CHAIN ' "$tmpdir/launch-after.out")"
+  board_line="$(grep '^BOARD ' "$tmpdir/launch-after.out")"
+
+  local pass=1
+  [ "$sender_after" -eq "$expected_sender" ] || pass=0
+  [ "$receiver_after" -eq "$expected_receiver" ] || pass=0
+  [ "$pool_after" -eq "$expected_pool" ] || pass=0
+
+  {
+    echo "PRIMECHAIN_TRANSACTION_EVIDENCE generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "WORKDIR $workdir"
+    echo "NETWORK ${network_line#NETWORK_OK }"
+    echo "CHAIN ${chain_line#CHAIN }"
+    echo "BOARD ${board_line#BOARD }"
+    echo "TRANSFER tx_hash=$tx_hash prime=$prime amount_micro_units=$amount fee_micro_units=$fee nonce=$nonce sender=$sender_address receiver=$receiver_address"
+    echo "BALANCE_CHECK role=sender before=$sender_before after=$sender_after expected_after=$expected_sender pass=$([ "$sender_after" -eq "$expected_sender" ] && echo 1 || echo 0)"
+    echo "BALANCE_CHECK role=receiver before=$receiver_before after=$receiver_after expected_after=$expected_receiver pass=$([ "$receiver_after" -eq "$expected_receiver" ] && echo 1 || echo 0)"
+    echo "FEE_POOL_CHECK before=$pool_before after=$pool_after expected_after=$expected_pool pass=$([ "$pool_after" -eq "$expected_pool" ] && echo 1 || echo 0)"
+    echo "RESULT transaction-evidence $([ "$pass" -eq 1 ] && echo OK || echo FAIL)"
+  } > "$output"
+
+  cat "$output"
+  echo "TRANSACTION_EVIDENCE_REPORT $output"
+  rm -rf "$tmpdir"
+  [ "$pass" -eq 1 ] || return 1
+}
+
 cmd_launch_summary() {
   local client="$default_client"
   local workdir=""
@@ -637,6 +836,7 @@ main() {
     doctor-network) cmd_doctor_network "$@" ;;
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
+    transaction-evidence) cmd_transaction_evidence "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac

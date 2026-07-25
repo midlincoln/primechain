@@ -101,6 +101,24 @@ cd ~/primechain
 
 The summary is written under `~/pc-launch-testnet/reports/` by default and keeps only the chain state, network agreement, validator set, endpoint, reserve, economic policy, and vote evidence lines.
 
+Create transaction evidence after consensus evidence is clean:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops transaction-evidence \
+  --workdir ~/pc-launch-testnet \
+  --sender-wallet ~/pc-launch-testnet/wallets/prime.wallet \
+  --receiver-wallet ~/pc-launch-testnet/wallets/demo-receiver.wallet \
+  --prime 101 \
+  --amount 1000 \
+  --target 201 \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339
+```
+
+The transaction evidence command creates the receiver wallet if needed, submits a signed transfer to the first validator, mines to the requested target, syncs the local chain, verifies sender/receiver/fee-pool balance deltas, checks network agreement, and writes `transaction-evidence-<timestamp>.txt` under the reports directory.
+
 To preview the generated service without touching systemd:
 
 ```bash
