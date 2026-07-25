@@ -969,6 +969,48 @@ std::vector<std::pair<primechain::Address, ValidatorBoardStats>> sortedValidator
     return out;
 }
 
+bool containsAddress(const std::vector<primechain::Address>& addresses, const primechain::Address& address) {
+    return std::find(addresses.begin(), addresses.end(), address) != addresses.end();
+}
+
+const char* validatorEvidenceClass(
+    const primechain::Address& address,
+    const std::vector<primechain::Address>& active_validators) {
+    if (primechain::protocol::isDevelopmentAddress(address)) return "bootstrap-dev";
+    if (containsAddress(active_validators, address)) return "active";
+    return "historical";
+}
+
+std::vector<primechain::Address> genesisValidators(const primechain::node::ValidatorRegistryState& registry) {
+    if (!registry.events.empty() && registry.events.front().type == primechain::node::ValidatorRegistryEventType::Genesis) {
+        return registry.events.front().validator_set;
+    }
+    return {};
+}
+
+struct ValidatorEvidenceSummary {
+    std::uint64_t active{0};
+    std::uint64_t historical{0};
+    std::uint64_t bootstrap_dev{0};
+};
+
+ValidatorEvidenceSummary summarizeValidatorEvidence(
+    const std::map<primechain::Address, ValidatorBoardStats>& validators,
+    const std::vector<primechain::Address>& active_validators) {
+    ValidatorEvidenceSummary summary;
+    for (const auto& entry : validators) {
+        const std::string classification = validatorEvidenceClass(entry.first, active_validators);
+        if (classification == "active") {
+            ++summary.active;
+        } else if (classification == "bootstrap-dev") {
+            ++summary.bootstrap_dev;
+        } else {
+            ++summary.historical;
+        }
+    }
+    return summary;
+}
+
 int boardReport(int argc, char** argv) {
     if (argc != 7 || std::string(argv[3]) != "--from" || std::string(argv[5]) != "--to") return 1;
     const std::string store_path = argv[2];
@@ -1012,8 +1054,18 @@ int boardReport(int argc, char** argv) {
                   << " fee_micro_units=" << entry.second.fee_micro_units << "\n";
     }
 
+    primechain::node::ValidatorRegistryState registry;
+    const std::vector<primechain::Address> active_validators =
+        primechain::node::loadValidatorRegistry(store_path, registry, error)
+            ? registry.active_validators
+            : std::vector<primechain::Address>{};
+    const auto validator_summary = summarizeValidatorEvidence(stats.validators, active_validators);
+    std::cout << "VALIDATOR_EVIDENCE_SUMMARY active=" << validator_summary.active
+              << " historical=" << validator_summary.historical
+              << " bootstrap_dev=" << validator_summary.bootstrap_dev << "\n";
     for (const auto& entry : sortedValidatorStats(stats.validators)) {
         std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " class=" << validatorEvidenceClass(entry.first, active_validators)
                   << " finalization_votes=" << entry.second.finalization_votes
                   << " commit_phase_votes=" << entry.second.commit_phase_votes
                   << " round_change_votes=" << entry.second.round_change_votes << "\n";
@@ -1451,6 +1503,8 @@ int launchReport(int argc, char** argv) {
     const auto fee_pool_holdings = node.holdingsForAddress(fee_pool_address);
     std::uint64_t fee_pool_total = 0;
     for (const auto& holding : fee_pool_holdings) fee_pool_total += holding.second;
+    const auto validator_summary = summarizeValidatorEvidence(board.validators, registry.active_validators);
+    const auto genesis_validators = genesisValidators(registry);
 
     std::cout << "LAUNCH_REPORT " << store_path << "\n";
     std::cout << "CHAIN has_genesis=" << (status.has_genesis ? 1 : 0)
@@ -1467,6 +1521,9 @@ int launchReport(int argc, char** argv) {
               << " endpoint_events=" << endpoints.event_count
               << " active_endpoints=" << endpoints.latest.size()
               << " transfer_fee_micro_units=" << node.transferFeeMicroUnits() << "\n";
+    std::cout << "VALIDATOR_EVIDENCE_SUMMARY active=" << validator_summary.active
+              << " historical=" << validator_summary.historical
+              << " bootstrap_dev=" << validator_summary.bootstrap_dev << "\n";
     std::cout << "ACTIVE_VALIDATORS";
     for (const auto& validator : registry.active_validators) std::cout << " " << validator;
     std::cout << "\n";
@@ -1492,7 +1549,9 @@ int launchReport(int argc, char** argv) {
     for (const auto& validator : registry.active_validators) {
         const auto reserve_address = primechain::protocol::validatorReserveAddress(validator);
         const auto reserve_holdings = node.holdingsForAddress(reserve_address);
+        const auto admission = containsAddress(genesis_validators, validator) ? "genesis" : "reserve";
         std::cout << "VALIDATOR_RESERVE_SUMMARY " << validator
+                  << " admission=" << admission
                   << " holdings=" << reserve_holdings.size()
                   << " total_micro_units=" << node.lockedValidatorReserveMicroUnits(validator) << "\n";
     }
@@ -1525,6 +1584,7 @@ int launchReport(int argc, char** argv) {
               << " pending_composites_after_range=" << board.pending_composites_after_range << "\n";
     for (const auto& entry : sortedValidatorStats(board.validators)) {
         std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " class=" << validatorEvidenceClass(entry.first, registry.active_validators)
                   << " finalization_votes=" << entry.second.finalization_votes
                   << " commit_phase_votes=" << entry.second.commit_phase_votes
                   << " round_change_votes=" << entry.second.round_change_votes << "\n";
