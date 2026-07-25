@@ -21,6 +21,8 @@ install-validator-service options:
   --unit <name>                         default: primechain-launch-node
   --user <user>                         default: primechain
   --finalization-timeout-ms <ms>        default: 5000
+  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
+  --ready-timeout-sec <seconds>         default: 20
   --no-chain-endpoints                  disable on-chain endpoint peer discovery
   --dry-run                             print the unit, do not write or restart systemd
   --no-restart                          write unit but do not restart/enable it
@@ -121,6 +123,35 @@ check_binary_flags() {
   echo "$help" | grep -q -- "--use-chain-endpoints" || die "binary does not support --use-chain-endpoints: $binary"
 }
 
+wait_for_node_ready() {
+  local client="$1"
+  local host="$2"
+  local port="$3"
+  local timeout_sec="$4"
+  local start
+  start="$(date +%s)"
+
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  while true; do
+    if "$client" status "$host" "$port" >/tmp/primechain-ops-ready.out 2>/tmp/primechain-ops-ready.err; then
+      echo "READY node-status $(cat /tmp/primechain-ops-ready.out)"
+      rm -f /tmp/primechain-ops-ready.out /tmp/primechain-ops-ready.err
+      return 0
+    fi
+
+    local now
+    now="$(date +%s)"
+    if [ $((now - start)) -ge "$timeout_sec" ]; then
+      echo "ERROR node did not become ready within ${timeout_sec}s at ${host}:${port}" >&2
+      sed 's/^/  /' /tmp/primechain-ops-ready.err >&2 || true
+      rm -f /tmp/primechain-ops-ready.out /tmp/primechain-ops-ready.err
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 cmd_install_or_print() {
   local mode="$1"
   shift
@@ -128,6 +159,7 @@ cmd_install_or_print() {
   local port="$default_port"
   local data="$default_data"
   local binary="$default_binary"
+  local client="$default_client"
   local identity=""
   local genesis_validator=""
   local bootstrap=""
@@ -140,12 +172,14 @@ cmd_install_or_print() {
   local use_chain_endpoints=1
   local dry_run=0
   local no_restart=0
+  local ready_timeout_sec=20
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --port) require_value "$1" "${2:-}"; port="$2"; shift 2 ;;
       --data) require_value "$1" "${2:-}"; data="$2"; shift 2 ;;
       --binary) require_value "$1" "${2:-}"; binary="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
       --identity) require_value "$1" "${2:-}"; identity="$2"; shift 2 ;;
       --genesis-validator) require_value "$1" "${2:-}"; genesis_validator="$2"; shift 2 ;;
       --bootstrap) require_value "$1" "${2:-}"; bootstrap="$2"; shift 2 ;;
@@ -155,6 +189,7 @@ cmd_install_or_print() {
       --unit) require_value "$1" "${2:-}"; unit="$2"; shift 2 ;;
       --user) require_value "$1" "${2:-}"; unit_user="$2"; shift 2 ;;
       --finalization-timeout-ms) require_value "$1" "${2:-}"; finalization_timeout_ms="$2"; shift 2 ;;
+      --ready-timeout-sec) require_value "$1" "${2:-}"; ready_timeout_sec="$2"; shift 2 ;;
       --no-chain-endpoints) use_chain_endpoints=0; shift ;;
       --dry-run) dry_run=1; shift ;;
       --no-restart) no_restart=1; shift ;;
@@ -178,6 +213,7 @@ cmd_install_or_print() {
     exit 0
   fi
 
+  [ "$no_restart" -eq 1 ] || [ -x "$client" ] || die "client is not executable: $client"
   [ "$(id -u)" -eq 0 ] || die "install-validator-service must run as root; use sudo"
   mkdir -p "$(dirname "$data")"
   have systemctl || die "systemctl not found"
@@ -193,6 +229,7 @@ cmd_install_or_print() {
   if [ "$no_restart" -eq 0 ]; then
     systemctl enable --now "$unit"
     systemctl restart "$unit"
+    wait_for_node_ready "$client" 127.0.0.1 "$port" "$ready_timeout_sec"
     systemctl --no-pager -l status "$unit"
   else
     echo "UNIT_WRITTEN $service_path"

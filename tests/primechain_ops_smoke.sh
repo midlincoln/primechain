@@ -41,3 +41,14 @@ if echo "$unit" | grep -q -- '--use-chain- endpoints'; then
   echo "split --use-chain-endpoints flag found" >&2
   exit 1
 fi
+
+"$ops" install-validator-service \
+  --binary "$tmp/bin/primechain-sync-server" \
+  --client "$tmp/bin/missing-client" \
+  --data "$tmp/data/chain.dat" \
+  --working-dir "$tmp/work" \
+  --env-file "$tmp/wallet.env" \
+  --identity "$tmp/validator.wallet" \
+  --genesis-validator pcpq1_genesis \
+  --no-restart \
+  --dry-run >/dev/null
