@@ -576,6 +576,11 @@ field_value() {
   awk -v key="$field" '{ for (i=1; i<=NF; ++i) { split($i, a, "="); if (a[1] == key) { print a[2]; exit } } }' <<<"$line"
 }
 
+mempool_count() {
+  local mempool_file="$1"
+  awk '$1 == "MEMPOOL" { print $2; found=1; exit } END { if (!found) print 0 }' "$mempool_file"
+}
+
 cmd_transaction_evidence() {
   local client="$default_client"
   local send="$repo_root/build/primechain-send"
@@ -647,7 +652,24 @@ cmd_transaction_evidence() {
   if [ -z "$fee" ]; then
     fee="$(field_value "$(grep '^ECONOMIC_POLICY ' "$tmpdir/launch-before.out")" active_transfer_fee_micro_units)"
   fi
-  [ -n "$fee" ] || die "could not determine transfer fee"
+  [ -n "$fee" ] || { rm -rf "$tmpdir"; die "could not determine transfer fee"; }
+
+  local current_frontier
+  current_frontier="$(field_value "$(grep '^CHAIN ' "$tmpdir/launch-before.out")" frontier)"
+  [ -n "$current_frontier" ] || { rm -rf "$tmpdir"; die "could not determine current frontier"; }
+  if [ "$target" -le "$current_frontier" ]; then
+    rm -rf "$tmpdir"
+    die "--target must be greater than current frontier; target=$target frontier=$current_frontier"
+  fi
+
+  "$client" query "$primary_host" "$primary_port" GET_MEMPOOL >"$tmpdir/mempool-before.out"
+  local pending_count
+  pending_count="$(mempool_count "$tmpdir/mempool-before.out")"
+  if [ "$pending_count" -ne 0 ]; then
+    cat "$tmpdir/mempool-before.out" >&2
+    rm -rf "$tmpdir"
+    die "mempool is not empty; mine or clear pending transactions before transaction-evidence"
+  fi
 
   local sender_address receiver_address
   sender_address="$($client address "$sender_wallet")"
@@ -668,6 +690,10 @@ cmd_transaction_evidence() {
   sender_before="$(balance_for_prime "$tmpdir/sender-before.out" "$prime")"
   receiver_before="$(balance_for_prime "$tmpdir/receiver-before.out" "$prime")"
   pool_before="$(fee_pool_for_prime "$tmpdir/pool-before.out" "$prime")"
+  if [ "$sender_before" -lt $((amount + fee)) ]; then
+    rm -rf "$tmpdir"
+    die "insufficient sender balance for prime $prime: balance=$sender_before required=$((amount + fee))"
+  fi
 
   "$send" submit "$primary_host" "$primary_port" "$sender_wallet" "$receiver_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out"
   grep -q '^TX_ACCEPTED ' "$tmpdir/submit.out" || {

@@ -130,6 +130,9 @@ case "$cmd" in
       GET_NONCE)
         echo "NONCE ${5:-pcpq1_sender} 0 1"
         ;;
+      GET_MEMPOOL)
+        echo "MEMPOOL 0"
+        ;;
       GET_VALIDATORS)
         echo "VALIDATORS 2 pcpq1_a pcpq1_b"
         ;;
