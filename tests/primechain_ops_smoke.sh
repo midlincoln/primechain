@@ -63,6 +63,14 @@ case "$cmd" in
   status)
     echo "STATUS 122 30 92 1 121 123 abc123"
     ;;
+  sync-peer)
+    echo "SYNC_UP_TO_DATE 123"
+    ;;
+  launch-report)
+    echo "LAUNCH_REPORT $2"
+    echo "CHAIN has_genesis=1 height=121 frontier=123 latest_hash=abc123 records=122 prime_records=30 composite_records=92 transactions=21"
+    echo "VALIDATOR_STATE epoch=2 active_validators=2 registry_events=2 endpoint_events=2 active_endpoints=2 transfer_fee_micro_units=1"
+    ;;
   query)
     q="${4:-}"
     case "$q" in
@@ -105,3 +113,19 @@ chmod +x "$tmp/bin/primechain-client"
   --client "$tmp/bin/primechain-client" \
   --validator 192.0.2.10:8339 \
   --validator 192.0.2.11:8339 | grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$'
+
+
+mkdir -p "$tmp/workdir/data"
+touch "$tmp/workdir/data/chain.dat"
+"$ops" evidence \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 \
+  --output "$tmp/evidence.txt" | grep -q '^EVIDENCE_REPORT '
+
+grep -q '^PRIMECHAIN_EVIDENCE generated_at=' "$tmp/evidence.txt"
+grep -q '^RESULT sync-peer OK$' "$tmp/evidence.txt"
+grep -q '^RESULT launch-report OK$' "$tmp/evidence.txt"
+grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$' "$tmp/evidence.txt"
+grep -q '^RESULT doctor-network OK$' "$tmp/evidence.txt"

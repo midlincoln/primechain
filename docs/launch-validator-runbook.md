@@ -70,11 +70,23 @@ Check the full validator network from the desktop:
 ```bash
 cd ~/primechain
 ./scripts/primechain-ops doctor-network \
-  --client ~/primechain/build/primechain-client \
   --validator 192.81.209.230:8339 \
   --validator 137.184.129.231:8339 \
   --validator 67.205.172.245:8339
 ```
+
+Create a timestamped evidence file after a milestone:
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops evidence \
+  --workdir ~/pc-launch-testnet \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339
+```
+
+The report is written under `~/pc-launch-testnet/reports/` by default and includes `sync-peer`, `launch-report`, and `doctor-network` output.
 
 To preview the generated service without touching systemd:
 

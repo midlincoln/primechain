@@ -8,21 +8,22 @@ usage:
   primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
+  primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
   --data <chain.dat>                    default: /home/primechain/primechain-launch-data/chain.dat
-  --binary <primechain-sync-server>     default: /home/primechain/primechain/build/primechain-sync-server
+  --binary <primechain-sync-server>     default: <repo>/build/primechain-sync-server
   --identity <wallet>                   required
   --genesis-validator <addr>            required
   --bootstrap <host:port>               optional bootstrap peer
   --bind <address>                      default: 0.0.0.0
   --env-file <path>                     default: /home/primechain/primechain-wallet.env
-  --working-dir <path>                  default: /home/primechain/primechain
+  --working-dir <path>                  default: <repo>
   --unit <name>                         default: primechain-launch-node
   --user <user>                         default: primechain
   --finalization-timeout-ms <ms>        default: 5000
-  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
+  --client <primechain-client>          default: <repo>/build/primechain-client
   --ready-timeout-sec <seconds>         default: 20
   --no-chain-endpoints                  disable on-chain endpoint peer discovery
   --dry-run                             print the unit, do not write or restart systemd
@@ -31,14 +32,21 @@ install-validator-service options:
 doctor-validator options:
   --host <host>                         default: 127.0.0.1
   --port <port>                         default: 8339
-  --binary <primechain-sync-server>     default: /home/primechain/primechain/build/primechain-sync-server
-  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
+  --binary <primechain-sync-server>     default: <repo>/build/primechain-sync-server
+  --client <primechain-client>          default: <repo>/build/primechain-client
   --identity <wallet>                   optional wallet path check
   --unit <name>                         default: primechain-launch-node
 
 doctor-network options:
   --validator <host:port>               repeat once per validator
-  --client <primechain-client>          default: /home/primechain/primechain/build/primechain-client
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+evidence options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --output <file>                       optional report file path
+  --out-dir <dir>                       default: <workdir>/reports
 USAGE
 }
 
@@ -57,12 +65,15 @@ require_value() {
   [ -n "$value" ] || die "$flag requires a value"
 }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
 default_port=8339
 default_data=/home/primechain/primechain-launch-data/chain.dat
-default_binary=/home/primechain/primechain/build/primechain-sync-server
-default_client=/home/primechain/primechain/build/primechain-client
+default_binary="$repo_root/build/primechain-sync-server"
+default_client="$repo_root/build/primechain-client"
 default_env_file=/home/primechain/primechain-wallet.env
-default_working_dir=/home/primechain/primechain
+default_working_dir="$repo_root"
 default_unit=primechain-launch-node
 default_user=primechain
 default_bind=0.0.0.0
@@ -304,7 +315,7 @@ cmd_doctor() {
   check "peers-query" "$client" query "$host" "$port" GET_PEERS
 
   rm -f /tmp/primechain-ops-check.out /tmp/primechain-ops-check.err
-  [ "$failed" -eq 0 ] || exit 1
+  [ "$failed" -eq 0 ] || return 1
 }
 
 
@@ -426,6 +437,85 @@ cmd_doctor_network() {
   if [ "$failed" -eq 0 ]; then
     echo "NETWORK_OK validators=${#validators[@]} frontier=$expected_frontier hash=$expected_hash"
   fi
+  [ "$failed" -eq 0 ] || return 1
+}
+
+
+cmd_evidence() {
+  local client="$default_client"
+  local workdir=""
+  local output=""
+  local out_dir=""
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --output) require_value "$1" "${2:-}"; output="$2"; shift 2 ;;
+      --out-dir) require_value "$1" "${2:-}"; out_dir="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  [ -n "$out_dir" ] || out_dir="$workdir/reports"
+  if [ -z "$output" ]; then
+    mkdir -p "$out_dir"
+    output="$out_dir/launch-evidence-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  else
+    mkdir -p "$(dirname "$output")"
+  fi
+
+  local failed=0
+  {
+    echo "PRIMECHAIN_EVIDENCE generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "WORKDIR $workdir"
+    echo "CLIENT $client"
+    echo "VALIDATORS ${validators[*]}"
+    echo
+    echo "COMMAND sync-peer"
+    if "$client" sync-peer "$workdir"; then
+      echo "RESULT sync-peer OK"
+    else
+      rc=$?
+      echo "RESULT sync-peer FAIL rc=$rc"
+      failed=1
+    fi
+    echo
+    echo "COMMAND launch-report"
+    if [ -f "$chain" ] && "$client" launch-report "$chain"; then
+      echo "RESULT launch-report OK"
+    else
+      rc=$?
+      echo "RESULT launch-report FAIL rc=$rc"
+      failed=1
+    fi
+    echo
+    echo "COMMAND doctor-network"
+    local doctor_args=(--client "$client")
+    local validator
+    for validator in "${validators[@]}"; do
+      doctor_args+=(--validator "$validator")
+    done
+    if cmd_doctor_network "${doctor_args[@]}"; then
+      echo "RESULT doctor-network OK"
+    else
+      rc=$?
+      echo "RESULT doctor-network FAIL rc=$rc"
+      failed=1
+    fi
+  } > "$output" 2>&1
+
+  cat "$output"
+  echo "EVIDENCE_REPORT $output"
   [ "$failed" -eq 0 ] || exit 1
 }
 
@@ -438,6 +528,7 @@ main() {
     print-validator-service) cmd_install_or_print print "$@" ;;
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
+    evidence) cmd_evidence "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac
