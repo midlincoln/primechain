@@ -507,6 +507,13 @@ add_test(
 )
 
 add_test(
+    NAME client_launch_report
+    COMMAND
+        /bin/sh -c
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.log && $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.log ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat >/dev/null && $<TARGET_FILE:primechain-client> launch-report ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat | grep -q '^LAUNCH_REPORT ' && $<TARGET_FILE:primechain-client> launch-report ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat | grep -q '^CHAIN has_genesis=1 height=18 frontier=20 .* records=19 prime_records=8 composite_records=11 transactions=0$' && $<TARGET_FILE:primechain-client> launch-report ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat | grep -q '^VALIDATOR_STATE epoch=0 active_validators=0 registry_events=0 endpoint_events=0 active_endpoints=0 transfer_fee_micro_units=1$' && $<TARGET_FILE:primechain-client> launch-report ${CMAKE_CURRENT_BINARY_DIR}/client-launch-report.dat | grep -q '^BOARD records=19 prime=8 composite=11 transactions=0 discovery_micro_units=8000000 fee_micro_units=0 unique_miners=3 pending_composites_after_range=1$'"
+)
+
+add_test(
     NAME client_status_and_sync
     COMMAND
         /bin/sh -c

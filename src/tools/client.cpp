@@ -1247,6 +1247,36 @@ std::vector<PeerConfig> loadValidatorEndpointsFromStore(const std::string& store
     return endpoints;
 }
 
+struct ValidatorEndpointReport {
+    std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
+    std::uint64_t event_count{0};
+};
+
+bool collectValidatorEndpointReport(
+    const std::vector<primechain::storage::StoredRecord>& records,
+    ValidatorEndpointReport& report,
+    std::string& error) {
+    report = ValidatorEndpointReport{};
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) return false;
+            for (const auto& update : record->validator_endpoints) {
+                report.latest[update.validator_address] = update;
+                ++report.event_count;
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        for (const auto& update : record->validator_endpoints) {
+            report.latest[update.validator_address] = update;
+            ++report.event_count;
+        }
+    }
+    return true;
+}
+
 int validatorEndpoints(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string store_path = argv[2];
@@ -1258,36 +1288,16 @@ int validatorEndpoints(int argc, char** argv) {
         return 1;
     }
 
-    std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
-    std::uint64_t event_count = 0;
-    for (const auto& stored : records) {
-        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
-            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
-            if (!record.has_value()) {
-                std::cerr << "could not decode prime record: " << error << "\n";
-                return 1;
-            }
-            for (const auto& update : record->validator_endpoints) {
-                latest[update.validator_address] = update;
-                ++event_count;
-            }
-            continue;
-        }
-        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
-        if (!record.has_value()) {
-            std::cerr << "could not decode composite record: " << error << "\n";
-            return 1;
-        }
-        for (const auto& update : record->validator_endpoints) {
-            latest[update.validator_address] = update;
-            ++event_count;
-        }
+    ValidatorEndpointReport report;
+    if (!collectValidatorEndpointReport(records, report, error)) {
+        std::cerr << "could not decode validator endpoint record: " << error << "\n";
+        return 1;
     }
 
     std::cout << "VALIDATOR_ENDPOINT_REGISTRY " << store_path
-              << " active_endpoints=" << latest.size()
-              << " events=" << event_count << "\n";
-    for (const auto& entry : latest) {
+              << " active_endpoints=" << report.latest.size()
+              << " events=" << report.event_count << "\n";
+    for (const auto& entry : report.latest) {
         const auto& update = entry.second;
         std::cout << "VALIDATOR_ENDPOINT " << update.validator_address
                   << " host=" << update.host
@@ -1296,6 +1306,33 @@ int validatorEndpoints(int argc, char** argv) {
                   << " sequence=" << update.sequence << "\n";
     }
     return 0;
+}
+
+struct EconomicPolicyReport {
+    std::vector<std::pair<primechain::PrimeValue, primechain::protocol::EconomicPolicyUpdateV1>> events;
+};
+
+bool collectEconomicPolicyReport(
+    const std::vector<primechain::storage::StoredRecord>& records,
+    EconomicPolicyReport& report,
+    std::string& error) {
+    report = EconomicPolicyReport{};
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) return false;
+            if (record->economic_policy.transfer_fee_micro_units != 0) {
+                report.events.push_back({record->integer, record->economic_policy});
+            }
+            continue;
+        }
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        if (record->economic_policy.transfer_fee_micro_units != 0) {
+            report.events.push_back({record->integer, record->economic_policy});
+        }
+    }
+    return true;
 }
 
 int economicPolicy(int argc, char** argv) {
@@ -1315,39 +1352,182 @@ int economicPolicy(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::pair<primechain::PrimeValue, primechain::protocol::EconomicPolicyUpdateV1>> events;
-    for (const auto& stored : records) {
-        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
-            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
-            if (!record.has_value()) {
-                std::cerr << "could not decode prime record: " << error << "\n";
-                return 1;
-            }
-            if (record->economic_policy.transfer_fee_micro_units != 0) {
-                events.push_back({record->integer, record->economic_policy});
-            }
-            continue;
-        }
-        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
-        if (!record.has_value()) {
-            std::cerr << "could not decode composite record: " << error << "\n";
-            return 1;
-        }
-        if (record->economic_policy.transfer_fee_micro_units != 0) {
-            events.push_back({record->integer, record->economic_policy});
-        }
+    EconomicPolicyReport report;
+    if (!collectEconomicPolicyReport(records, report, error)) {
+        std::cerr << "could not decode economic policy record: " << error << "\n";
+        return 1;
     }
 
     std::cout << "ECONOMIC_POLICY_REGISTRY " << store_path
               << " active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
-              << " events=" << events.size() << "\n";
-    for (const auto& entry : events) {
+              << " events=" << report.events.size() << "\n";
+    for (const auto& entry : report.events) {
         const auto& update = entry.second;
         std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
                   << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
                   << " effective_integer=" << update.effective_integer
                   << " sequence=" << update.sequence
                   << " votes=" << update.votes.size() << "\n";
+    }
+    return 0;
+}
+
+int launchReport(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string store_path = argv[2];
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "launch_report_error: " << error << "\n";
+        return 1;
+    }
+    const auto status = node.status();
+
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "launch_report_error: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t prime_records = 0;
+    std::uint64_t composite_records = 0;
+    std::uint64_t transaction_count = 0;
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            ++prime_records;
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode prime record: " << error << "\n";
+                return 1;
+            }
+            transaction_count += record->transactions.size();
+            continue;
+        }
+        ++composite_records;
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) {
+            std::cerr << "could not decode composite record: " << error << "\n";
+            return 1;
+        }
+        transaction_count += record->transactions.size();
+    }
+
+    primechain::node::ValidatorRegistryState registry;
+    if (!primechain::node::loadValidatorRegistry(store_path, registry, error)) {
+        std::cerr << "validator_registry_error: " << error << "\n";
+        return 1;
+    }
+
+    ValidatorEndpointReport endpoints;
+    if (!collectValidatorEndpointReport(records, endpoints, error)) {
+        std::cerr << "validator_endpoint_registry_error: " << error << "\n";
+        return 1;
+    }
+
+    EconomicPolicyReport policy;
+    if (!collectEconomicPolicyReport(records, policy, error)) {
+        std::cerr << "economic_policy_error: " << error << "\n";
+        return 1;
+    }
+
+    BoardReportStats board;
+    if (!records.empty() && !collectBoardReportStats(store_path, 2, status.frontier_integer, board, error)) {
+        std::cerr << "could not build board report: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t discovery_total = 0;
+    std::uint64_t unique_miners = 0;
+    for (const auto& entry : board.miners) {
+        const auto record_count = entry.second.prime_records + entry.second.composite_records;
+        const auto reward_total = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (record_count != 0 || reward_total != 0) ++unique_miners;
+        discovery_total += entry.second.discovery_micro_units;
+    }
+
+    const auto fee_pool_address = node.validatorFeePoolAddress();
+    const auto fee_pool_holdings = node.holdingsForAddress(fee_pool_address);
+    std::uint64_t fee_pool_total = 0;
+    for (const auto& holding : fee_pool_holdings) fee_pool_total += holding.second;
+
+    std::cout << "LAUNCH_REPORT " << store_path << "\n";
+    std::cout << "CHAIN has_genesis=" << (status.has_genesis ? 1 : 0)
+              << " height=" << status.height
+              << " frontier=" << status.frontier_integer
+              << " latest_hash=" << primechain::crypto::toHex(status.latest_record_hash)
+              << " records=" << records.size()
+              << " prime_records=" << prime_records
+              << " composite_records=" << composite_records
+              << " transactions=" << transaction_count << "\n";
+    std::cout << "VALIDATOR_STATE epoch=" << node.validatorEpoch()
+              << " active_validators=" << registry.active_validators.size()
+              << " registry_events=" << registry.events.size()
+              << " endpoint_events=" << endpoints.event_count
+              << " active_endpoints=" << endpoints.latest.size()
+              << " transfer_fee_micro_units=" << node.transferFeeMicroUnits() << "\n";
+    std::cout << "ACTIVE_VALIDATORS";
+    for (const auto& validator : registry.active_validators) std::cout << " " << validator;
+    std::cout << "\n";
+    for (const auto& event : registry.events) {
+        std::cout << "VALIDATOR_REGISTRY_EVENT "
+                  << primechain::node::validatorRegistryEventTypeName(event.type)
+                  << " height=" << event.height
+                  << " integer=" << event.record_integer
+                  << " epoch=" << event.epoch
+                  << " activation_integer=" << event.activation_integer
+                  << " validators=" << event.validator_set.size();
+        for (const auto& validator : event.validator_set) std::cout << " " << validator;
+        std::cout << "\n";
+    }
+    for (const auto& entry : endpoints.latest) {
+        const auto& update = entry.second;
+        std::cout << "VALIDATOR_ENDPOINT " << update.validator_address
+                  << " host=" << update.host
+                  << " port=" << update.port
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence << "\n";
+    }
+    for (const auto& validator : registry.active_validators) {
+        const auto reserve_address = primechain::protocol::validatorReserveAddress(validator);
+        const auto reserve_holdings = node.holdingsForAddress(reserve_address);
+        std::cout << "VALIDATOR_RESERVE_SUMMARY " << validator
+                  << " holdings=" << reserve_holdings.size()
+                  << " total_micro_units=" << node.lockedValidatorReserveMicroUnits(validator) << "\n";
+    }
+    std::cout << "ECONOMIC_POLICY active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " events=" << policy.events.size() << "\n";
+    for (const auto& entry : policy.events) {
+        const auto& update = entry.second;
+        std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
+                  << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence
+                  << " votes=" << update.votes.size() << "\n";
+    }
+    std::cout << "VALIDATOR_FEE_POOL epoch=" << node.validatorEpoch()
+              << " address=" << fee_pool_address
+              << " holdings=" << fee_pool_holdings.size()
+              << " total_micro_units=" << fee_pool_total << "\n";
+    for (const auto& holding : fee_pool_holdings) {
+        std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    std::cout << "BOARD records=" << board.records
+              << " prime=" << board.prime_records
+              << " composite=" << board.composite_records
+              << " transactions=" << board.transaction_count
+              << " discovery_micro_units=" << discovery_total
+              << " fee_micro_units=" << board.fee_micro_units
+              << " unique_miners=" << unique_miners
+              << " pending_composites_after_range=" << board.pending_composites_after_range << "\n";
+    for (const auto& entry : sortedValidatorStats(board.validators)) {
+        std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " finalization_votes=" << entry.second.finalization_votes
+                  << " commit_phase_votes=" << entry.second.commit_phase_votes
+                  << " round_change_votes=" << entry.second.round_change_votes << "\n";
     }
     return 0;
 }
@@ -1923,6 +2103,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " rewards <workdir>\n"
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
+              << "  " << argv0 << " launch-report <record-store>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units|auto> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-reserve <record-store> <validator-address>\n"
@@ -2002,6 +2183,10 @@ int main(int argc, char** argv) {
     if (command == "board-report") {
         if (argc != 7) { printUsage(argv[0]); return 1; }
         return boardReport(argc, argv);
+    }
+    if (command == "launch-report") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return launchReport(argc, argv);
     }
     if (command == "validator-reputation") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
