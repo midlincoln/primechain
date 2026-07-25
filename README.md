@@ -97,6 +97,9 @@ This reports the replay-derived genesis/epoch validator history. It is the
 foundation for later on-chain validator admission, reserve locks, and endpoint
 updates.
 
+The tested one-validator-to-three-validator launch procedure is documented in
+[`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md).
+
 `add-mine-job` records the target frontier, `run-jobs` syncs before mining,
 runs the authenticated frontier miner only when the target is still ahead, then
 syncs again and records pending/complete/failed state. `mine-job` remains a

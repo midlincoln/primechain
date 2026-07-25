@@ -1323,7 +1323,8 @@ public:
         bool factorization_helper_enabled,
         int finalization_timeout_ms,
         std::vector<primechain::Address> validator_set,
-        std::optional<primechain::wallet::MinerIdentity> validator_identity)
+        std::optional<primechain::wallet::MinerIdentity> validator_identity,
+        bool use_chain_endpoints)
         : store_path_(std::move(store_path)),
           advance_enabled_(advance_enabled),
           ack_mempool_enabled_(ack_mempool_enabled),
@@ -1337,7 +1338,8 @@ public:
           round_change_store_(store_path_ + ".rounds"),
           genesis_validator_set_(validator_set),
           validator_set_(std::move(validator_set)),
-          validator_identity_(std::move(validator_identity)) {
+          validator_identity_(std::move(validator_identity)),
+          use_chain_endpoints_(use_chain_endpoints) {
         for (const auto& peer : peers) {
             addPeer(peer);
         }
@@ -1380,13 +1382,58 @@ public:
             }
         }
         validator_set_ = node.validatorSet();
-        if (validator_identity_.has_value() &&
-            std::find(validator_set_.begin(), validator_set_.end(), validator_identity_->address) ==
-                validator_set_.end()) {
-            error = "local validator identity is not in active validator epoch";
-            return false;
+        if (use_chain_endpoints_) {
+            loadChainEndpointPeers();
         }
         return true;
+    }
+
+    bool localValidatorActive() const {
+        return validator_identity_.has_value() &&
+               std::binary_search(
+                   validator_set_.begin(), validator_set_.end(), validator_identity_->address);
+    }
+
+    std::size_t loadChainEndpointPeers() {
+        std::string error;
+        primechain::storage::RecordStore store(store_path_);
+        const auto records = store.loadAll(error);
+        if (!error.empty()) {
+            std::cerr << "chain endpoint peer load warning: " << error << "\n";
+            return 0;
+        }
+
+        std::map<primechain::Address, primechain::protocol::ValidatorEndpointUpdateV1> latest;
+        for (const auto& stored : records) {
+            if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+                auto prime = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+                if (!prime.has_value()) {
+                    std::cerr << "chain endpoint peer load warning: " << error << "\n";
+                    return 0;
+                }
+                for (const auto& update : prime->validator_endpoints) latest[update.validator_address] = update;
+            } else {
+                auto composite = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+                if (!composite.has_value()) {
+                    std::cerr << "chain endpoint peer load warning: " << error << "\n";
+                    return 0;
+                }
+                for (const auto& update : composite->validator_endpoints) latest[update.validator_address] = update;
+            }
+        }
+
+        std::size_t added = 0;
+        for (const auto& validator : validator_set_) {
+            if (validator_identity_.has_value() && validator == validator_identity_->address) {
+                continue;
+            }
+            const auto found = latest.find(validator);
+            if (found == latest.end()) continue;
+            PeerEndpoint peer{found->second.host, static_cast<int>(found->second.port)};
+            const auto before = peers_.size();
+            if (addPeer(peer) && peers_.size() > before) ++added;
+        }
+        return added;
     }
 
     void handleClient(int fd) {
@@ -1696,6 +1743,9 @@ public:
         }
         std::remove((temp_path + ".idx").c_str());
         validator_set_ = reloaded.validatorSet();
+        if (use_chain_endpoints_) {
+            loadChainEndpointPeers();
+        }
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
@@ -1768,6 +1818,10 @@ public:
 
     bool hasKnownPeers() const {
         return !peers_.empty();
+    }
+
+    const std::vector<primechain::Address>& activeValidatorSet() const {
+        return validator_set_;
     }
 
     bool peerDiscoveryEnabled() const {
@@ -2647,8 +2701,8 @@ private:
         const primechain::protocol::ValidatorVoteV0* proposer_vote,
         primechain::protocol::ValidatorVoteV0& vote,
         std::string& error) {
-        if (!quorumEnabled() || !validator_identity_.has_value()) {
-            error = "validator quorum identity is not configured";
+        if (!quorumEnabled() || !localValidatorActive()) {
+            error = "local validator identity is not active in current validator epoch";
             return false;
         }
         std::lock_guard<std::mutex> lock(finalization_mutex_);
@@ -2826,7 +2880,7 @@ private:
         std::uint64_t new_round,
         std::string& error) const {
         CommitPhaseTimeoutVote vote;
-        if (!validator_identity_.has_value()) { error = "this node has no validator identity"; return vote; }
+        if (!localValidatorActive()) { error = "local validator identity is not active in current validator epoch"; return vote; }
         vote.validator_address = validator_identity_->address;
         vote.public_key = validator_identity_->public_key;
         vote.previous_record_hash = previous_hash;
@@ -2986,7 +3040,7 @@ private:
         std::uint64_t new_round,
         std::string& error) const {
         primechain::protocol::RoundChangeVoteV1 vote;
-        if (!validator_identity_.has_value()) { error = "this node has no validator identity"; return vote; }
+        if (!localValidatorActive()) { error = "local validator identity is not active in current validator epoch"; return vote; }
         vote.validator_address = validator_identity_->address;
         vote.public_key = validator_identity_->public_key;
         vote.previous_record_hash = previous_hash;
@@ -3528,8 +3582,8 @@ private:
         primechain::PrimeValue integer,
         primechain::storage::CommitPhaseVote& vote,
         std::string& error) const {
-        if (!validator_identity_.has_value()) {
-            error = "this node has no validator identity";
+        if (!localValidatorActive()) {
+            error = "local validator identity is not active in current validator epoch";
             return false;
         }
         vote.integer = integer;
@@ -5764,6 +5818,7 @@ private:
     std::vector<primechain::Address> genesis_validator_set_;
     std::vector<primechain::Address> validator_set_;
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
+    bool use_chain_endpoints_{false};
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
@@ -5800,6 +5855,7 @@ struct Options {
     int finalization_timeout_ms{0};
     std::vector<primechain::Address> validator_set;
     std::string validator_identity_path;
+    bool use_chain_endpoints{false};
 };
 
 std::optional<Options> parseOptions(int argc, char** argv) {
@@ -5820,7 +5876,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.bind_address = argv[index++];
             continue;
         }
-        if (flag == "--peer") {
+        if (flag == "--peer" || flag == "--bootstrap-peer") {
             if (index + 1 >= argc) {
                 return std::nullopt;
             }
@@ -5858,7 +5914,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             if (options.finalization_timeout_ms < 0) return std::nullopt;
             continue;
         }
-        if (flag == "--validator-set") {
+        if (flag == "--validator-set" || flag == "--genesis-validator-set") {
             options.validator_set.clear();
             while (index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
                 options.validator_set.push_back(argv[index++]);
@@ -5871,6 +5927,10 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.validator_identity_path = argv[index++];
             continue;
         }
+        if (flag == "--use-chain-endpoints") {
+            options.use_chain_endpoints = true;
+            continue;
+        }
         {
             return std::nullopt;
         }
@@ -5879,7 +5939,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 --validator-identity file]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
@@ -5903,8 +5963,12 @@ int main(int argc, char** argv) {
     Options options = *parsed;
 
     std::optional<primechain::wallet::MinerIdentity> validator_identity;
-    if (options.validator_set.empty() != options.validator_identity_path.empty()) {
-        std::cerr << "validator quorum requires both --validator-set and --validator-identity\n";
+    if (options.validator_set.empty() && !options.validator_identity_path.empty()) {
+        std::cerr << "validator identity requires --validator-set or --genesis-validator-set\n";
+        return 1;
+    }
+    if (options.validator_set.empty() && options.use_chain_endpoints) {
+        std::cerr << "--use-chain-endpoints requires --validator-set or --genesis-validator-set\n";
         return 1;
     }
     if (!options.validator_set.empty()) {
@@ -5949,7 +6013,8 @@ int main(int argc, char** argv) {
         options.enable_factorization_helper,
         options.finalization_timeout_ms,
         options.validator_set,
-        validator_identity);
+        validator_identity,
+        options.use_chain_endpoints);
     if (!options.peers.empty()) {
         std::string error;
         if (sync_server.peerDiscoveryEnabled()) {
@@ -6007,10 +6072,21 @@ int main(int argc, char** argv) {
         std::cout << "finalization timeout: " << options.finalization_timeout_ms << " ms\n";
     }
     if (validator_identity.has_value()) {
-        std::cout << "validator quorum enabled: "
-                  << primechain::core::requiredValidatorQuorum(options.validator_set.size())
-                  << "-of-" << options.validator_set.size()
-                  << "; local validator " << validator_identity->address << "\n";
+        const bool active = std::binary_search(
+            sync_server.activeValidatorSet().begin(),
+            sync_server.activeValidatorSet().end(),
+            validator_identity->address);
+        std::cout << "validator identity configured: " << validator_identity->address
+                  << (active ? " active" : " inactive") << "\n";
+    }
+    if (!options.validator_set.empty()) {
+        std::cout << "validator quorum active: "
+                  << primechain::core::requiredValidatorQuorum(sync_server.activeValidatorSet().size())
+                  << "-of-" << sync_server.activeValidatorSet().size()
+                  << "; genesis validators=" << options.validator_set.size() << "\n";
+    }
+    if (options.use_chain_endpoints) {
+        std::cout << "chain endpoint peer discovery enabled\n";
     }
 
     auto next_sync = std::chrono::steady_clock::now()

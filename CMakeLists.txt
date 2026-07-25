@@ -978,6 +978,11 @@ add_test(
 )
 
 add_test(
+    NAME chain_derived_candidate_startup
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/chain_derived_candidate_startup.sh $<TARGET_FILE:primechain-client> $<TARGET_FILE:primechain-sync-server> ${CMAKE_CURRENT_BINARY_DIR}/chain-derived-candidate
+)
+
+add_test(
     NAME fee_pool_distribution_to_active_validators
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/fee_pool_distribution_smoke.sh $<TARGET_FILE:primechain-client> $<TARGET_FILE:primechain-sync-server> $<TARGET_FILE:primechain-send> ${CMAKE_CURRENT_BINARY_DIR}/fee-pool-distribution
 )
