@@ -119,6 +119,17 @@ cd ~/primechain
 
 The transaction evidence command creates the receiver wallet if needed, submits a signed transfer to the first validator, mines to the requested target, syncs the local chain, verifies sender/receiver/fee-pool balance deltas, checks network agreement, and writes `transaction-evidence-<timestamp>.txt` under the reports directory.
 
+Check whether operational validator-fee distribution is due. This is an operator cadence, not a consensus rule; the launch default is every 1000 records.
+
+```bash
+cd ~/primechain
+./scripts/primechain-ops fee-distribution-status \
+  --workdir ~/pc-launch-testnet \
+  --interval-records 1000
+```
+
+The status prints the current frontier, last distribution integer, next distribution integer, due flag, current epoch fee-pool balance, and any historical distribution events found on chain.
+
 To preview the generated service without touching systemd:
 
 ```bash

@@ -101,6 +101,11 @@ case "$cmd" in
       echo "VALIDATOR_FEE_POOL $2 epoch=2 address=pcpool_validator_fees_epoch_2 holdings=0 total_micro_units=0"
     fi
     ;;
+  fee-distribution-status)
+    echo "FEE_DISTRIBUTION_STATUS $2 interval_records=${3:-1000} current_frontier=123 last_distribution_integer=23 next_distribution_integer=1023 due=0 current_epoch=2 pool_address=pcpool_validator_fees_epoch_2 pool_holdings=0 pool_total_micro_units=0 distributions=1"
+    echo "LAST_FEE_DISTRIBUTION integer=23 epoch=2 prime=101 micro_units=3"
+    echo "FEE_DISTRIBUTION_EVENT integer=23 epoch=2 prime=101 micro_units=3 recipients=3"
+    ;;
   add-mine-job)
     echo "MINE_JOB_ADDED $2 target=$4"
     ;;
@@ -212,6 +217,15 @@ grep -q '^PRIMECHAIN_LAUNCH_SUMMARY generated_at=' "$tmp/summary.txt"
 grep -q '^NETWORK validators=2 frontier=123 hash=abc123$' "$tmp/summary.txt"
 grep -q '^VALIDATOR_EVIDENCE_SUMMARY active=2 historical=0 bootstrap_dev=2$' "$tmp/summary.txt"
 grep -q '^VALIDATOR pcpq1_b admission=reserve holdings=10 total_micro_units=5000000 host=192.0.2.11 port=8339 effective_integer=101 sequence=1 class=active finalization_votes=89 commit_phase_votes=70 round_change_votes=0$' "$tmp/summary.txt"
+
+
+"$ops" fee-distribution-status \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --interval-records 1000 > "$tmp/fee-distribution-status.txt"
+
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=123 last_distribution_integer=23 next_distribution_integer=1023 due=0 .* pool_total_micro_units=0 distributions=1$' "$tmp/fee-distribution-status.txt"
+grep -q '^LAST_FEE_DISTRIBUTION integer=23 epoch=2 prime=101 micro_units=3$' "$tmp/fee-distribution-status.txt"
 
 
 touch "$tmp/sender.wallet"

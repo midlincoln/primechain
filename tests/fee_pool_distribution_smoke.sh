@@ -74,6 +74,10 @@ grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/mine-4.out"
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/pool-before.out"
 
+$client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-before.out"
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 last_distribution_integer=0 next_distribution_integer=1002 due=0 .* pool_total_micro_units=2 distributions=0$' "$base/distribution-status-before.out"
+grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/distribution-status-before.out"
+
 $send distribute-fee-pool 127.0.0.1 19188 0 3 2 1 "$a" "$b" "$c" > "$base/distribute.out"
 grep -q '^TX_ACCEPTED ' "$base/distribute.out"
 
@@ -83,6 +87,11 @@ grep -q '^JOB_COMPLETE target=5 frontier=5$' "$base/mine-5.out"
 
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-after.out"
 grep -q '^VALIDATOR_FEE_POOL .* holdings=0 total_micro_units=0$' "$base/pool-after.out"
+
+$client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-after.out"
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=5 last_distribution_integer=5 next_distribution_integer=1005 due=0 .* pool_total_micro_units=0 distributions=1$' "$base/distribution-status-after.out"
+grep -q '^LAST_FEE_DISTRIBUTION integer=5 epoch=0 prime=3 micro_units=2$' "$base/distribution-status-after.out"
+grep -q '^FEE_DISTRIBUTION_EVENT integer=5 epoch=0 prime=3 micro_units=2 recipients=2$' "$base/distribution-status-after.out"
 
 for wallet in a b c; do
     $client balance "$base/work/data/chain.dat" "$base/$wallet.wallet" > "$base/$wallet-balance.out"
@@ -98,7 +107,9 @@ if [ "$v3" = "$b" ]; then ! grep -q '^3 1$' "$base/b-balance.out"; fi
 if [ "$v3" = "$c" ]; then ! grep -q '^3 1$' "$base/c-balance.out"; fi
 
 cat "$base/pool-before.out"
+cat "$base/distribution-status-before.out"
 cat "$base/pool-after.out"
+cat "$base/distribution-status-after.out"
 cat "$base/a-balance.out"
 cat "$base/b-balance.out"
 cat "$base/c-balance.out"

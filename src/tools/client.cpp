@@ -1592,6 +1592,123 @@ int launchReport(int argc, char** argv) {
     return 0;
 }
 
+
+int feeDistributionStatus(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const std::uint64_t interval_records = argc == 4
+        ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+        : 1000;
+    if (interval_records == 0) {
+        std::cerr << "fee_distribution_status_error: interval must be positive\n";
+        return 1;
+    }
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "fee_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "fee_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t distribution_count = 0;
+    primechain::PrimeValue last_distribution_integer = 0;
+    std::uint64_t last_distribution_epoch = 0;
+    primechain::PrimeValue last_distribution_prime = 0;
+    std::uint64_t last_distribution_micro_units = 0;
+    std::vector<std::string> events;
+
+    for (const auto& stored : records) {
+        std::vector<primechain::protocol::TransactionV0> transactions;
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "fee_distribution_status_error: " << error << "\n";
+                return 1;
+            }
+            transactions = record->transactions;
+        } else {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "fee_distribution_status_error: " << error << "\n";
+                return 1;
+            }
+            transactions = record->transactions;
+        }
+        for (const auto& tx : transactions) {
+            if (tx.version != 3 ||
+                tx.sender_address.rfind("pcpool_validator_fees_epoch_", 0) != 0 ||
+                tx.inputs.empty()) {
+                continue;
+            }
+            const auto epoch_text = tx.sender_address.substr(std::string("pcpool_validator_fees_epoch_").size());
+            std::uint64_t epoch = 0;
+            try {
+                epoch = static_cast<std::uint64_t>(std::stoull(epoch_text));
+            } catch (...) {
+                continue;
+            }
+            ++distribution_count;
+            last_distribution_integer = stored.integer;
+            last_distribution_epoch = epoch;
+            last_distribution_prime = tx.inputs.front().prime;
+            last_distribution_micro_units = tx.inputs.front().amount.denominator == 1
+                ? tx.inputs.front().amount.numerator
+                : 0;
+
+            std::ostringstream event;
+            event << "FEE_DISTRIBUTION_EVENT integer=" << stored.integer
+                  << " epoch=" << epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units
+                  << " recipients=" << tx.outputs.size();
+            events.push_back(event.str());
+        }
+    }
+
+    const auto status = node.status();
+    const auto current_frontier = status.has_genesis ? status.frontier_integer : 0;
+    const auto anchor = last_distribution_integer == 0 ? 2 : last_distribution_integer;
+    const auto next_distribution_integer = anchor + interval_records;
+    const bool due = current_frontier >= next_distribution_integer;
+
+    const auto pool_address = node.validatorFeePoolAddress();
+    const auto holdings = node.holdingsForAddress(pool_address);
+    std::uint64_t pool_total = 0;
+    for (const auto& holding : holdings) pool_total += holding.second;
+
+    std::cout << "FEE_DISTRIBUTION_STATUS " << store_path
+              << " interval_records=" << interval_records
+              << " current_frontier=" << current_frontier
+              << " last_distribution_integer=" << last_distribution_integer
+              << " next_distribution_integer=" << next_distribution_integer
+              << " due=" << (due ? 1 : 0)
+              << " current_epoch=" << node.validatorEpoch()
+              << " pool_address=" << pool_address
+              << " pool_holdings=" << holdings.size()
+              << " pool_total_micro_units=" << pool_total
+              << " distributions=" << distribution_count << "\n";
+    if (last_distribution_integer != 0) {
+        std::cout << "LAST_FEE_DISTRIBUTION integer=" << last_distribution_integer
+                  << " epoch=" << last_distribution_epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units << "\n";
+    }
+    for (const auto& holding : holdings) {
+        std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    for (const auto& event : events) std::cout << event << "\n";
+    return 0;
+}
+
 int feePool(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -2171,6 +2288,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " economic-policy <record-store>\n"
               << "  " << argv0 << " fee-pool <record-store> [epoch]\n"
+              << "  " << argv0 << " fee-distribution-status <record-store> [interval-records]\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
@@ -2275,6 +2393,10 @@ int main(int argc, char** argv) {
     if (command == "fee-pool") {
         if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
         return feePool(argc, argv);
+    }
+    if (command == "fee-distribution-status") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return feeDistributionStatus(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

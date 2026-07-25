@@ -11,6 +11,7 @@ usage:
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
+  primechain-ops fee-distribution-status --workdir <client-workdir> [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -71,6 +72,11 @@ transaction-evidence options:
   --send <primechain-send>              default: <repo>/build/primechain-send
   --output <file>                       optional transaction evidence file path
   --out-dir <dir>                       default: <workdir>/reports
+
+fee-distribution-status options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --interval-records <count>            default: 1000
+  --client <primechain-client>          default: <repo>/build/primechain-client
 USAGE
 }
 
@@ -581,6 +587,32 @@ mempool_count() {
   awk '$1 == "MEMPOOL" { print $2; found=1; exit } END { if (!found) print 0 }' "$mempool_file"
 }
 
+
+cmd_fee_distribution_status() {
+  local client="$default_client"
+  local workdir=""
+  local interval_records=1000
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --interval-records) require_value "$1" "${2:-}"; interval_records="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  "$client" sync-peer "$workdir" >/dev/null
+  "$client" fee-distribution-status "$chain" "$interval_records"
+}
+
 cmd_transaction_evidence() {
   local client="$default_client"
   local send="$repo_root/build/primechain-send"
@@ -863,6 +895,7 @@ main() {
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;
+    fee-distribution-status) cmd_fee_distribution_status "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac
