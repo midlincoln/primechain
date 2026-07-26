@@ -95,8 +95,8 @@ case "$cmd" in
     ;;
   wallet-history)
     echo "WALLET_HISTORY $2 wallet=$3 address=pcpq1_sender events=2"
-    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=sent tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=100 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
-    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=fee-paid tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
+    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE confirmations=2 direction=sent tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=100 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
+    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE confirmations=2 direction=fee-paid tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
     ;;
   wallet-pending)
     echo "WALLET_PENDING $2:$3 wallet=$4 address=pcpq1_sender mempool=1 transactions=1 events=2"
@@ -110,6 +110,12 @@ case "$cmd" in
     echo "TX_OUTPUTS count=1"
     echo "TX_OUTPUT prime=3 amount_micro_units=100 amount_denominator=1 receiver=pcpq1_receiver"
     echo "TX_FEE prime=3 amount_micro_units=1 amount_denominator=1"
+    ;;
+  address-report)
+    echo "ADDRESS_REPORT $2 address=$3 frontier=5 holdings=1 total_micro_units=999899 transactions=1 events=2 sent_micro_units=100 received_micro_units=0 fee_micro_units=1"
+    echo "ADDRESS_HOLDING address=$3 prime=3 micro_units=999899"
+    echo "ADDRESS_TX integer=4 height=2 kind=COMPOSITE confirmations=2 direction=sent tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=100 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
+    echo "ADDRESS_TX integer=4 height=2 kind=COMPOSITE confirmations=2 direction=fee-paid tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
     ;;
   inspect)
     echo "record store inspection"
@@ -328,6 +334,16 @@ grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-dashboa
 
 grep -q '^TX_FOUND tx-smoke-123 .* confirmations=2 .* sender=pcpq1_sender$' "$tmp/tx-lookup.txt"
 grep -q '^TX_OUTPUT prime=3 amount_micro_units=100 amount_denominator=1 receiver=pcpq1_receiver$' "$tmp/tx-lookup.txt"
+
+
+"$ops" address-report \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --address pcpq1_sender \
+  --last 1 > "$tmp/address-report.txt"
+
+grep -q '^ADDRESS_REPORT .* address=pcpq1_sender .* transactions=1 events=2 sent_micro_units=100 received_micro_units=0 fee_micro_units=1$' "$tmp/address-report.txt"
+grep -q '^ADDRESS_TX .* confirmations=2 direction=sent tx_hash=tx-smoke-123 ' "$tmp/address-report.txt"
 
 
 "$ops" wallet-receive \

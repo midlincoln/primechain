@@ -85,8 +85,8 @@ grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/pool-before.ou
 
 $client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wallet" > "$base/sender-history.out"
 grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history.out"
-grep -E -q '^TX_EVENT .* direction=sent .* prime=3 amount_micro_units=1000 .* receiver=' "$base/sender-history.out"
-grep -E -q '^TX_EVENT .* direction=fee-paid .* prime=3 amount_micro_units=1 .* receiver=validator-fee-pool$' "$base/sender-history.out"
+grep -E -q '^TX_EVENT .* confirmations=1 direction=sent .* prime=3 amount_micro_units=1000 .* receiver=' "$base/sender-history.out"
+grep -E -q '^TX_EVENT .* confirmations=1 direction=fee-paid .* prime=3 amount_micro_units=1 .* receiver=validator-fee-pool$' "$base/sender-history.out"
 
 $client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/composite.wallet" > "$base/receiver-history.out"
 grep -q '^WALLET_HISTORY .* events=2$' "$base/receiver-history.out"
@@ -95,6 +95,15 @@ grep -E -q '^TX_EVENT .* direction=received .* prime=3 amount_micro_units=1000 .
 $client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wallet" --last 1 > "$base/sender-history-last.out"
 grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history-last.out"
 [ "$(grep -c '^TX_EVENT ' "$base/sender-history-last.out")" -eq 1 ]
+
+sender_address=$($client address "$base/work/wallets/prime.wallet")
+$client address-report "$base/work/data/chain.dat" "$sender_address" > "$base/address-report-sender.out"
+grep -q "^ADDRESS_REPORT .* address=$sender_address .* holdings=1 .* transactions=2 events=4 sent_micro_units=2000 received_micro_units=0 fee_micro_units=2$" "$base/address-report-sender.out"
+grep -E -q '^ADDRESS_TX .* confirmations=1 direction=sent .* prime=3 amount_micro_units=1000 ' "$base/address-report-sender.out"
+
+$client address-report "$base/work/data/chain.dat" "$receiver" --last 1 > "$base/address-report-receiver-last.out"
+grep -q "^ADDRESS_REPORT .* address=$receiver .* transactions=2 events=2 sent_micro_units=0 received_micro_units=2000 fee_micro_units=0$" "$base/address-report-receiver-last.out"
+[ "$(grep -c '^ADDRESS_TX ' "$base/address-report-receiver-last.out")" -eq 1 ]
 
 tx_hash=$(awk '/^TX_ACCEPTED / { print $2; exit }' "$base/transfer-1.out")
 $client tx "$base/work/data/chain.dat" "$tx_hash" > "$base/tx-lookup.out"

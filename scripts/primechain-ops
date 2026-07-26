@@ -18,6 +18,7 @@ usage:
   primechain-ops wallet-history --workdir <client-workdir> [options]
   primechain-ops wallet-dashboard --workdir <client-workdir> --validator <host:port> [options]
   primechain-ops tx --workdir <client-workdir> --hash <tx-hash> [options]
+  primechain-ops address-report --workdir <client-workdir> --address <address> [options]
   primechain-ops wallet-receive --workdir <client-workdir> [options]
   primechain-ops wallet-send --workdir <client-workdir> --to <address> --prime <p> --amount <micro-units> --validator <host:port> [options]
 
@@ -119,6 +120,13 @@ wallet-dashboard options:
   --validator <host:port>               required for nonce and pending mempool
   --last <count>                        default: 10 recent history events
   --client <primechain-client>          default: <repo>/build/primechain-client
+
+address-report options:
+  --workdir <client-workdir>            required; contains data/chain.dat
+  --address <address>                   required address to inspect
+  --last <count>                        optional; print only the last count address tx events
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --no-sync                             do not sync peer before reading local chain
 
 tx options:
   --workdir <client-workdir>            required; contains data/chain.dat
@@ -1217,6 +1225,51 @@ cmd_wallet_send() {
   rm -rf "$tmpdir"
 }
 
+cmd_address_report() {
+  local client="$default_client"
+  local workdir=""
+  local address=""
+  local last=""
+  local sync_first=1
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --address) require_value "$1" "${2:-}"; address="$2"; shift 2 ;;
+      --last) require_value "$1" "${2:-}"; last="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --no-sync) sync_first=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -n "$address" ] || die "--address is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  if [ "$sync_first" -eq 1 ]; then
+    "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+      sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+      rm -rf "$tmpdir"
+      die "sync-peer failed"
+    }
+  fi
+
+  local args=(address-report "$chain" "$address")
+  if [ -n "$last" ]; then
+    args+=(--last "$last")
+  fi
+  "$client" "${args[@]}"
+  rm -rf "$tmpdir"
+}
+
 cmd_tx_lookup() {
   local client="$default_client"
   local workdir=""
@@ -1592,6 +1645,7 @@ main() {
     wallet-history) cmd_wallet_history "$@" ;;
     wallet-dashboard) cmd_wallet_dashboard "$@" ;;
     tx) cmd_tx_lookup "$@" ;;
+    address-report) cmd_address_report "$@" ;;
     wallet-receive) cmd_wallet_receive "$@" ;;
     wallet-send) cmd_wallet_send "$@" ;;
     -h|--help|help) usage ;;

@@ -666,6 +666,7 @@ void appendWalletTransactionEvent(
     const primechain::storage::StoredRecord& stored,
     const primechain::protocol::TransactionV0& tx,
     const std::string& direction,
+    std::uint64_t confirmations,
     primechain::PrimeValue prime,
     const primechain::protocol::Amount& amount,
     const primechain::Address& sender,
@@ -675,6 +676,7 @@ void appendWalletTransactionEvent(
           << " integer=" << stored.integer
           << " height=" << stored.height
           << " kind=" << kindName(stored.kind)
+          << " confirmations=" << confirmations
           << " direction=" << direction
           << " tx_hash=" << primechain::crypto::toHex(primechain::protocol::transactionHash(tx))
           << " version=" << tx.version
@@ -876,6 +878,145 @@ int transactionLookup(int argc, char** argv) {
     return 1;
 }
 
+struct AddressReportTotals {
+    std::uint64_t sent_micro_units{0};
+    std::uint64_t received_micro_units{0};
+    std::uint64_t fee_micro_units{0};
+    std::uint64_t transactions{0};
+};
+
+void appendAddressEvents(
+    std::vector<std::string>& events,
+    std::set<std::string>& matching_hashes,
+    AddressReportTotals& totals,
+    const primechain::storage::StoredRecord& stored,
+    primechain::PrimeValue frontier,
+    const primechain::protocol::TransactionV0& tx,
+    const primechain::Address& address,
+    const std::string& prefix) {
+    const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+    const bool from_address = tx.sender_address == address;
+    const auto confirmations = frontier >= stored.integer ? frontier - stored.integer + 1 : 0;
+    for (const auto& output : tx.outputs) {
+        const bool to_address = output.receiver_address == address;
+        if (!from_address && !to_address) continue;
+        matching_hashes.insert(tx_hash);
+        const auto direction = from_address && to_address
+            ? std::string("self")
+            : (from_address ? std::string("sent") : std::string("received"));
+        if (output.amount.denominator == 1) {
+            if (direction == "sent") totals.sent_micro_units += output.amount.numerator;
+            if (direction == "received") totals.received_micro_units += output.amount.numerator;
+        }
+        std::ostringstream event;
+        event << prefix
+              << " integer=" << stored.integer
+              << " height=" << stored.height
+              << " kind=" << kindName(stored.kind)
+              << " confirmations=" << confirmations
+              << " direction=" << direction
+              << " tx_hash=" << tx_hash
+              << " version=" << tx.version
+              << " nonce=" << tx.nonce
+              << " prime=" << output.prime
+              << " amount_micro_units=" << output.amount.numerator
+              << " amount_denominator=" << output.amount.denominator
+              << " sender=" << tx.sender_address
+              << " receiver=" << output.receiver_address;
+        events.push_back(event.str());
+    }
+    if (from_address && hasAmount(tx.fee.amount)) {
+        matching_hashes.insert(tx_hash);
+        if (tx.fee.amount.denominator == 1) totals.fee_micro_units += tx.fee.amount.numerator;
+        std::ostringstream event;
+        event << prefix
+              << " integer=" << stored.integer
+              << " height=" << stored.height
+              << " kind=" << kindName(stored.kind)
+              << " confirmations=" << confirmations
+              << " direction=fee-paid"
+              << " tx_hash=" << tx_hash
+              << " version=" << tx.version
+              << " nonce=" << tx.nonce
+              << " prime=" << tx.fee.prime
+              << " amount_micro_units=" << tx.fee.amount.numerator
+              << " amount_denominator=" << tx.fee.amount.denominator
+              << " sender=" << tx.sender_address
+              << " receiver=validator-fee-pool";
+        events.push_back(event.str());
+    }
+}
+
+int addressReport(int argc, char** argv) {
+    if (argc != 4 && argc != 6) return 1;
+    const std::string store_path = argv[2];
+    const primechain::Address address = argv[3];
+    std::uint64_t last = 0;
+    if (argc == 6) {
+        if (std::string(argv[4]) != "--last") return 1;
+        last = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    }
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "address_report_error: " << error << "\n";
+        return 1;
+    }
+    const auto status = node.status();
+    const auto frontier = status.has_genesis ? status.frontier_integer : primechain::PrimeValue{0};
+
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "address_report_error: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> events;
+    std::set<std::string> matching_hashes;
+    AddressReportTotals totals;
+    for (const auto& stored : records) {
+        const auto transactions = storedTransactions(stored, error);
+        if (!transactions.has_value()) {
+            std::cerr << "address_report_error: " << error << "\n";
+            return 1;
+        }
+        for (const auto& tx : *transactions) {
+            appendAddressEvents(events, matching_hashes, totals, stored, frontier, tx, address, "ADDRESS_TX");
+        }
+    }
+    totals.transactions = matching_hashes.size();
+
+    const auto holdings = node.holdingsForAddress(address);
+    std::uint64_t balance = 0;
+    for (const auto& holding : holdings) balance += holding.second;
+
+    std::cout << "ADDRESS_REPORT " << store_path
+              << " address=" << address
+              << " frontier=" << frontier
+              << " holdings=" << holdings.size()
+              << " total_micro_units=" << balance
+              << " transactions=" << totals.transactions
+              << " events=" << events.size()
+              << " sent_micro_units=" << totals.sent_micro_units
+              << " received_micro_units=" << totals.received_micro_units
+              << " fee_micro_units=" << totals.fee_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "ADDRESS_HOLDING address=" << address
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+
+    const auto start = last == 0 || last >= events.size()
+        ? std::size_t{0}
+        : events.size() - static_cast<std::size_t>(last);
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    return 0;
+}
+
 int walletHistory(int argc, char** argv) {
     if (argc != 4 && argc != 6) return 1;
     const std::string store_path = argv[2];
@@ -897,6 +1038,7 @@ int walletHistory(int argc, char** argv) {
         return 1;
     }
 
+    const auto frontier = records.empty() ? primechain::PrimeValue{0} : records.back().integer;
     std::vector<std::string> events;
     for (const auto& stored : records) {
         const auto transactions = storedTransactions(stored, error);
@@ -918,6 +1060,7 @@ int walletHistory(int argc, char** argv) {
                     stored,
                     tx,
                     direction,
+                    frontier >= stored.integer ? frontier - stored.integer + 1 : 0,
                     output.prime,
                     output.amount,
                     tx.sender_address,
@@ -930,6 +1073,7 @@ int walletHistory(int argc, char** argv) {
                     stored,
                     tx,
                     "fee-paid",
+                    frontier >= stored.integer ? frontier - stored.integer + 1 : 0,
                     tx.fee.prime,
                     tx.fee.amount,
                     tx.sender_address,
@@ -2612,6 +2756,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
               << "  " << argv0 << " wallet-history <record-store> <wallet-file> [--last count]\n"
               << "  " << argv0 << " wallet-pending <host> <port> <wallet-file>\n"
+              << "  " << argv0 << " address-report <record-store> <address> [--last count]\n"
               << "  " << argv0 << " tx <record-store> <tx-hash>\n"
               << "  " << argv0 << " mine <host> <port> <limit> --prime-identity <file> --composite-identity <file>\n"
               << "  " << argv0 << " is-prime <n>\n"
@@ -2764,6 +2909,10 @@ int main(int argc, char** argv) {
     if (command == "wallet-pending") {
         if (argc != 5) { printUsage(argv[0]); return 1; }
         return walletPending(argv[0], argc, argv);
+    }
+    if (command == "address-report") {
+        if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
+        return addressReport(argc, argv);
     }
     if (command == "tx") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
