@@ -114,7 +114,7 @@ grep -q '^WALLET_PENDING .* mempool=2 transactions=2 events=2$' "$base/receiver-
 grep -E -q '^PENDING_TX direction=received .* prime=3 amount_micro_units=1000 ' "$base/receiver-pending.out"
 
 $client query 127.0.0.1 19188 GET_MEMPOOL_SUMMARY > "$base/mempool-summary-pending.out"
-grep -q '^MEMPOOL_SUMMARY transactions=2 max_transactions=1000 unique_senders=1 total_input_micro_units=2002 total_output_micro_units=2000 total_fee_micro_units=2 ' "$base/mempool-summary-pending.out"
+grep -q '^MEMPOOL_SUMMARY transactions=2 max_transactions=1000 max_per_sender=25 max_age_seconds=3600 unique_senders=1 total_input_micro_units=2002 total_output_micro_units=2000 total_fee_micro_units=2 ' "$base/mempool-summary-pending.out"
 grep -q '^MEMPOOL_SENDER address=' "$base/mempool-summary-pending.out"
 grep -q '^END_MEMPOOL_SUMMARY$' "$base/mempool-summary-pending.out"
 

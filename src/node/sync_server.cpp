@@ -51,6 +51,8 @@ constexpr std::size_t kFrameThresholdBytes = 4096;
 constexpr std::size_t kMaxFrameBytes = 1024 * 1024;
 constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
+constexpr std::size_t kMaxMempoolTransactionsPerSender = 25;
+constexpr std::uint64_t kMempoolMaxTransactionAgeSeconds = 60 * 60;
 constexpr std::size_t kMaxCompositeCommitments = 1024;
 constexpr std::size_t kMaxKnownPeers = 32;
 constexpr std::uint64_t kPeerQuarantineFailureThreshold = 3;
@@ -2750,15 +2752,24 @@ private:
         }
 
         const auto hash = primechain::protocol::transactionHash(*tx);
+        std::size_t sender_pending = 0;
         for (const auto& existing : mempool_) {
             if (primechain::protocol::transactionHash(existing) == hash) {
                 writeAll(fd, "TX_DUPLICATE " + primechain::crypto::toHex(hash) + "\n");
                 return;
             }
-            if (existing.sender_address == tx->sender_address && existing.nonce == tx->nonce) {
-                writeAll(fd, "ERROR conflicting transaction for sender nonce\n");
-                return;
+            if (existing.sender_address == tx->sender_address) {
+                ++sender_pending;
+                if (existing.nonce == tx->nonce) {
+                    writeAll(fd, "ERROR conflicting transaction for sender nonce\n");
+                    return;
+                }
             }
+        }
+        if (sender_pending >= kMaxMempoolTransactionsPerSender) {
+            writeAll(fd, "ERROR sender mempool limit exceeded; max=" +
+                std::to_string(kMaxMempoolTransactionsPerSender) + "\n");
+            return;
         }
 
         primechain::node::SequentialNode node(store_path_);
@@ -2774,6 +2785,7 @@ private:
             return;
         }
 
+        mempool_first_seen_[primechain::crypto::toHex(hash)] = currentUnixTime();
         mempool_.push_back(*tx);
         propagateTransaction(*tx);
         writeAll(fd, "TX_ACCEPTED " + primechain::crypto::toHex(hash) + "\n");
@@ -5956,20 +5968,35 @@ private:
         std::uint64_t total_inputs = 0;
         std::uint64_t total_outputs = 0;
         std::uint64_t total_fees = 0;
+        std::uint64_t oldest_age = 0;
+        std::uint64_t newest_age = 0;
+        const auto now = currentUnixTime();
+        bool saw_age = false;
         for (const auto& tx : mempool_) {
             ++by_sender[tx.sender_address];
             for (const auto& input : tx.inputs) total_inputs += input.amount.numerator;
             for (const auto& output : tx.outputs) total_outputs += output.amount.numerator;
             total_fees += tx.fee.amount.numerator;
+            const auto hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+            const auto found = mempool_first_seen_.find(hash);
+            const auto first_seen = found == mempool_first_seen_.end() ? now : found->second;
+            const auto age = first_seen > now ? 0 : now - first_seen;
+            if (!saw_age || age > oldest_age) oldest_age = age;
+            if (!saw_age || age < newest_age) newest_age = age;
+            saw_age = true;
         }
         std::ostringstream out;
         out << "MEMPOOL_SUMMARY"
             << " transactions=" << mempool_.size()
             << " max_transactions=" << kMaxMempoolTransactions
+            << " max_per_sender=" << kMaxMempoolTransactionsPerSender
+            << " max_age_seconds=" << kMempoolMaxTransactionAgeSeconds
             << " unique_senders=" << by_sender.size()
             << " total_input_micro_units=" << total_inputs
             << " total_output_micro_units=" << total_outputs
             << " total_fee_micro_units=" << total_fees
+            << " oldest_age_seconds=" << oldest_age
+            << " newest_age_seconds=" << newest_age
             << " active_peers=" << activeKnownPeers().size()
             << "\n";
         for (const auto& entry : by_sender) {
@@ -6026,6 +6053,7 @@ private:
             }
             if (acknowledged) {
                 ++removed;
+                mempool_first_seen_.erase(tx_hash);
             } else {
                 retained.push_back(tx);
             }
@@ -6055,6 +6083,8 @@ private:
             }
             if (!acknowledged) {
                 retained.push_back(tx);
+            } else {
+                mempool_first_seen_.erase(primechain::crypto::toHex(tx_hash));
             }
         }
         mempool_ = std::move(retained);
@@ -6066,14 +6096,26 @@ private:
         if (!node.load(error)) {
             return;
         }
+        const auto now = currentUnixTime();
         std::vector<primechain::protocol::TransactionV0> retained;
         retained.reserve(mempool_.size());
         for (const auto& tx : mempool_) {
+            const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+            auto first_seen = mempool_first_seen_.find(tx_hash);
+            if (first_seen == mempool_first_seen_.end()) {
+                first_seen = mempool_first_seen_.emplace(tx_hash, now).first;
+            }
+            if (first_seen->second <= now && now - first_seen->second > kMempoolMaxTransactionAgeSeconds) {
+                mempool_first_seen_.erase(first_seen);
+                continue;
+            }
             auto candidate = retained;
             candidate.push_back(tx);
             error.clear();
             if (node.validatePendingTransactions(candidate, error)) {
                 retained.push_back(tx);
+            } else {
+                mempool_first_seen_.erase(tx_hash);
             }
         }
         mempool_ = std::move(retained);
@@ -6278,6 +6320,7 @@ private:
     bool use_chain_endpoints_{false};
     bool allow_remote_admin_{false};
     std::vector<primechain::protocol::TransactionV0> mempool_;
+    std::map<std::string, std::uint64_t> mempool_first_seen_;
     std::map<
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::StoredCommitment> commitments_;

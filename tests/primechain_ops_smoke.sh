@@ -185,7 +185,7 @@ case "$cmd" in
         echo "MEMPOOL 0"
         ;;
       GET_MEMPOOL_SUMMARY)
-        echo "MEMPOOL_SUMMARY transactions=0 max_transactions=1000 unique_senders=0 total_input_micro_units=0 total_output_micro_units=0 total_fee_micro_units=0 active_peers=1"
+        echo "MEMPOOL_SUMMARY transactions=0 max_transactions=1000 max_per_sender=25 max_age_seconds=3600 unique_senders=0 total_input_micro_units=0 total_output_micro_units=0 total_fee_micro_units=0 oldest_age_seconds=0 newest_age_seconds=0 active_peers=1"
         echo "END_MEMPOOL_SUMMARY"
         ;;
       GET_VALIDATORS)
