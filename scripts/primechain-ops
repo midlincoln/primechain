@@ -115,6 +115,7 @@ wallet-send options:
   --validator <host:port>               required submit target
   --client <primechain-client>          default: <repo>/build/primechain-client
   --send <primechain-send>              default: <repo>/build/primechain-send
+  --use-env-passphrase                  do not prompt; use existing PRIMECHAIN_WALLET_PASSPHRASE
 USAGE
 }
 
@@ -1058,6 +1059,7 @@ cmd_wallet_send() {
   local nonce="auto"
   local target=""
   local validator=""
+  local prompt_passphrase=1
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1072,6 +1074,7 @@ cmd_wallet_send() {
       --validator) require_value "$1" "${2:-}"; validator="$2"; shift 2 ;;
       --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
       --send) require_value "$1" "${2:-}"; send="$2"; shift 2 ;;
+      --use-env-passphrase) prompt_passphrase=0; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -1142,12 +1145,24 @@ cmd_wallet_send() {
     die "insufficient wallet balance for prime $prime: balance=$balance required=$((amount + fee))"
   fi
 
-  "$send" submit "$validator_host" "$validator_port" "$wallet" "$to_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out" 2>"$tmpdir/submit.err" || {
+  local send_rc=0
+  if [ "$prompt_passphrase" -eq 1 ]; then
+    [ -r /dev/tty ] || { rm -rf "$tmpdir"; die "cannot prompt for passphrase without a terminal; use --use-env-passphrase for automation"; }
+    local passphrase
+    printf 'Primechain wallet passphrase: ' > /dev/tty
+    IFS= read -r -s passphrase < /dev/tty
+    printf '\n' > /dev/tty
+    PRIMECHAIN_WALLET_PASSPHRASE="$passphrase" "$send" submit "$validator_host" "$validator_port" "$wallet" "$to_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out" 2>"$tmpdir/submit.err" || send_rc=$?
+    unset passphrase
+  else
+    "$send" submit "$validator_host" "$validator_port" "$wallet" "$to_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out" 2>"$tmpdir/submit.err" || send_rc=$?
+  fi
+  if [ "$send_rc" -ne 0 ]; then
     cat "$tmpdir/submit.out" >&2 || true
     sed 's/^/  /' "$tmpdir/submit.err" >&2 || true
     rm -rf "$tmpdir"
     die "transaction submit failed"
-  }
+  fi
   tx_hash="$(awk '/^TX_ACCEPTED / { print $2; exit }' "$tmpdir/submit.out")"
   [ -n "$tx_hash" ] || {
     cat "$tmpdir/submit.out" >&2 || true
@@ -1162,6 +1177,7 @@ cmd_wallet_send() {
   echo "TO address=$to_address"
   echo "TRANSFER tx_hash=$tx_hash prime=$prime amount_micro_units=$amount fee_micro_units=$fee nonce=$nonce"
   echo "BALANCE_CHECK prime=$prime available=$balance required=$((amount + fee)) pass=1"
+  echo "PASSPHRASE_SOURCE $([ "$prompt_passphrase" -eq 1 ] && echo prompt || echo environment)"
   echo "SUBMIT_RESULT accepted=1"
   echo "NEXT_MINE_TARGET $target"
   echo "NEXT_COMMAND add-mine-job $client add-mine-job $workdir --target $target"

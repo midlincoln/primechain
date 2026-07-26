@@ -291,6 +291,7 @@ grep -q '^EXAMPLE_COMMAND wallet-send .* --to pcpq1_sender --prime 3 --amount 10
   --prime 3 \
   --amount 100 \
   --fee 1 \
+  --use-env-passphrase \
   --validator 192.0.2.10:8339 > "$tmp/wallet-send.txt"
 
 grep -q '^PRIMECHAIN_WALLET_SEND generated_at=' "$tmp/wallet-send.txt"
@@ -298,6 +299,7 @@ grep -q '^FROM address=pcpq1_sender wallet=' "$tmp/wallet-send.txt"
 grep -q '^TO address=pcpq1_receiver$' "$tmp/wallet-send.txt"
 grep -q '^TRANSFER tx_hash=tx-smoke-123 prime=3 amount_micro_units=100 fee_micro_units=1 nonce=1$' "$tmp/wallet-send.txt"
 grep -q '^BALANCE_CHECK prime=3 available=1000000 required=101 pass=1$' "$tmp/wallet-send.txt"
+grep -q '^PASSPHRASE_SOURCE environment$' "$tmp/wallet-send.txt"
 grep -q '^SUBMIT_RESULT accepted=1$' "$tmp/wallet-send.txt"
 grep -q '^NEXT_MINE_TARGET 124$' "$tmp/wallet-send.txt"
 grep -q '^NEXT_COMMAND add-mine-job .* add-mine-job .* --target 124$' "$tmp/wallet-send.txt"
