@@ -643,6 +643,125 @@ std::uint64_t transactionFees(const std::vector<primechain::protocol::Transactio
     return total;
 }
 
+std::optional<std::vector<primechain::protocol::TransactionV0>> storedTransactions(
+    const primechain::storage::StoredRecord& stored,
+    std::string& error) {
+    if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return record->transactions;
+    }
+
+    const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return record->transactions;
+}
+
+bool hasAmount(const primechain::protocol::Amount& amount) {
+    return amount.numerator != 0;
+}
+
+void appendWalletTransactionEvent(
+    std::vector<std::string>& events,
+    const primechain::storage::StoredRecord& stored,
+    const primechain::protocol::TransactionV0& tx,
+    const std::string& direction,
+    primechain::PrimeValue prime,
+    const primechain::protocol::Amount& amount,
+    const primechain::Address& sender,
+    const primechain::Address& receiver) {
+    std::ostringstream event;
+    event << "TX_EVENT"
+          << " integer=" << stored.integer
+          << " height=" << stored.height
+          << " kind=" << kindName(stored.kind)
+          << " direction=" << direction
+          << " tx_hash=" << primechain::crypto::toHex(primechain::protocol::transactionHash(tx))
+          << " version=" << tx.version
+          << " nonce=" << tx.nonce
+          << " prime=" << prime
+          << " amount_micro_units=" << amount.numerator
+          << " amount_denominator=" << amount.denominator
+          << " sender=" << sender
+          << " receiver=" << receiver;
+    events.push_back(event.str());
+}
+
+int walletHistory(int argc, char** argv) {
+    if (argc != 4 && argc != 6) return 1;
+    const std::string store_path = argv[2];
+    const std::string wallet_path = argv[3];
+    std::uint64_t last = 0;
+    if (argc == 6) {
+        if (std::string(argv[4]) != "--last") return 1;
+        last = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    }
+
+    const auto address = loadMinerAddress(wallet_path);
+    if (!address.has_value()) return 1;
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "wallet_history_error: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> events;
+    for (const auto& stored : records) {
+        const auto transactions = storedTransactions(stored, error);
+        if (!transactions.has_value()) {
+            std::cerr << "wallet_history_error: " << error << "\n";
+            return 1;
+        }
+
+        for (const auto& tx : *transactions) {
+            const bool from_wallet = tx.sender_address == *address;
+            for (const auto& output : tx.outputs) {
+                const bool to_wallet = output.receiver_address == *address;
+                if (!from_wallet && !to_wallet) continue;
+                const auto direction = from_wallet && to_wallet
+                    ? std::string("self")
+                    : (from_wallet ? std::string("sent") : std::string("received"));
+                appendWalletTransactionEvent(
+                    events,
+                    stored,
+                    tx,
+                    direction,
+                    output.prime,
+                    output.amount,
+                    tx.sender_address,
+                    output.receiver_address);
+            }
+
+            if (from_wallet && hasAmount(tx.fee.amount)) {
+                appendWalletTransactionEvent(
+                    events,
+                    stored,
+                    tx,
+                    "fee-paid",
+                    tx.fee.prime,
+                    tx.fee.amount,
+                    tx.sender_address,
+                    "validator-fee-pool");
+            }
+        }
+    }
+
+    std::cout << "WALLET_HISTORY " << store_path
+              << " wallet=" << wallet_path
+              << " address=" << *address
+              << " events=" << events.size() << "\n";
+    const auto start = last == 0 || last >= events.size()
+        ? std::size_t{0}
+        : events.size() - static_cast<std::size_t>(last);
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    return 0;
+}
+
 int rewardsWorkdir(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string workdir = argv[2];
@@ -2302,6 +2421,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " new-miner <wallet-file>\n"
               << "  " << argv0 << " address <wallet-file>\n"
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
+              << "  " << argv0 << " wallet-history <record-store> <wallet-file> [--last count]\n"
               << "  " << argv0 << " mine <host> <port> <limit> --prime-identity <file> --composite-identity <file>\n"
               << "  " << argv0 << " is-prime <n>\n"
               << "  " << argv0 << " divisor <n>\n"
@@ -2445,6 +2565,10 @@ int main(int argc, char** argv) {
     if (command == "balance") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
         return runTool(argv[0], "primechain-wallet", {"balance", argv[2], argv[3]});
+    }
+    if (command == "wallet-history") {
+        if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
+        return walletHistory(argc, argv);
     }
     if (command == "mine") {
         if (argc != 9) { printUsage(argv[0]); return 1; }

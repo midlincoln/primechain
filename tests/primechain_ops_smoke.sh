@@ -93,6 +93,11 @@ case "$cmd" in
       esac
     fi
     ;;
+  wallet-history)
+    echo "WALLET_HISTORY $2 wallet=$3 address=pcpq1_sender events=2"
+    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=sent tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=100 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
+    echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=fee-paid tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
+    ;;
   inspect)
     echo "record store inspection"
     echo "store_path: $2"
@@ -267,6 +272,17 @@ grep -q '^CHAIN height=121 frontier=123 hash=abc123 records=122 prime_records=30
 grep -q '^BALANCE holdings=1 total_micro_units=1000000$' "$tmp/wallet-summary.txt"
 grep -q '^HOLDING prime=3 micro_units=1000000$' "$tmp/wallet-summary.txt"
 grep -q '^NONCE validator=192.0.2.10:8339 confirmed=0 next=1$' "$tmp/wallet-summary.txt"
+
+
+"$ops" wallet-history \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --last 1 > "$tmp/wallet-history.txt"
+
+grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-history.txt"
+grep -q '^TX_EVENT .* direction=sent .* prime=3 amount_micro_units=100 ' "$tmp/wallet-history.txt"
+grep -q '^TX_EVENT .* direction=fee-paid .* receiver=validator-fee-pool$' "$tmp/wallet-history.txt"
 
 
 "$ops" wallet-receive \

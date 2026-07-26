@@ -74,6 +74,19 @@ grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/mine-4.out"
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/pool-before.out"
 
+$client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wallet" > "$base/sender-history.out"
+grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history.out"
+grep -E -q '^TX_EVENT .* direction=sent .* prime=3 amount_micro_units=1000 .* receiver=' "$base/sender-history.out"
+grep -E -q '^TX_EVENT .* direction=fee-paid .* prime=3 amount_micro_units=1 .* receiver=validator-fee-pool$' "$base/sender-history.out"
+
+$client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/composite.wallet" > "$base/receiver-history.out"
+grep -q '^WALLET_HISTORY .* events=2$' "$base/receiver-history.out"
+grep -E -q '^TX_EVENT .* direction=received .* prime=3 amount_micro_units=1000 .* receiver=' "$base/receiver-history.out"
+
+$client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wallet" --last 1 > "$base/sender-history-last.out"
+grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history-last.out"
+[ "$(grep -c '^TX_EVENT ' "$base/sender-history-last.out")" -eq 1 ]
+
 $client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-before.out"
 grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 last_distribution_integer=0 next_distribution_integer=1002 due=0 .* pool_total_micro_units=2 distributions=0$' "$base/distribution-status-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/distribution-status-before.out"
