@@ -141,6 +141,10 @@ std::uint64_t currentUnixTime() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+bool isLoopbackClient(const sockaddr_in& addr) {
+    return ntohl(addr.sin_addr.s_addr) == INADDR_LOOPBACK;
+}
+
 class Socket {
 public:
     explicit Socket(int fd = -1) : fd_(fd) {}
@@ -1356,7 +1360,8 @@ public:
         int finalization_timeout_ms,
         std::vector<primechain::Address> validator_set,
         std::optional<primechain::wallet::MinerIdentity> validator_identity,
-        bool use_chain_endpoints)
+        bool use_chain_endpoints,
+        bool allow_remote_admin)
         : store_path_(std::move(store_path)),
           bind_address_(std::move(bind_address)),
           listen_port_(listen_port),
@@ -1373,7 +1378,8 @@ public:
           genesis_validator_set_(validator_set),
           validator_set_(std::move(validator_set)),
           validator_identity_(std::move(validator_identity)),
-          use_chain_endpoints_(use_chain_endpoints) {
+          use_chain_endpoints_(use_chain_endpoints),
+          allow_remote_admin_(allow_remote_admin) {
         std::string peer_error;
         if (!loadPeerState(peer_error)) {
             std::cerr << "peer state load warning: " << peer_error << "\n";
@@ -1486,7 +1492,17 @@ public:
         return added;
     }
 
-    void handleClient(int fd) {
+    bool adminAllowed(bool client_loopback) const {
+        return client_loopback || allow_remote_admin_;
+    }
+
+    bool rejectRemoteAdmin(int fd, bool client_loopback) const {
+        if (adminAllowed(client_loopback)) return false;
+        writeAll(fd, "ERROR admin command requires local connection; restart with --allow-remote-admin to override\n");
+        return true;
+    }
+
+    void handleClient(int fd, bool client_loopback) {
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
         while (auto line = readLine(fd)) {
@@ -1547,18 +1563,22 @@ public:
                 continue;
             }
             if (*line == "GET_PEER_HEALTH") {
+                if (rejectRemoteAdmin(fd, client_loopback)) continue;
                 sendPeerHealth(fd);
                 continue;
             }
             if (*line == "GET_PEER_STATE") {
+                if (rejectRemoteAdmin(fd, client_loopback)) continue;
                 sendPeerState(fd);
                 continue;
             }
             if (*line == "RESET_PEER_STATE" || line->rfind("RESET_PEER_STATE ", 0) == 0) {
+                if (rejectRemoteAdmin(fd, client_loopback)) continue;
                 resetPeerStateCommand(fd, *line);
                 continue;
             }
             if (line->rfind("ADD_PEER ", 0) == 0) {
+                if (rejectRemoteAdmin(fd, client_loopback)) continue;
                 addPeerCommand(fd, *line);
                 continue;
             }
@@ -6161,6 +6181,7 @@ private:
     std::vector<primechain::Address> validator_set_;
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     bool use_chain_endpoints_{false};
+    bool allow_remote_admin_{false};
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
@@ -6198,6 +6219,7 @@ struct Options {
     std::vector<primechain::Address> validator_set;
     std::string validator_identity_path;
     bool use_chain_endpoints{false};
+    bool allow_remote_admin{false};
 };
 
 std::optional<Options> parseOptions(int argc, char** argv) {
@@ -6273,6 +6295,10 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.use_chain_endpoints = true;
             continue;
         }
+        if (flag == "--allow-remote-admin") {
+            options.allow_remote_admin = true;
+            continue;
+        }
         {
             return std::nullopt;
         }
@@ -6281,7 +6307,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
@@ -6358,7 +6384,8 @@ int main(int argc, char** argv) {
         options.finalization_timeout_ms,
         options.validator_set,
         validator_identity,
-        options.use_chain_endpoints);
+        options.use_chain_endpoints,
+        options.allow_remote_admin);
     if (!options.peers.empty()) {
         std::string error;
         if (sync_server.peerDiscoveryEnabled()) {
@@ -6411,6 +6438,11 @@ int main(int argc, char** argv) {
     }
     if (options.enable_factorization_helper) {
         std::cout << "development helper enabled: GET_FACTORIZATION\n";
+    }
+    if (options.allow_remote_admin) {
+        std::cout << "remote admin commands enabled\n";
+    } else {
+        std::cout << "admin commands restricted to loopback clients\n";
     }
     if (options.finalization_timeout_ms > 0) {
         std::cout << "finalization timeout: " << options.finalization_timeout_ms << " ms\n";
@@ -6484,10 +6516,11 @@ int main(int argc, char** argv) {
             break;
         }
 
+        const bool client_loopback = isLoopbackClient(client_addr);
         Socket client(client_fd);
-        std::thread([&sync_server, client = std::move(client)]() mutable {
+        std::thread([&sync_server, client = std::move(client), client_loopback]() mutable {
             setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
-            sync_server.handleClient(client.fd());
+            sync_server.handleClient(client.fd(), client_loopback);
         }).detach();
         runPeriodicSync();
     }

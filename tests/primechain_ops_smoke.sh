@@ -11,7 +11,7 @@ mkdir -p "$tmp/bin" "$tmp/data" "$tmp/work"
 cat > "$tmp/bin/primechain-sync-server" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--help" ]; then
-  echo "usage: primechain-sync-server [--bootstrap-peer host port] [--genesis-validator-set addr] [--use-chain-endpoints]"
+  echo "usage: primechain-sync-server [--bootstrap-peer host port] [--genesis-validator-set addr] [--use-chain-endpoints] [--allow-remote-admin]"
   exit 0
 fi
 exit 0

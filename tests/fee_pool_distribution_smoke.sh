@@ -37,6 +37,7 @@ echo $! > "$base/a.pid"
 sleep 0.3
 
 $server 19188 "$base/b.dat" \
+    --bind 0.0.0.0 \
     --peer 127.0.0.1 19187 \
     --peer 127.0.0.1 19189 \
     --validator-set "$a" "$b" "$c" \
@@ -76,6 +77,14 @@ $client query 127.0.0.1 19188 GET_PEER_STATE > "$base/peer-state.out"
 grep -q "^PEER_STATE path=$base/b.dat.peers peers=3 quarantine_threshold=3$" "$base/peer-state.out"
 grep -q '^PEER_STATE_ENTRY host=127.0.0.1 port=19999 failures=3 quarantined=1 ' "$base/peer-state.out"
 grep -q '^PEER 127.0.0.1 19999 3 1 ' "$base/b.dat.peers"
+
+remote_host=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ -n "${remote_host:-}" ] && [ "$remote_host" != "127.0.0.1" ]; then
+    $client status "$remote_host" 19188 > "$base/remote-status.out"
+    grep -q '^STATUS ' "$base/remote-status.out"
+    $client query "$remote_host" 19188 GET_PEER_STATE > "$base/remote-peer-state.out"
+    grep -q '^ERROR admin command requires local connection; restart with --allow-remote-admin to override$' "$base/remote-peer-state.out"
+fi
 
 $client init-workdir "$base/work" 127.0.0.1 19188 > "$base/init.out"
 $client add-mine-job "$base/work" --target 3 > "$base/add-3.out"
