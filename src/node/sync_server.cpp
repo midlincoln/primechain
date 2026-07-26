@@ -1328,6 +1328,8 @@ class SyncServer {
 public:
     SyncServer(
         std::string store_path,
+        std::string bind_address,
+        int listen_port,
         std::vector<PeerEndpoint> peers,
         bool advance_enabled,
         bool ack_mempool_enabled,
@@ -1337,6 +1339,8 @@ public:
         std::optional<primechain::wallet::MinerIdentity> validator_identity,
         bool use_chain_endpoints)
         : store_path_(std::move(store_path)),
+          bind_address_(std::move(bind_address)),
+          listen_port_(listen_port),
           advance_enabled_(advance_enabled),
           ack_mempool_enabled_(ack_mempool_enabled),
           factorization_helper_enabled_(factorization_helper_enabled),
@@ -2038,8 +2042,15 @@ private:
         }
     }
 
+    bool isSelfPeer(const PeerEndpoint& peer) const {
+        if (peer.port != listen_port_) return false;
+        if (peer.host == bind_address_) return true;
+        if (peer.host == "127.0.0.1" || peer.host == "0.0.0.0") return true;
+        return false;
+    }
+
     bool addPeer(const PeerEndpoint& peer) {
-        if (!validPeerEndpoint(peer)) {
+        if (!validPeerEndpoint(peer) || isSelfPeer(peer)) {
             return false;
         }
         const auto found = std::find_if(peers_.begin(), peers_.end(), [&](const PeerEndpoint& existing) {
@@ -2123,6 +2134,11 @@ private:
         in >> command >> peer.host >> peer.port;
         if (!in || !validPeerEndpoint(peer)) {
             writeAll(fd, "ERROR invalid ADD_PEER\n");
+            return;
+        }
+
+        if (isSelfPeer(peer)) {
+            writeAll(fd, "ERROR self peer not allowed\n");
             return;
         }
 
@@ -5869,6 +5885,8 @@ private:
     }
 
     std::string store_path_;
+    std::string bind_address_;
+    int listen_port_{0};
     std::vector<PeerEndpoint> peers_;
     bool advance_enabled_{false};
     bool ack_mempool_enabled_{false};
@@ -6072,6 +6090,8 @@ int main(int argc, char** argv) {
 
     SyncServer sync_server(
         options.store_path,
+        options.bind_address,
+        options.port,
         options.peers,
         options.enable_advance,
         options.enable_ack_mempool,

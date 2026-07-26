@@ -488,7 +488,7 @@ cmd_doctor_network() {
       continue
     fi
 
-    local status validators_out epoch_out endpoints_out peers_out
+    local status validators_out epoch_out endpoints_out peers_out peer_health_out
     if ! status="$($client status "$host" "$port" 2>&1)"; then
       echo "FAIL status $node"
       echo "  $status" >&2
@@ -516,6 +516,12 @@ cmd_doctor_network() {
     if ! peers_out="$($client query "$host" "$port" GET_PEERS 2>&1)"; then
       echo "FAIL peers $node"
       echo "  $peers_out" >&2
+      failed=1
+      continue
+    fi
+    if ! peer_health_out="$($client query "$host" "$port" GET_PEER_HEALTH 2>&1)"; then
+      echo "FAIL peer-health $node"
+      echo "  $peer_health_out" >&2
       failed=1
       continue
     fi
@@ -548,6 +554,14 @@ cmd_doctor_network() {
         echo "FAIL validator-endpoints-disagreement $node"
         failed=1
       fi
+    fi
+
+    if echo "$peer_health_out" | grep -q 'reachable=0\|hash_match=0'; then
+      echo "FAIL peer-health $node"
+      echo "$peer_health_out" | sed 's/^/  /'
+      failed=1
+    else
+      echo "OK peer-health $node"
     fi
 
     local other other_host other_port
