@@ -14,6 +14,7 @@ usage:
   primechain-ops fee-distribution-status --workdir <client-workdir> [options]
   primechain-ops launch-status-json --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops wallet-summary --workdir <client-workdir> [options]
+  primechain-ops wallet-receive --workdir <client-workdir> [options]
   primechain-ops wallet-send --workdir <client-workdir> --to <address> --prime <p> --amount <micro-units> --validator <host:port> [options]
 
 install-validator-service options:
@@ -94,6 +95,13 @@ wallet-summary options:
   --validator <host:port>               optional; adds live nonce from that validator
   --client <primechain-client>          default: <repo>/build/primechain-client
   --no-sync                             do not sync peer before reading local chain
+
+wallet-receive options:
+  --workdir <client-workdir>            required
+  --wallet <wallet>                     default: <workdir>/wallets/prime.wallet
+  --prime <p>                           optional; include example send command
+  --amount <micro-units>                optional; include example send command
+  --client <primechain-client>          default: <repo>/build/primechain-client
 
 wallet-send options:
   --workdir <client-workdir>            required; contains data/chain.dat and peer config
@@ -996,6 +1004,48 @@ cmd_transaction_evidence() {
 
 
 
+
+cmd_wallet_receive() {
+  local client="$default_client"
+  local workdir=""
+  local wallet=""
+  local prime=""
+  local amount=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --wallet) require_value "$1" "${2:-}"; wallet="$2"; shift 2 ;;
+      --prime) require_value "$1" "${2:-}"; prime="$2"; shift 2 ;;
+      --amount) require_value "$1" "${2:-}"; amount="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -n "$wallet" ] || wallet="$workdir/wallets/prime.wallet"
+  [ -f "$wallet" ] || die "wallet not found: $wallet"
+
+  local address
+  address="$($client address "$wallet")"
+  [ -n "$address" ] || die "could not determine wallet address"
+
+  echo "PRIMECHAIN_WALLET_RECEIVE generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "WORKDIR $workdir"
+  echo "WALLET $wallet"
+  echo "ADDRESS $address"
+  if [ -n "$prime" ] || [ -n "$amount" ]; then
+    [ -n "$prime" ] || die "--prime is required when --amount is provided"
+    [ -n "$amount" ] || die "--amount is required when --prime is provided"
+    echo "REQUEST prime=$prime amount_micro_units=$amount address=$address"
+    echo "EXAMPLE_COMMAND wallet-send ./scripts/primechain-ops wallet-send --workdir <sender-workdir> --to $address --prime $prime --amount $amount --validator <host:port>"
+  fi
+}
+
 cmd_wallet_send() {
   local client="$default_client"
   local send="$repo_root/build/primechain-send"
@@ -1329,6 +1379,7 @@ main() {
     fee-distribution-status) cmd_fee_distribution_status "$@" ;;
     launch-status-json) cmd_launch_status_json "$@" ;;
     wallet-summary) cmd_wallet_summary "$@" ;;
+    wallet-receive) cmd_wallet_receive "$@" ;;
     wallet-send) cmd_wallet_send "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;

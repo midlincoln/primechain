@@ -269,6 +269,19 @@ grep -q '^HOLDING prime=3 micro_units=1000000$' "$tmp/wallet-summary.txt"
 grep -q '^NONCE validator=192.0.2.10:8339 confirmed=0 next=1$' "$tmp/wallet-summary.txt"
 
 
+"$ops" wallet-receive \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --prime 3 \
+  --amount 100 > "$tmp/wallet-receive.txt"
+
+grep -q '^PRIMECHAIN_WALLET_RECEIVE generated_at=' "$tmp/wallet-receive.txt"
+grep -q '^ADDRESS pcpq1_sender$' "$tmp/wallet-receive.txt"
+grep -q '^REQUEST prime=3 amount_micro_units=100 address=pcpq1_sender$' "$tmp/wallet-receive.txt"
+grep -q '^EXAMPLE_COMMAND wallet-send .* --to pcpq1_sender --prime 3 --amount 100 --validator <host:port>$' "$tmp/wallet-receive.txt"
+
+
 "$ops" wallet-send \
   --client "$tmp/bin/primechain-client" \
   --send "$tmp/bin/primechain-send" \
