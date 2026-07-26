@@ -60,6 +60,13 @@ sleep 0.6
 $client query 127.0.0.1 19188 ADD_PEER 127.0.0.1 19188 > "$base/add-self-peer.out"
 grep -q '^ERROR self peer not allowed$' "$base/add-self-peer.out"
 
+{
+    printf 'BAD_COMMAND_1\n'
+    printf 'BAD_COMMAND_2\n'
+    printf 'BAD_COMMAND_3\n'
+} | nc 127.0.0.1 19188 > "$base/invalid-commands.out"
+grep -q '^ERROR rate limit exceeded: too many invalid commands on one connection$' "$base/invalid-commands.out"
+
 $client query 127.0.0.1 19188 GET_PEER_HEALTH > "$base/peer-health.out"
 grep -q '^PEER_HEALTH 2 ' "$base/peer-health.out"
 grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19187 reachable=1 ' "$base/peer-health.out"

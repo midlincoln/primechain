@@ -58,7 +58,13 @@ constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 3000;
 constexpr std::size_t kMaxCommandsPerConnection = 128;
 constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
+constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
+constexpr std::size_t kClientViolationBanThreshold = 6;
+constexpr std::uint64_t kClientViolationBanSeconds = 60;
+constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 8;
 volatile std::sig_atomic_t g_running = 1;
+std::mutex g_client_connection_mutex;
+std::map<std::uint32_t, std::size_t> g_active_remote_connections;
 
 void handleSignal(int) {
     g_running = 0;
@@ -75,6 +81,11 @@ struct PeerRuntimeState {
     std::uint64_t last_success_time{0};
     std::uint64_t last_failure_time{0};
     std::string last_error;
+};
+
+struct ClientPenaltyState {
+    std::size_t violations{0};
+    std::uint64_t banned_until{0};
 };
 
 struct CommitPhaseTimeoutVote {
@@ -143,6 +154,10 @@ std::uint64_t currentUnixTime() {
 
 bool isLoopbackClient(const sockaddr_in& addr) {
     return ntohl(addr.sin_addr.s_addr) == INADDR_LOOPBACK;
+}
+
+std::uint32_t clientIpKey(const sockaddr_in& addr) {
+    return ntohl(addr.sin_addr.s_addr);
 }
 
 class Socket {
@@ -1492,28 +1507,54 @@ public:
         return added;
     }
 
+    bool clientBanned(std::uint32_t client_ip, bool client_loopback) const {
+        if (client_loopback) return false;
+        std::lock_guard<std::mutex> lock(client_penalty_mutex_);
+        const auto found = client_penalties_.find(client_ip);
+        if (found == client_penalties_.end()) return false;
+        const auto now = currentUnixTime();
+        return found->second.banned_until > now;
+    }
+
+    void recordClientViolation(std::uint32_t client_ip, bool client_loopback) const {
+        if (client_loopback) return;
+        std::lock_guard<std::mutex> lock(client_penalty_mutex_);
+        auto& state = client_penalties_[client_ip];
+        const auto now = currentUnixTime();
+        if (state.banned_until > now) return;
+        ++state.violations;
+        if (state.violations >= kClientViolationBanThreshold) {
+            state.banned_until = now + kClientViolationBanSeconds;
+            state.violations = 0;
+        }
+    }
+
     bool adminAllowed(bool client_loopback) const {
         return client_loopback || allow_remote_admin_;
     }
 
-    bool rejectRemoteAdmin(int fd, bool client_loopback) const {
+    bool rejectRemoteAdmin(int fd, std::uint32_t client_ip, bool client_loopback) const {
         if (adminAllowed(client_loopback)) return false;
+        recordClientViolation(client_ip, client_loopback);
         writeAll(fd, "ERROR admin command requires local connection; restart with --allow-remote-admin to override\n");
         return true;
     }
 
-    void handleClient(int fd, bool client_loopback) {
+    void handleClient(int fd, std::uint32_t client_ip, bool client_loopback) {
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
+        std::size_t invalid_command_count = 0;
         while (auto line = readLine(fd)) {
             ++command_count;
             if (command_count > kMaxCommandsPerConnection) {
+                recordClientViolation(client_ip, client_loopback);
                 writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
                 return;
             }
             if (isWriteCommand(*line)) {
                 ++write_command_count;
                 if (write_command_count > kMaxWriteCommandsPerConnection) {
+                    recordClientViolation(client_ip, client_loopback);
                     writeAll(fd, "ERROR rate limit exceeded: too many write commands on one connection\n");
                     return;
                 }
@@ -1563,22 +1604,22 @@ public:
                 continue;
             }
             if (*line == "GET_PEER_HEALTH") {
-                if (rejectRemoteAdmin(fd, client_loopback)) continue;
+                if (rejectRemoteAdmin(fd, client_ip, client_loopback)) continue;
                 sendPeerHealth(fd);
                 continue;
             }
             if (*line == "GET_PEER_STATE") {
-                if (rejectRemoteAdmin(fd, client_loopback)) continue;
+                if (rejectRemoteAdmin(fd, client_ip, client_loopback)) continue;
                 sendPeerState(fd);
                 continue;
             }
             if (*line == "RESET_PEER_STATE" || line->rfind("RESET_PEER_STATE ", 0) == 0) {
-                if (rejectRemoteAdmin(fd, client_loopback)) continue;
+                if (rejectRemoteAdmin(fd, client_ip, client_loopback)) continue;
                 resetPeerStateCommand(fd, *line);
                 continue;
             }
             if (line->rfind("ADD_PEER ", 0) == 0) {
-                if (rejectRemoteAdmin(fd, client_loopback)) continue;
+                if (rejectRemoteAdmin(fd, client_ip, client_loopback)) continue;
                 addPeerCommand(fd, *line);
                 continue;
             }
@@ -1758,7 +1799,13 @@ public:
                 sendNonce(fd, *line);
                 continue;
             }
+            ++invalid_command_count;
+            recordClientViolation(client_ip, client_loopback);
             writeAll(fd, "ERROR unknown command\n");
+            if (invalid_command_count >= kMaxInvalidCommandsPerConnection) {
+                writeAll(fd, "ERROR rate limit exceeded: too many invalid commands on one connection\n");
+                return;
+            }
         }
     }
 
@@ -6198,6 +6245,8 @@ private:
     std::map<std::pair<primechain::Address, primechain::Address>, primechain::protocol::ValidatorWorkBindingV1> pending_validator_work_bindings_;
     std::map<primechain::Address, EconomicPolicyVoteRecord> policy_votes_;
     std::mutex finalization_mutex_;
+    mutable std::mutex client_penalty_mutex_;
+    mutable std::map<std::uint32_t, ClientPenaltyState> client_penalties_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
@@ -6517,10 +6566,39 @@ int main(int argc, char** argv) {
         }
 
         const bool client_loopback = isLoopbackClient(client_addr);
+        const std::uint32_t client_ip = clientIpKey(client_addr);
+        if (sync_server.clientBanned(client_ip, client_loopback)) {
+            writeAll(client_fd, "ERROR client temporarily banned for repeated invalid commands\n");
+            close(client_fd);
+            runPeriodicSync();
+            continue;
+        }
+        if (!client_loopback) {
+            std::lock_guard<std::mutex> lock(g_client_connection_mutex);
+            auto& active = g_active_remote_connections[client_ip];
+            if (active >= kMaxActiveRemoteConnectionsPerIp) {
+                writeAll(client_fd, "ERROR connection limit exceeded for client IP\n");
+                close(client_fd);
+                runPeriodicSync();
+                continue;
+            }
+            ++active;
+        }
         Socket client(client_fd);
-        std::thread([&sync_server, client = std::move(client), client_loopback]() mutable {
+        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback]() mutable {
             setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
-            sync_server.handleClient(client.fd(), client_loopback);
+            sync_server.handleClient(client.fd(), client_ip, client_loopback);
+            if (!client_loopback) {
+                std::lock_guard<std::mutex> lock(g_client_connection_mutex);
+                auto found = g_active_remote_connections.find(client_ip);
+                if (found != g_active_remote_connections.end()) {
+                    if (found->second > 1) {
+                        --found->second;
+                    } else {
+                        g_active_remote_connections.erase(found);
+                    }
+                }
+            }
         }).detach();
         runPeriodicSync();
     }
