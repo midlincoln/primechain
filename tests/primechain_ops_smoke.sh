@@ -103,6 +103,17 @@ case "$cmd" in
     echo "PENDING_TX direction=sent tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=50 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
     echo "PENDING_TX direction=fee-paid tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
     ;;
+  record)
+    echo "RECORD integer=$3 height=2 kind=COMPOSITE hash=abc123 frontier=5 confirmations=2 provider=pcpq1_sender txs=1 finalization_votes=2 commit_phase_votes=2 round_changes=0"
+    echo "COMPOSITE_PROOF integer=$3 divisor=2 cofactor=2"
+    echo "COMMIT_PHASE integer=$3 commitments=1 votes=2 validators=2"
+    echo "RECORD_TX tx_hash=tx-smoke-123 version=2 nonce=1 sender=pcpq1_sender inputs=1 outputs=1 fee_prime=3 fee_micro_units=1 fee_denominator=1"
+    ;;
+  latest-records)
+    echo "LATEST_RECORDS $2 frontier=5 records=4 showing=${4:-20}"
+    echo "RECORD integer=4 height=2 kind=COMPOSITE hash=abc123 frontier=5 confirmations=2 provider=pcpq1_sender txs=1 finalization_votes=2 commit_phase_votes=2 round_changes=0"
+    echo "RECORD integer=5 height=3 kind=PRIME hash=def456 frontier=5 confirmations=1 provider=pcpq1_sender txs=0 finalization_votes=2 commit_phase_votes=0 round_changes=0"
+    ;;
   tx)
     echo "TX_FOUND $3 store=$2 integer=4 height=2 kind=COMPOSITE frontier=5 confirmations=2 version=2 nonce=1 sender=pcpq1_sender"
     echo "TX_INPUTS count=1"
@@ -325,6 +336,24 @@ grep -q '^PRIMECHAIN_WALLET_DASHBOARD generated_at=' "$tmp/wallet-dashboard.txt"
 grep -q '^PRIMECHAIN_WALLET_SUMMARY generated_at=' "$tmp/wallet-dashboard.txt"
 grep -q '^WALLET_PENDING 192.0.2.10:8339 ' "$tmp/wallet-dashboard.txt"
 grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-dashboard.txt"
+
+
+"$ops" record \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --integer 4 > "$tmp/record.txt"
+
+grep -q '^RECORD integer=4 ' "$tmp/record.txt"
+grep -q '^COMPOSITE_PROOF integer=4 divisor=2 cofactor=2$' "$tmp/record.txt"
+
+
+"$ops" latest-records \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --last 2 > "$tmp/latest-records.txt"
+
+grep -q '^LATEST_RECORDS .* showing=2$' "$tmp/latest-records.txt"
+grep -q '^RECORD integer=5 .* kind=PRIME ' "$tmp/latest-records.txt"
 
 
 "$ops" tx \

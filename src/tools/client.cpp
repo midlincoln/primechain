@@ -878,6 +878,199 @@ int transactionLookup(int argc, char** argv) {
     return 1;
 }
 
+
+bool hasValidatorEpochTransition(const primechain::protocol::ValidatorEpochTransitionV1& transition) {
+    return transition.epoch != 0 || transition.activation_integer != 0 ||
+           !transition.next_validator_set.empty() || !transition.votes.empty();
+}
+
+bool hasEconomicPolicyUpdate(const primechain::protocol::EconomicPolicyUpdateV1& policy) {
+    return policy.transfer_fee_micro_units != 0 || policy.effective_integer != 0 ||
+           policy.sequence != 0 || !policy.votes.empty();
+}
+
+void printExplorerTransactions(const std::vector<primechain::protocol::TransactionV0>& transactions) {
+    for (const auto& tx : transactions) {
+        const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+        std::cout << "RECORD_TX"
+                  << " tx_hash=" << tx_hash
+                  << " version=" << tx.version
+                  << " nonce=" << tx.nonce
+                  << " sender=" << tx.sender_address
+                  << " inputs=" << tx.inputs.size()
+                  << " outputs=" << tx.outputs.size()
+                  << " fee_prime=" << tx.fee.prime
+                  << " fee_micro_units=" << tx.fee.amount.numerator
+                  << " fee_denominator=" << tx.fee.amount.denominator << "\n";
+    }
+}
+
+void printExplorerCommonMetadata(
+    const primechain::protocol::ValidatorEpochTransitionV1& validator_epoch,
+    const std::vector<primechain::protocol::ValidatorEndpointUpdateV1>& validator_endpoints,
+    const primechain::protocol::EconomicPolicyUpdateV1& economic_policy,
+    const std::vector<primechain::protocol::ValidatorApplicationV1>& validator_applications,
+    const std::vector<primechain::protocol::ValidatorWorkBindingV1>& validator_work_bindings) {
+    if (hasValidatorEpochTransition(validator_epoch)) {
+        std::cout << "VALIDATOR_EPOCH_TRANSITION"
+                  << " epoch=" << validator_epoch.epoch
+                  << " activation_integer=" << validator_epoch.activation_integer
+                  << " validators=" << validator_epoch.next_validator_set.size()
+                  << " votes=" << validator_epoch.votes.size() << "\n";
+    }
+    if (!validator_endpoints.empty()) {
+        std::cout << "VALIDATOR_ENDPOINT_UPDATES count=" << validator_endpoints.size() << "\n";
+    }
+    if (hasEconomicPolicyUpdate(economic_policy)) {
+        std::cout << "ECONOMIC_POLICY_UPDATE"
+                  << " transfer_fee_micro_units=" << economic_policy.transfer_fee_micro_units
+                  << " effective_integer=" << economic_policy.effective_integer
+                  << " sequence=" << economic_policy.sequence
+                  << " votes=" << economic_policy.votes.size() << "\n";
+    }
+    if (!validator_applications.empty()) {
+        std::cout << "VALIDATOR_APPLICATIONS count=" << validator_applications.size() << "\n";
+    }
+    if (!validator_work_bindings.empty()) {
+        std::cout << "VALIDATOR_WORK_BINDINGS count=" << validator_work_bindings.size() << "\n";
+    }
+}
+
+bool printExplorerRecord(
+    const primechain::storage::StoredRecord& stored,
+    primechain::PrimeValue frontier,
+    bool include_details,
+    std::string& error) {
+    const auto confirmations = frontier >= stored.integer ? frontier - stored.integer + 1 : 0;
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        std::cout << "RECORD"
+                  << " integer=" << stored.integer
+                  << " height=" << stored.height
+                  << " kind=" << kindName(stored.kind)
+                  << " hash=" << primechain::crypto::toHex(stored.record_hash)
+                  << " frontier=" << frontier
+                  << " confirmations=" << confirmations
+                  << " provider=" << record->proof.provider_address
+                  << " txs=" << record->transactions.size()
+                  << " finalization_votes=" << record->finalized_by.votes.size()
+                  << " commit_phase_votes=" << record->commit_phase.votes.size()
+                  << " round_changes=" << record->finalized_by.round_changes.size() << "\n";
+        if (include_details) {
+            std::cout << "COMPOSITE_PROOF"
+                      << " integer=" << record->proof.g
+                      << " divisor=" << record->proof.d
+                      << " cofactor=" << record->proof.e << "\n";
+            std::cout << "COMMIT_PHASE"
+                      << " integer=" << record->commit_phase.integer
+                      << " commitments=" << record->commit_phase.commitments.size()
+                      << " votes=" << record->commit_phase.votes.size()
+                      << " validators=" << record->commit_phase.validator_set.size() << "\n";
+            printExplorerTransactions(record->transactions);
+            printExplorerCommonMetadata(
+                record->validator_epoch,
+                record->validator_endpoints,
+                record->economic_policy,
+                record->validator_applications,
+                record->validator_work_bindings);
+        }
+        return true;
+    }
+
+    const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!record.has_value()) return false;
+    std::cout << "RECORD"
+              << " integer=" << stored.integer
+              << " height=" << stored.height
+              << " kind=" << kindName(stored.kind)
+              << " hash=" << primechain::crypto::toHex(stored.record_hash)
+              << " frontier=" << frontier
+              << " confirmations=" << confirmations
+              << " provider=" << record->proof.provider_address
+              << " txs=" << record->transactions.size()
+              << " finalization_votes=" << record->finalized_by.votes.size()
+              << " commit_phase_votes=0"
+              << " round_changes=" << record->finalized_by.round_changes.size() << "\n";
+    if (include_details) {
+        std::cout << "PRIME_PROOF"
+                  << " prime=" << record->proof.p
+                  << " witness=" << record->proof.witness
+                  << " factors=" << record->proof.factors_of_p_minus_1.size() << "\n";
+        if (!record->genesis_config.validator_set.empty()) {
+            std::cout << "GENESIS_CONFIG validators=" << record->genesis_config.validator_set.size() << "\n";
+        }
+        printExplorerTransactions(record->transactions);
+        printExplorerCommonMetadata(
+            record->validator_epoch,
+            record->validator_endpoints,
+            record->economic_policy,
+            record->validator_applications,
+            record->validator_work_bindings);
+    }
+    return true;
+}
+
+int recordExplorerLookup(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const primechain::PrimeValue integer = std::stoull(argv[3]);
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "record_error: " << error << "\n";
+        return 1;
+    }
+    const auto frontier = records.empty() ? primechain::PrimeValue{0} : records.back().integer;
+    for (const auto& stored : records) {
+        if (stored.integer != integer) continue;
+        if (!printExplorerRecord(stored, frontier, true, error)) {
+            std::cerr << "record_error: " << error << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    std::cout << "RECORD_NOT_FOUND " << store_path
+              << " integer=" << integer
+              << " frontier=" << frontier << "\n";
+    return 1;
+}
+
+int latestRecordsExplorer(int argc, char** argv) {
+    if (argc != 3 && argc != 5) return 1;
+    const std::string store_path = argv[2];
+    std::uint64_t last = 20;
+    if (argc == 5) {
+        if (std::string(argv[3]) != "--last") return 1;
+        last = static_cast<std::uint64_t>(std::stoull(argv[4]));
+    }
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "latest_records_error: " << error << "\n";
+        return 1;
+    }
+    const auto frontier = records.empty() ? primechain::PrimeValue{0} : records.back().integer;
+    const auto showing = last >= records.size() ? records.size() : static_cast<std::size_t>(last);
+    const auto start = records.size() - showing;
+    std::cout << "LATEST_RECORDS " << store_path
+              << " frontier=" << frontier
+              << " records=" << records.size()
+              << " showing=" << showing << "\n";
+    for (std::size_t i = start; i < records.size(); ++i) {
+        if (!printExplorerRecord(records[i], frontier, false, error)) {
+            std::cerr << "latest_records_error: " << error << "\n";
+            return 1;
+        }
+    }
+    return 0;
+}
+
 struct AddressReportTotals {
     std::uint64_t sent_micro_units{0};
     std::uint64_t received_micro_units{0};
@@ -2751,6 +2944,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " inspect <record-store> [integer]\n"
               << "  " << argv0 << " inspect <record-store> --range <start> <end>\n"
               << "  " << argv0 << " decode-record <record-store> <integer>\n"
+              << "  " << argv0 << " record <record-store> <integer>\n"
+              << "  " << argv0 << " latest-records <record-store> [--last count]\n"
               << "  " << argv0 << " new-miner <wallet-file>\n"
               << "  " << argv0 << " address <wallet-file>\n"
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
@@ -2889,6 +3084,14 @@ int main(int argc, char** argv) {
     if (command == "decode-record") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
         return decodeRecord(argc, argv);
+    }
+    if (command == "record") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return recordExplorerLookup(argc, argv);
+    }
+    if (command == "latest-records") {
+        if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
+        return latestRecordsExplorer(argc, argv);
     }
     if (command == "new-miner") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

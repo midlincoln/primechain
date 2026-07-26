@@ -17,6 +17,8 @@ usage:
   primechain-ops wallet-pending --workdir <client-workdir> --validator <host:port> [options]
   primechain-ops wallet-history --workdir <client-workdir> [options]
   primechain-ops wallet-dashboard --workdir <client-workdir> --validator <host:port> [options]
+  primechain-ops record --workdir <client-workdir> --integer <n> [options]
+  primechain-ops latest-records --workdir <client-workdir> [options]
   primechain-ops tx --workdir <client-workdir> --hash <tx-hash> [options]
   primechain-ops address-report --workdir <client-workdir> --address <address> [options]
   primechain-ops wallet-receive --workdir <client-workdir> [options]
@@ -125,6 +127,18 @@ address-report options:
   --workdir <client-workdir>            required; contains data/chain.dat
   --address <address>                   required address to inspect
   --last <count>                        optional; print only the last count address tx events
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --no-sync                             do not sync peer before reading local chain
+
+record options:
+  --workdir <client-workdir>            required; contains data/chain.dat
+  --integer <n>                         required record integer to inspect
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --no-sync                             do not sync peer before reading local chain
+
+latest-records options:
+  --workdir <client-workdir>            required; contains data/chain.dat
+  --last <count>                        default: 20 records
   --client <primechain-client>          default: <repo>/build/primechain-client
   --no-sync                             do not sync peer before reading local chain
 
@@ -1270,6 +1284,83 @@ cmd_address_report() {
   rm -rf "$tmpdir"
 }
 
+cmd_record_lookup() {
+  local client="$default_client"
+  local workdir=""
+  local integer=""
+  local sync_first=1
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --integer) require_value "$1" "${2:-}"; integer="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --no-sync) sync_first=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -n "$integer" ] || die "--integer is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  if [ "$sync_first" -eq 1 ]; then
+    "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+      sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+      rm -rf "$tmpdir"
+      die "sync-peer failed"
+    }
+  fi
+
+  "$client" record "$chain" "$integer"
+  rm -rf "$tmpdir"
+}
+
+cmd_latest_records() {
+  local client="$default_client"
+  local workdir=""
+  local last=20
+  local sync_first=1
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --last) require_value "$1" "${2:-}"; last="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --no-sync) sync_first=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  if [ "$sync_first" -eq 1 ]; then
+    "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+      sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+      rm -rf "$tmpdir"
+      die "sync-peer failed"
+    }
+  fi
+
+  "$client" latest-records "$chain" --last "$last"
+  rm -rf "$tmpdir"
+}
+
 cmd_tx_lookup() {
   local client="$default_client"
   local workdir=""
@@ -1644,6 +1735,8 @@ main() {
     wallet-pending) cmd_wallet_pending "$@" ;;
     wallet-history) cmd_wallet_history "$@" ;;
     wallet-dashboard) cmd_wallet_dashboard "$@" ;;
+    record) cmd_record_lookup "$@" ;;
+    latest-records) cmd_latest_records "$@" ;;
     tx) cmd_tx_lookup "$@" ;;
     address-report) cmd_address_report "$@" ;;
     wallet-receive) cmd_wallet_receive "$@" ;;

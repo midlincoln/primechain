@@ -83,6 +83,16 @@ grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/mine-4.out"
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/pool-before.out"
 
+$client record "$base/work/data/chain.dat" 4 > "$base/record-4.out"
+grep -E -q '^RECORD integer=4 height=.* kind=COMPOSITE .* confirmations=1 .* txs=2 ' "$base/record-4.out"
+grep -q '^COMPOSITE_PROOF integer=4 divisor=2 cofactor=2$' "$base/record-4.out"
+grep -E -q '^RECORD_TX .* nonce=1 .* fee_micro_units=1 fee_denominator=1$' "$base/record-4.out"
+
+$client latest-records "$base/work/data/chain.dat" --last 2 > "$base/latest-records.out"
+grep -E -q '^LATEST_RECORDS .* frontier=4 records=3 showing=2$' "$base/latest-records.out"
+grep -E -q '^RECORD integer=3 .* kind=PRIME ' "$base/latest-records.out"
+grep -E -q '^RECORD integer=4 .* kind=COMPOSITE ' "$base/latest-records.out"
+
 $client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wallet" > "$base/sender-history.out"
 grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history.out"
 grep -E -q '^TX_EVENT .* confirmations=1 direction=sent .* prime=3 amount_micro_units=1000 .* receiver=' "$base/sender-history.out"
