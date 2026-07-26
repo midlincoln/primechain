@@ -14,6 +14,7 @@ usage:
   primechain-ops fee-distribution-status --workdir <client-workdir> [options]
   primechain-ops launch-status-json --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops wallet-summary --workdir <client-workdir> [options]
+  primechain-ops wallet-send --workdir <client-workdir> --to <address> --prime <p> --amount <micro-units> --validator <host:port> [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -93,6 +94,19 @@ wallet-summary options:
   --validator <host:port>               optional; adds live nonce from that validator
   --client <primechain-client>          default: <repo>/build/primechain-client
   --no-sync                             do not sync peer before reading local chain
+
+wallet-send options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --wallet <wallet>                     default: <workdir>/wallets/prime.wallet
+  --to <address>                        required receiver address
+  --prime <p>                           required prime asset to transfer
+  --amount <micro-units>                required transfer amount
+  --fee <micro-units>                   default: active policy fee from launch-report
+  --nonce <n|auto>                      default: auto from validator
+  --target <integer>                    optional suggested mining target; default frontier+1
+  --validator <host:port>               required submit target
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --send <primechain-send>              default: <repo>/build/primechain-send
 USAGE
 }
 
@@ -981,6 +995,132 @@ cmd_transaction_evidence() {
 }
 
 
+
+cmd_wallet_send() {
+  local client="$default_client"
+  local send="$repo_root/build/primechain-send"
+  local workdir=""
+  local wallet=""
+  local to_address=""
+  local prime=""
+  local amount=""
+  local fee=""
+  local nonce="auto"
+  local target=""
+  local validator=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --wallet) require_value "$1" "${2:-}"; wallet="$2"; shift 2 ;;
+      --to) require_value "$1" "${2:-}"; to_address="$2"; shift 2 ;;
+      --prime) require_value "$1" "${2:-}"; prime="$2"; shift 2 ;;
+      --amount) require_value "$1" "${2:-}"; amount="$2"; shift 2 ;;
+      --fee) require_value "$1" "${2:-}"; fee="$2"; shift 2 ;;
+      --nonce) require_value "$1" "${2:-}"; nonce="$2"; shift 2 ;;
+      --target) require_value "$1" "${2:-}"; target="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validator="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --send) require_value "$1" "${2:-}"; send="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -n "$to_address" ] || die "--to is required"
+  [ -n "$prime" ] || die "--prime is required"
+  [ -n "$amount" ] || die "--amount is required"
+  [ -n "$validator" ] || die "--validator is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -x "$send" ] || die "send executable is not executable: $send"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -n "$wallet" ] || wallet="$workdir/wallets/prime.wallet"
+  [ -f "$wallet" ] || die "wallet not found: $wallet"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local validator_host validator_port
+  parse_node "$validator" validator_host validator_port
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+    sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "sync-peer failed"
+  }
+  "$client" launch-report "$chain" >"$tmpdir/launch.out" 2>"$tmpdir/launch.err" || {
+    sed 's/^/  /' "$tmpdir/launch.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "launch-report failed"
+  }
+  "$client" balance "$chain" "$wallet" >"$tmpdir/balance.out" 2>"$tmpdir/balance.err" || {
+    sed 's/^/  /' "$tmpdir/balance.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "balance failed"
+  }
+
+  local chain_line current_frontier from_address balance tx_hash
+  chain_line="$(grep '^CHAIN ' "$tmpdir/launch.out")"
+  current_frontier="$(field_value "$chain_line" frontier)"
+  [ -n "$current_frontier" ] || { rm -rf "$tmpdir"; die "could not determine current frontier"; }
+  [ -n "$target" ] || target=$((current_frontier + 1))
+  if [ "$target" -le "$current_frontier" ]; then
+    rm -rf "$tmpdir"
+    die "--target must be greater than current frontier; target=$target frontier=$current_frontier"
+  fi
+
+  if [ -z "$fee" ]; then
+    fee="$(field_value "$(grep '^ECONOMIC_POLICY ' "$tmpdir/launch.out")" active_transfer_fee_micro_units)"
+  fi
+  [ -n "$fee" ] || { rm -rf "$tmpdir"; die "could not determine transfer fee"; }
+
+  from_address="$($client address "$wallet")"
+  if [ "$nonce" = "auto" ]; then
+    local nonce_line
+    nonce_line="$($client query "$validator_host" "$validator_port" GET_NONCE "$from_address")"
+    nonce="$(awk '/^NONCE / { print $4; exit }' <<<"$nonce_line")"
+  fi
+  [ -n "$nonce" ] || { rm -rf "$tmpdir"; die "could not determine nonce"; }
+
+  balance="$(balance_for_prime "$tmpdir/balance.out" "$prime")"
+  if [ "$balance" -lt $((amount + fee)) ]; then
+    rm -rf "$tmpdir"
+    die "insufficient wallet balance for prime $prime: balance=$balance required=$((amount + fee))"
+  fi
+
+  "$send" submit "$validator_host" "$validator_port" "$wallet" "$to_address" "$prime" "$amount" "$fee" "$nonce" >"$tmpdir/submit.out" 2>"$tmpdir/submit.err" || {
+    cat "$tmpdir/submit.out" >&2 || true
+    sed 's/^/  /' "$tmpdir/submit.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "transaction submit failed"
+  }
+  tx_hash="$(awk '/^TX_ACCEPTED / { print $2; exit }' "$tmpdir/submit.out")"
+  [ -n "$tx_hash" ] || {
+    cat "$tmpdir/submit.out" >&2 || true
+    rm -rf "$tmpdir"
+    die "transaction was not accepted"
+  }
+
+  echo "PRIMECHAIN_WALLET_SEND generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "WORKDIR $workdir"
+  echo "VALIDATOR $validator"
+  echo "FROM address=$from_address wallet=$wallet"
+  echo "TO address=$to_address"
+  echo "TRANSFER tx_hash=$tx_hash prime=$prime amount_micro_units=$amount fee_micro_units=$fee nonce=$nonce"
+  echo "BALANCE_CHECK prime=$prime available=$balance required=$((amount + fee)) pass=1"
+  echo "SUBMIT_RESULT accepted=1"
+  echo "NEXT_MINE_TARGET $target"
+  echo "NEXT_COMMAND add-mine-job $client add-mine-job $workdir --target $target"
+  echo "NEXT_COMMAND run-jobs $client run-jobs $workdir"
+  echo "NEXT_COMMAND sync-peer $client sync-peer $workdir"
+
+  rm -rf "$tmpdir"
+}
+
 cmd_wallet_summary() {
   local client="$default_client"
   local workdir=""
@@ -1189,6 +1329,7 @@ main() {
     fee-distribution-status) cmd_fee_distribution_status "$@" ;;
     launch-status-json) cmd_launch_status_json "$@" ;;
     wallet-summary) cmd_wallet_summary "$@" ;;
+    wallet-send) cmd_wallet_send "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac
