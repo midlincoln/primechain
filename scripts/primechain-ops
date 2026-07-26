@@ -13,6 +13,7 @@ usage:
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
   primechain-ops fee-distribution-status --workdir <client-workdir> [options]
   primechain-ops launch-status-json --workdir <client-workdir> --validator <host:port> ... [options]
+  primechain-ops wallet-summary --workdir <client-workdir> [options]
 
 install-validator-service options:
   --port <port>                         default: 8339
@@ -85,6 +86,13 @@ launch-status-json options:
   --interval-records <count>            default: 1000
   --client <primechain-client>          default: <repo>/build/primechain-client
   --output <file>                       optional JSON output path
+
+wallet-summary options:
+  --workdir <client-workdir>            required; contains data/chain.dat
+  --wallet <wallet>                     default: <workdir>/wallets/prime.wallet
+  --validator <host:port>               optional; adds live nonce from that validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --no-sync                             do not sync peer before reading local chain
 USAGE
 }
 
@@ -972,6 +980,102 @@ cmd_transaction_evidence() {
   [ "$pass" -eq 1 ] || return 1
 }
 
+
+cmd_wallet_summary() {
+  local client="$default_client"
+  local workdir=""
+  local wallet=""
+  local validator=""
+  local sync_first=1
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --wallet) require_value "$1" "${2:-}"; wallet="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validator="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --no-sync) sync_first=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -n "$wallet" ] || wallet="$workdir/wallets/prime.wallet"
+  [ -f "$wallet" ] || die "wallet not found: $wallet"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  if [ "$sync_first" -eq 1 ]; then
+    "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+      sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+      rm -rf "$tmpdir"
+      die "sync-peer failed"
+    }
+  fi
+
+  "$client" inspect "$chain" >"$tmpdir/inspect.out" 2>"$tmpdir/inspect.err" || {
+    sed 's/^/  /' "$tmpdir/inspect.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "inspect failed"
+  }
+  "$client" balance "$chain" "$wallet" >"$tmpdir/balance.out" 2>"$tmpdir/balance.err" || {
+    sed 's/^/  /' "$tmpdir/balance.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "balance failed"
+  }
+
+  local address holdings total frontier hash height records prime_records composite_records
+  address="$(awk '/^address:/ { print $2; exit }' "$tmpdir/balance.out")"
+  holdings="$(awk '/^holdings:/ { print $2; exit }' "$tmpdir/balance.out")"
+  total="$(awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { total += $2 } END { print total + 0 }' "$tmpdir/balance.out")"
+  frontier="$(awk '/^frontier_integer:/ { print $2; exit }' "$tmpdir/inspect.out")"
+  hash="$(awk '/^latest_record_hash:/ { print $2; exit }' "$tmpdir/inspect.out")"
+  height="$(awk '/^height:/ { print $2; exit }' "$tmpdir/inspect.out")"
+  records="$(awk '/^records:/ { print $2; exit }' "$tmpdir/inspect.out")"
+  prime_records="$(awk '/^prime_records:/ { print $2; exit }' "$tmpdir/inspect.out")"
+  composite_records="$(awk '/^composite_records:/ { print $2; exit }' "$tmpdir/inspect.out")"
+
+  [ -n "$address" ] || { rm -rf "$tmpdir"; die "could not parse wallet address"; }
+  [ -n "$holdings" ] || holdings=0
+  [ -n "$frontier" ] || frontier=unknown
+  [ -n "$hash" ] || hash=unknown
+  [ -n "$height" ] || height=unknown
+  [ -n "$records" ] || records=unknown
+  [ -n "$prime_records" ] || prime_records=unknown
+  [ -n "$composite_records" ] || composite_records=unknown
+
+  echo "PRIMECHAIN_WALLET_SUMMARY generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "WORKDIR $workdir"
+  echo "WALLET $wallet"
+  echo "ADDRESS $address"
+  echo "CHAIN height=$height frontier=$frontier hash=$hash records=$records prime_records=$prime_records composite_records=$composite_records"
+  echo "BALANCE holdings=$holdings total_micro_units=$total"
+  awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { print "HOLDING prime=" $1 " micro_units=" $2 }' "$tmpdir/balance.out"
+
+  if [ -n "$validator" ]; then
+    local validator_host validator_port nonce_out
+    parse_node "$validator" validator_host validator_port
+    if nonce_out="$($client query "$validator_host" "$validator_port" GET_NONCE "$address" 2>&1)"; then
+      local confirmed next
+      confirmed="$(awk '/^NONCE / { print $3; exit }' <<<"$nonce_out")"
+      next="$(awk '/^NONCE / { print $4; exit }' <<<"$nonce_out")"
+      echo "NONCE validator=$validator confirmed=${confirmed:-unknown} next=${next:-unknown}"
+    else
+      echo "NONCE validator=$validator unavailable=1"
+      echo "  $nonce_out" >&2
+    fi
+  fi
+
+  rm -rf "$tmpdir"
+}
+
 cmd_launch_summary() {
   local client="$default_client"
   local workdir=""
@@ -1084,6 +1188,7 @@ main() {
     transaction-evidence) cmd_transaction_evidence "$@" ;;
     fee-distribution-status) cmd_fee_distribution_status "$@" ;;
     launch-status-json) cmd_launch_status_json "$@" ;;
+    wallet-summary) cmd_wallet_summary "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac

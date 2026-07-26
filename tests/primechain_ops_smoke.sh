@@ -93,6 +93,17 @@ case "$cmd" in
       esac
     fi
     ;;
+  inspect)
+    echo "record store inspection"
+    echo "store_path: $2"
+    echo "records: 122"
+    echo "prime_records: 30"
+    echo "composite_records: 92"
+    echo "has_genesis: yes"
+    echo "height: 121"
+    echo "frontier_integer: 123"
+    echo "latest_record_hash: abc123"
+    ;;
   fee-pool)
     if [ -f "$state_file" ]; then
       echo "VALIDATOR_FEE_POOL $2 epoch=2 address=pcpool_validator_fees_epoch_2 holdings=1 total_micro_units=1"
@@ -240,6 +251,22 @@ python3 -m json.tool "$tmp/status.json" >/dev/null
 grep -q '"frontier": 123' "$tmp/status.json"
 grep -q '"next_distribution_integer": 1023' "$tmp/status.json"
 grep -q '"address": "pcpq1_b"' "$tmp/status.json"
+
+
+touch "$tmp/sender.wallet"
+rm -f "$tmp/tx-included"
+"$ops" wallet-summary \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --validator 192.0.2.10:8339 > "$tmp/wallet-summary.txt"
+
+grep -q '^PRIMECHAIN_WALLET_SUMMARY generated_at=' "$tmp/wallet-summary.txt"
+grep -q '^ADDRESS pcpq1_sender$' "$tmp/wallet-summary.txt"
+grep -q '^CHAIN height=121 frontier=123 hash=abc123 records=122 prime_records=30 composite_records=92$' "$tmp/wallet-summary.txt"
+grep -q '^BALANCE holdings=1 total_micro_units=1000000$' "$tmp/wallet-summary.txt"
+grep -q '^HOLDING prime=3 micro_units=1000000$' "$tmp/wallet-summary.txt"
+grep -q '^NONCE validator=192.0.2.10:8339 confirmed=0 next=1$' "$tmp/wallet-summary.txt"
 
 
 touch "$tmp/sender.wallet"
