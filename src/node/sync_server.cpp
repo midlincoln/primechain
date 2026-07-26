@@ -62,6 +62,7 @@ constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
 constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 8;
+constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
@@ -1775,6 +1776,10 @@ public:
                 sendMempool(fd);
                 continue;
             }
+            if (*line == "GET_MEMPOOL_SUMMARY") {
+                sendMempoolSummary(fd);
+                continue;
+            }
             if (line->rfind("ACK_MEMPOOL ", 0) == 0) {
                 if (!ack_mempool_enabled_) {
                     writeAll(fd, "ERROR ACK_MEMPOOL disabled; restart with --enable-ack-mempool\n");
@@ -2022,6 +2027,19 @@ public:
                 if (addPeer(discovered_peer) && peers_.size() > before) peer_added = true;
             }
             if (peer_added) persistPeerStateWarning();
+        }
+    }
+
+    bool hasPendingMempool() {
+        revalidateMempool();
+        return !mempool_.empty();
+    }
+
+    void rebroadcastMempool() {
+        revalidateMempool();
+        if (mempool_.empty()) return;
+        for (const auto& tx : mempool_) {
+            propagateTransaction(tx);
         }
     }
 
@@ -5932,6 +5950,36 @@ private:
         }
     }
 
+    void sendMempoolSummary(int fd) {
+        revalidateMempool();
+        std::map<primechain::Address, std::size_t> by_sender;
+        std::uint64_t total_inputs = 0;
+        std::uint64_t total_outputs = 0;
+        std::uint64_t total_fees = 0;
+        for (const auto& tx : mempool_) {
+            ++by_sender[tx.sender_address];
+            for (const auto& input : tx.inputs) total_inputs += input.amount.numerator;
+            for (const auto& output : tx.outputs) total_outputs += output.amount.numerator;
+            total_fees += tx.fee.amount.numerator;
+        }
+        std::ostringstream out;
+        out << "MEMPOOL_SUMMARY"
+            << " transactions=" << mempool_.size()
+            << " max_transactions=" << kMaxMempoolTransactions
+            << " unique_senders=" << by_sender.size()
+            << " total_input_micro_units=" << total_inputs
+            << " total_output_micro_units=" << total_outputs
+            << " total_fee_micro_units=" << total_fees
+            << " active_peers=" << activeKnownPeers().size()
+            << "\n";
+        for (const auto& entry : by_sender) {
+            out << "MEMPOOL_SENDER address=" << entry.first
+                << " transactions=" << entry.second << "\n";
+        }
+        out << "END_MEMPOOL_SUMMARY\n";
+        writeAll(fd, out.str());
+    }
+
     void sendMempool(int fd) const {
         std::ostringstream header;
         header << "MEMPOOL " << mempool_.size() << "\n";
@@ -6516,20 +6564,24 @@ int main(int argc, char** argv) {
 
     auto next_sync = std::chrono::steady_clock::now()
         + std::chrono::seconds(options.sync_interval_seconds > 0 ? options.sync_interval_seconds : 1);
+    auto next_mempool_rebroadcast = std::chrono::steady_clock::now()
+        + std::chrono::seconds(kMempoolRebroadcastIntervalSeconds);
     auto runPeriodicSync = [&]() {
-        if (options.sync_interval_seconds <= 0 || !sync_server.hasKnownPeers()) {
-            return;
-        }
         const auto now = std::chrono::steady_clock::now();
-        if (now < next_sync) {
-            return;
+        if (options.sync_interval_seconds > 0 && sync_server.hasKnownPeers() && now >= next_sync) {
+            std::string error;
+            if (sync_server.peerDiscoveryEnabled()) {
+                sync_server.discoverPeersFromKnown();
+            }
+            sync_server.syncFromKnownPeers(error);
+            next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
         }
-        std::string error;
-        if (sync_server.peerDiscoveryEnabled()) {
-            sync_server.discoverPeersFromKnown();
+        if (sync_server.hasKnownPeers() && now >= next_mempool_rebroadcast) {
+            if (sync_server.hasPendingMempool()) {
+                sync_server.rebroadcastMempool();
+            }
+            next_mempool_rebroadcast = now + std::chrono::seconds(kMempoolRebroadcastIntervalSeconds);
         }
-        sync_server.syncFromKnownPeers(error);
-        next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
     };
 
     while (g_running) {

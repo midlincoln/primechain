@@ -10,6 +10,7 @@ usage:
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops peer-health --validator <host:port> ... [options]
   primechain-ops peer-state --validator <host:port> ... [options]
+  primechain-ops mempool-health --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
@@ -67,6 +68,10 @@ peer-state options:
   --client <primechain-client>          default: <repo>/build/primechain-client
   --reset                               clear failure/quarantine counters for all known peers
   --reset-peer <host:port>              clear failure/quarantine counters for one peer
+
+mempool-health options:
+  --validator <host:port>               repeat once per validator to query mempool summary
+  --client <primechain-client>          default: <repo>/build/primechain-client
 
 evidence options:
   --workdir <client-workdir>            required; contains data/chain.dat and peer config
@@ -700,6 +705,55 @@ cmd_peer_state() {
     echo "PEER_STATE_OK validators=${#validators[@]}"
   else
     echo "PEER_STATE_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
+
+cmd_mempool_health() {
+  local client="$default_client"
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  local expected_summary=""
+  local failed=0
+  local validator node_host node_port output summary
+  for validator in "${validators[@]}"; do
+    parse_node "$validator" node_host node_port
+    echo "NODE_MEMPOOL $validator"
+    if output="$($client query "$node_host" "$node_port" GET_MEMPOOL_SUMMARY 2>&1)"; then
+      echo "$output"
+      summary="$(echo "$output" | grep '^MEMPOOL_SUMMARY ' || true)"
+      if [ -z "$summary" ]; then
+        echo "FAIL mempool-summary-missing $validator"
+        failed=1
+      elif [ -z "$expected_summary" ]; then
+        expected_summary="$summary"
+      elif [ "$summary" != "$expected_summary" ]; then
+        echo "FAIL mempool-summary-disagreement $validator"
+        failed=1
+      fi
+    else
+      echo "FAIL mempool-summary $validator"
+      echo "  $output" >&2
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "MEMPOOL_HEALTH_OK validators=${#validators[@]}"
+  else
+    echo "MEMPOOL_HEALTH_FAIL validators=${#validators[@]}"
   fi
   return "$failed"
 }
@@ -1953,6 +2007,7 @@ main() {
     doctor-network) cmd_doctor_network "$@" ;;
     peer-health) cmd_peer_health "$@" ;;
     peer-state) cmd_peer_state "$@" ;;
+    mempool-health) cmd_mempool_health "$@" ;;
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;
