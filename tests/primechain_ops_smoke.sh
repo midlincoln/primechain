@@ -103,6 +103,14 @@ case "$cmd" in
     echo "PENDING_TX direction=sent tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=50 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
     echo "PENDING_TX direction=fee-paid tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
     ;;
+  tx)
+    echo "TX_FOUND $3 store=$2 integer=4 height=2 kind=COMPOSITE frontier=5 confirmations=2 version=2 nonce=1 sender=pcpq1_sender"
+    echo "TX_INPUTS count=1"
+    echo "TX_INPUT prime=3 amount_micro_units=101 amount_denominator=1"
+    echo "TX_OUTPUTS count=1"
+    echo "TX_OUTPUT prime=3 amount_micro_units=100 amount_denominator=1 receiver=pcpq1_receiver"
+    echo "TX_FEE prime=3 amount_micro_units=1 amount_denominator=1"
+    ;;
   inspect)
     echo "record store inspection"
     echo "store_path: $2"
@@ -311,6 +319,15 @@ grep -q '^PRIMECHAIN_WALLET_DASHBOARD generated_at=' "$tmp/wallet-dashboard.txt"
 grep -q '^PRIMECHAIN_WALLET_SUMMARY generated_at=' "$tmp/wallet-dashboard.txt"
 grep -q '^WALLET_PENDING 192.0.2.10:8339 ' "$tmp/wallet-dashboard.txt"
 grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-dashboard.txt"
+
+
+"$ops" tx \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --hash tx-smoke-123 > "$tmp/tx-lookup.txt"
+
+grep -q '^TX_FOUND tx-smoke-123 .* confirmations=2 .* sender=pcpq1_sender$' "$tmp/tx-lookup.txt"
+grep -q '^TX_OUTPUT prime=3 amount_micro_units=100 amount_denominator=1 receiver=pcpq1_receiver$' "$tmp/tx-lookup.txt"
 
 
 "$ops" wallet-receive \

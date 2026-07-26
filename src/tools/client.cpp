@@ -804,6 +804,78 @@ int walletPending(const char* argv0, int argc, char** argv) {
     return 0;
 }
 
+void printTransactionDetails(
+    const primechain::protocol::TransactionV0& tx,
+    const std::string& prefix) {
+    std::cout << prefix << "_INPUTS count=" << tx.inputs.size() << "\n";
+    for (const auto& input : tx.inputs) {
+        std::cout << prefix << "_INPUT"
+                  << " prime=" << input.prime
+                  << " amount_micro_units=" << input.amount.numerator
+                  << " amount_denominator=" << input.amount.denominator << "\n";
+    }
+    std::cout << prefix << "_OUTPUTS count=" << tx.outputs.size() << "\n";
+    for (const auto& output : tx.outputs) {
+        std::cout << prefix << "_OUTPUT"
+                  << " prime=" << output.prime
+                  << " amount_micro_units=" << output.amount.numerator
+                  << " amount_denominator=" << output.amount.denominator
+                  << " receiver=" << output.receiver_address << "\n";
+    }
+    std::cout << prefix << "_FEE"
+              << " prime=" << tx.fee.prime
+              << " amount_micro_units=" << tx.fee.amount.numerator
+              << " amount_denominator=" << tx.fee.amount.denominator << "\n";
+}
+
+int transactionLookup(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const std::string wanted_hash = argv[3];
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "tx_lookup_error: " << error << "\n";
+        return 1;
+    }
+
+    primechain::PrimeValue frontier = 0;
+    if (!records.empty()) frontier = records.back().integer;
+
+    for (const auto& stored : records) {
+        const auto transactions = storedTransactions(stored, error);
+        if (!transactions.has_value()) {
+            std::cerr << "tx_lookup_error: " << error << "\n";
+            return 1;
+        }
+        for (const auto& tx : *transactions) {
+            const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+            if (tx_hash != wanted_hash) continue;
+
+            const auto confirmations = frontier >= stored.integer ? frontier - stored.integer + 1 : 0;
+            std::cout << "TX_FOUND " << wanted_hash
+                      << " store=" << store_path
+                      << " integer=" << stored.integer
+                      << " height=" << stored.height
+                      << " kind=" << kindName(stored.kind)
+                      << " frontier=" << frontier
+                      << " confirmations=" << confirmations
+                      << " version=" << tx.version
+                      << " nonce=" << tx.nonce
+                      << " sender=" << tx.sender_address << "\n";
+            printTransactionDetails(tx, "TX");
+            return 0;
+        }
+    }
+
+    std::cout << "TX_NOT_FOUND " << wanted_hash
+              << " store=" << store_path
+              << " frontier=" << frontier << "\n";
+    return 1;
+}
+
 int walletHistory(int argc, char** argv) {
     if (argc != 4 && argc != 6) return 1;
     const std::string store_path = argv[2];
@@ -2540,6 +2612,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
               << "  " << argv0 << " wallet-history <record-store> <wallet-file> [--last count]\n"
               << "  " << argv0 << " wallet-pending <host> <port> <wallet-file>\n"
+              << "  " << argv0 << " tx <record-store> <tx-hash>\n"
               << "  " << argv0 << " mine <host> <port> <limit> --prime-identity <file> --composite-identity <file>\n"
               << "  " << argv0 << " is-prime <n>\n"
               << "  " << argv0 << " divisor <n>\n"
@@ -2691,6 +2764,10 @@ int main(int argc, char** argv) {
     if (command == "wallet-pending") {
         if (argc != 5) { printUsage(argv[0]); return 1; }
         return walletPending(argv[0], argc, argv);
+    }
+    if (command == "tx") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return transactionLookup(argc, argv);
     }
     if (command == "mine") {
         if (argc != 9) { printUsage(argv[0]); return 1; }

@@ -96,6 +96,21 @@ $client wallet-history "$base/work/data/chain.dat" "$base/work/wallets/prime.wal
 grep -q '^WALLET_HISTORY .* events=4$' "$base/sender-history-last.out"
 [ "$(grep -c '^TX_EVENT ' "$base/sender-history-last.out")" -eq 1 ]
 
+tx_hash=$(awk '/^TX_ACCEPTED / { print $2; exit }' "$base/transfer-1.out")
+$client tx "$base/work/data/chain.dat" "$tx_hash" > "$base/tx-lookup.out"
+grep -q "^TX_FOUND $tx_hash " "$base/tx-lookup.out"
+grep -q ' integer=4 ' "$base/tx-lookup.out"
+grep -q ' confirmations=1 ' "$base/tx-lookup.out"
+grep -q ' version=2 nonce=1 sender=' "$base/tx-lookup.out"
+grep -q '^TX_INPUT prime=3 amount_micro_units=1001 amount_denominator=1$' "$base/tx-lookup.out"
+grep -q '^TX_OUTPUT prime=3 amount_micro_units=1000 amount_denominator=1 receiver=' "$base/tx-lookup.out"
+grep -q '^TX_FEE prime=3 amount_micro_units=1 amount_denominator=1$' "$base/tx-lookup.out"
+if $client tx "$base/work/data/chain.dat" 0000000000000000000000000000000000000000000000000000000000000000 > "$base/tx-missing.out"; then
+    echo "missing tx lookup succeeded unexpectedly" >&2
+    exit 1
+fi
+grep -q '^TX_NOT_FOUND 0000000000000000000000000000000000000000000000000000000000000000 ' "$base/tx-missing.out"
+
 $client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-before.out"
 grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 last_distribution_integer=0 next_distribution_integer=1002 due=0 .* pool_total_micro_units=2 distributions=0$' "$base/distribution-status-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/distribution-status-before.out"
