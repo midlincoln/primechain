@@ -9,6 +9,7 @@ usage:
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops peer-health --validator <host:port> ... [options]
+  primechain-ops peer-state --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
@@ -60,6 +61,12 @@ doctor-network options:
 peer-health options:
   --validator <host:port>               repeat once per validator to query its known peers
   --client <primechain-client>          default: <repo>/build/primechain-client
+
+peer-state options:
+  --validator <host:port>               repeat once per validator to query persistent peer state
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --reset                               clear failure/quarantine counters for all known peers
+  --reset-peer <host:port>              clear failure/quarantine counters for one peer
 
 evidence options:
   --workdir <client-workdir>            required; contains data/chain.dat and peer config
@@ -628,6 +635,71 @@ cmd_peer_health() {
     echo "PEER_HEALTH_OK validators=${#validators[@]}"
   else
     echo "PEER_HEALTH_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
+
+cmd_peer_state() {
+  local client="$default_client"
+  local reset=0
+  local reset_peer=""
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --reset) reset=1; shift ;;
+      --reset-peer) require_value "$1" "${2:-}"; reset_peer="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  if [ "$reset" -eq 1 ] && [ -n "$reset_peer" ]; then
+    die "use either --reset or --reset-peer, not both"
+  fi
+
+  local failed=0
+  local validator node_host node_port output peer_host peer_port reset_out
+  for validator in "${validators[@]}"; do
+    parse_node "$validator" node_host node_port
+    echo "NODE_PEER_STATE $validator"
+    if [ "$reset" -eq 1 ]; then
+      if reset_out="$($client query "$node_host" "$node_port" RESET_PEER_STATE 2>&1)"; then
+        echo "$reset_out"
+      else
+        echo "PEER_STATE_RESET_FAILED $validator"
+        echo "  $reset_out" >&2
+        failed=1
+        continue
+      fi
+    elif [ -n "$reset_peer" ]; then
+      parse_node "$reset_peer" peer_host peer_port
+      if reset_out="$($client query "$node_host" "$node_port" RESET_PEER_STATE "$peer_host" "$peer_port" 2>&1)"; then
+        echo "$reset_out"
+      else
+        echo "PEER_STATE_RESET_FAILED $validator peer=$reset_peer"
+        echo "  $reset_out" >&2
+        failed=1
+        continue
+      fi
+    fi
+    if output="$($client query "$node_host" "$node_port" GET_PEER_STATE 2>&1)"; then
+      echo "$output"
+    else
+      echo "PEER_STATE_QUERY_FAILED $validator"
+      echo "  $output" >&2
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "PEER_STATE_OK validators=${#validators[@]}"
+  else
+    echo "PEER_STATE_FAIL validators=${#validators[@]}"
   fi
   return "$failed"
 }
@@ -1880,6 +1952,7 @@ main() {
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
     peer-health) cmd_peer_health "$@" ;;
+    peer-state) cmd_peer_state "$@" ;;
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;

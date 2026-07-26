@@ -208,11 +208,23 @@ case "$cmd" in
       GET_PEER_HEALTH)
         echo "PEER_HEALTH 1 local_frontier=123 local_hash=abc123"
         if [ "$host" = "192.0.2.10" ]; then
-          echo "PEER_HEALTH_ENTRY host=192.0.2.11 port=8339 reachable=1 has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
+          echo "PEER_HEALTH_ENTRY host=192.0.2.11 port=8339 reachable=1 failures=0 quarantined=0 last_success=1 last_failure=0 last_error=none has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
         else
-          echo "PEER_HEALTH_ENTRY host=192.0.2.10 port=8339 reachable=1 has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
+          echo "PEER_HEALTH_ENTRY host=192.0.2.10 port=8339 reachable=1 failures=0 quarantined=0 last_success=1 last_failure=0 last_error=none has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
         fi
         echo "END_PEER_HEALTH"
+        ;;
+      GET_PEER_STATE)
+        echo "PEER_STATE path=/tmp/chain.dat.peers peers=1 quarantine_threshold=3"
+        if [ "$host" = "192.0.2.10" ]; then
+          echo "PEER_STATE_ENTRY host=192.0.2.11 port=8339 failures=0 quarantined=0 last_success=1 last_failure=0 last_error=none"
+        else
+          echo "PEER_STATE_ENTRY host=192.0.2.10 port=8339 failures=0 quarantined=0 last_success=1 last_failure=0 last_error=none"
+        fi
+        echo "END_PEER_STATE"
+        ;;
+      RESET_PEER_STATE)
+        echo "PEER_STATE_RESET 1"
         ;;
       *)
         echo "unexpected query $q" >&2
@@ -253,6 +265,23 @@ grep -q '^NODE_PEER_HEALTH 192.0.2.10:8339$' "$tmp/peer-health.txt"
 grep -q '^PEER_HEALTH_ENTRY host=192.0.2.11 port=8339 reachable=1 .* hash_match=1 ' "$tmp/peer-health.txt"
 grep -q '^PEER_HEALTH_OK validators=2$' "$tmp/peer-health.txt"
 
+
+"$ops" peer-state \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 > "$tmp/peer-state.txt"
+
+grep -q '^NODE_PEER_STATE 192.0.2.10:8339$' "$tmp/peer-state.txt"
+grep -q '^PEER_STATE_ENTRY host=192.0.2.11 port=8339 failures=0 quarantined=0 ' "$tmp/peer-state.txt"
+grep -q '^PEER_STATE_OK validators=2$' "$tmp/peer-state.txt"
+
+"$ops" peer-state \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --reset-peer 192.0.2.11:8339 > "$tmp/peer-state-reset.txt"
+
+grep -q '^PEER_STATE_RESET 1$' "$tmp/peer-state-reset.txt"
+grep -q '^PEER_STATE_OK validators=1$' "$tmp/peer-state-reset.txt"
 
 mkdir -p "$tmp/workdir/data"
 touch "$tmp/workdir/data/chain.dat"

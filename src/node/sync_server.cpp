@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <set>
 #include <fstream>
@@ -71,6 +72,8 @@ struct PeerEndpoint {
 struct PeerRuntimeState {
     std::uint64_t consecutive_failures{0};
     bool quarantined{false};
+    std::uint64_t last_success_time{0};
+    std::uint64_t last_failure_time{0};
     std::string last_error;
 };
 
@@ -131,6 +134,11 @@ std::string healthToken(std::string value) {
         if (std::isspace(static_cast<unsigned char>(ch)) || ch == '=') ch = '_';
     }
     return value;
+}
+
+std::uint64_t currentUnixTime() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 class Socket {
@@ -1366,8 +1374,18 @@ public:
           validator_set_(std::move(validator_set)),
           validator_identity_(std::move(validator_identity)),
           use_chain_endpoints_(use_chain_endpoints) {
+        std::string peer_error;
+        if (!loadPeerState(peer_error)) {
+            std::cerr << "peer state load warning: " << peer_error << "\n";
+        }
         for (const auto& peer : peers) {
             addPeer(peer);
+        }
+        if (!peers.empty()) {
+            std::string persist_error;
+            if (!persistPeerState(persist_error)) {
+                std::cerr << "peer state persistence warning: " << persist_error << "\n";
+            }
         }
     }
 
@@ -1459,6 +1477,12 @@ public:
             const auto before = peers_.size();
             if (addPeer(peer) && peers_.size() > before) ++added;
         }
+        if (added > 0) {
+            std::string persist_error;
+            if (!persistPeerState(persist_error)) {
+                std::cerr << "peer state persistence warning: " << persist_error << "\n";
+            }
+        }
         return added;
     }
 
@@ -1524,6 +1548,14 @@ public:
             }
             if (*line == "GET_PEER_HEALTH") {
                 sendPeerHealth(fd);
+                continue;
+            }
+            if (*line == "GET_PEER_STATE") {
+                sendPeerState(fd);
+                continue;
+            }
+            if (*line == "RESET_PEER_STATE" || line->rfind("RESET_PEER_STATE ", 0) == 0) {
+                resetPeerStateCommand(fd, *line);
                 continue;
             }
             if (line->rfind("ADD_PEER ", 0) == 0) {
@@ -1917,9 +1949,12 @@ public:
                 continue;
             }
             markPeerSuccess(peer);
+            bool peer_added = false;
             for (const auto& discovered_peer : discovered) {
-                addPeer(discovered_peer);
+                const auto before = peers_.size();
+                if (addPeer(discovered_peer) && peers_.size() > before) peer_added = true;
             }
+            if (peer_added) persistPeerStateWarning();
         }
     }
 
@@ -2085,16 +2120,20 @@ private:
         auto& state = peerRuntime(peer);
         state.consecutive_failures = 0;
         state.quarantined = false;
+        state.last_success_time = currentUnixTime();
         state.last_error.clear();
+        persistPeerStateWarning();
     }
 
     void markPeerFailure(const PeerEndpoint& peer, const std::string& error) {
         auto& state = peerRuntime(peer);
         ++state.consecutive_failures;
+        state.last_failure_time = currentUnixTime();
         state.last_error = error.empty() ? "unknown" : error;
         if (state.consecutive_failures >= kPeerQuarantineFailureThreshold) {
             state.quarantined = true;
         }
+        persistPeerStateWarning();
     }
 
     std::vector<PeerEndpoint> activePeers(const std::vector<PeerEndpoint>& peers) const {
@@ -2108,6 +2147,91 @@ private:
 
     std::vector<PeerEndpoint> activeKnownPeers() const {
         return activePeers(peers_);
+    }
+
+    std::string peerStatePath() const {
+        return store_path_ + ".peers";
+    }
+
+    bool persistPeerState(std::string& error) const {
+        const auto path = peerStatePath();
+        const auto tmp_path = path + ".tmp";
+        std::ofstream out(tmp_path, std::ios::trunc);
+        if (!out) {
+            error = "could not open peer state temp file";
+            return false;
+        }
+        out << "# primechain peer state v1\n";
+        for (const auto& peer : peers_) {
+            PeerRuntimeState state;
+            const auto* found = findPeerRuntime(peer);
+            if (found != nullptr) state = *found;
+            out << "PEER " << peer.host << " " << peer.port
+                << " " << state.consecutive_failures
+                << " " << (state.quarantined ? 1 : 0)
+                << " " << state.last_success_time
+                << " " << state.last_failure_time
+                << " " << healthToken(state.last_error) << "\n";
+        }
+        out.close();
+        if (!out) {
+            error = "could not write peer state temp file";
+            return false;
+        }
+        if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+            error = std::string("could not replace peer state file: ") + std::strerror(errno);
+            std::remove(tmp_path.c_str());
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
+    bool loadPeerState(std::string& error) {
+        std::ifstream in(peerStatePath());
+        if (!in) {
+            error.clear();
+            return true;
+        }
+        std::string line;
+        std::size_t loaded = 0;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream parser(line);
+            std::string tag;
+            PeerEndpoint peer;
+            PeerRuntimeState state;
+            int quarantined = 0;
+            parser >> tag >> peer.host >> peer.port
+                   >> state.consecutive_failures
+                   >> quarantined
+                   >> state.last_success_time
+                   >> state.last_failure_time
+                   >> state.last_error;
+            if (!parser || tag != "PEER" || !validPeerEndpoint(peer) || isSelfPeer(peer)) {
+                continue;
+            }
+            state.quarantined = quarantined != 0;
+            const auto before = peers_.size();
+            addPeer(peer);
+            if (peers_.size() > before || findPeerRuntime(peer) != nullptr) {
+                peer_state_[peerKey(peer)] = state;
+                ++loaded;
+            }
+        }
+        if (!in.eof()) {
+            error = "could not read peer state file";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
+    void persistPeerStateWarning() const {
+        std::string error;
+        if (!persistPeerState(error)) {
+            std::cerr << "peer state persistence warning: " << error << "\n";
+        }
     }
 
     bool addPeer(const PeerEndpoint& peer) {
@@ -2166,6 +2290,8 @@ private:
                     << " reachable=0"
                     << " failures=" << state.consecutive_failures
                     << " quarantined=" << (state.quarantined ? 1 : 0)
+                    << " last_success=" << state.last_success_time
+                    << " last_failure=" << state.last_failure_time
                     << " last_error=" << healthToken(state.last_error)
                     << " error=" << healthToken(status_error) << "\n";
                 continue;
@@ -2190,6 +2316,8 @@ private:
                 << " reachable=1"
                 << " failures=" << state.consecutive_failures
                 << " quarantined=" << (state.quarantined ? 1 : 0)
+                << " last_success=" << state.last_success_time
+                << " last_failure=" << state.last_failure_time
                 << " last_error=" << (state.last_error.empty() ? "none" : healthToken(state.last_error))
                 << " has_genesis=" << (status->has_genesis ? 1 : 0)
                 << " frontier=" << status->frontier_integer
@@ -2204,6 +2332,56 @@ private:
         }
         out << "END_PEER_HEALTH\n";
         writeAll(fd, out.str());
+    }
+
+    void sendPeerState(int fd) const {
+        std::ostringstream out;
+        out << "PEER_STATE path=" << peerStatePath()
+            << " peers=" << peers_.size()
+            << " quarantine_threshold=" << kPeerQuarantineFailureThreshold << "\n";
+        for (const auto& peer : peers_) {
+            PeerRuntimeState state;
+            const auto* found = findPeerRuntime(peer);
+            if (found != nullptr) state = *found;
+            out << "PEER_STATE_ENTRY"
+                << " host=" << peer.host
+                << " port=" << peer.port
+                << " failures=" << state.consecutive_failures
+                << " quarantined=" << (state.quarantined ? 1 : 0)
+                << " last_success=" << state.last_success_time
+                << " last_failure=" << state.last_failure_time
+                << " last_error=" << (state.last_error.empty() ? "none" : healthToken(state.last_error))
+                << "\n";
+        }
+        out << "END_PEER_STATE\n";
+        writeAll(fd, out.str());
+    }
+
+    void resetPeerStateCommand(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        in >> command;
+        PeerEndpoint target;
+        std::string extra;
+        const bool has_host = static_cast<bool>(in >> target.host);
+        const bool has_port = has_host && static_cast<bool>(in >> target.port);
+        if (command != "RESET_PEER_STATE" || (has_host && !has_port) ||
+            (has_port && !validPeerEndpoint(target)) || (in >> extra)) {
+            writeAll(fd, "ERROR invalid RESET_PEER_STATE\n");
+            return;
+        }
+
+        std::size_t reset = 0;
+        for (const auto& peer : peers_) {
+            if (has_port && !samePeer(peer, target)) continue;
+            auto& state = peerRuntime(peer);
+            state.consecutive_failures = 0;
+            state.quarantined = false;
+            state.last_error.clear();
+            ++reset;
+        }
+        persistPeerStateWarning();
+        writeAll(fd, "PEER_STATE_RESET " + std::to_string(reset) + "\n");
     }
 
     void addPeerCommand(int fd, const std::string& line) {
@@ -2232,6 +2410,7 @@ private:
             writeAll(fd, "PEER_DUPLICATE " + peer.host + " " + std::to_string(peer.port) + "\n");
             return;
         }
+        persistPeerStateWarning();
         writeAll(fd, "PEER_ADDED " + peer.host + " " + std::to_string(peer.port) + "\n");
     }
 

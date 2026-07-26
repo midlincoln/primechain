@@ -72,6 +72,11 @@ for i in 1 2 3; do
 done
 grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19999 reachable=0 failures=3 quarantined=1 ' "$base/peer-health-dead-3.out"
 
+$client query 127.0.0.1 19188 GET_PEER_STATE > "$base/peer-state.out"
+grep -q "^PEER_STATE path=$base/b.dat.peers peers=3 quarantine_threshold=3$" "$base/peer-state.out"
+grep -q '^PEER_STATE_ENTRY host=127.0.0.1 port=19999 failures=3 quarantined=1 ' "$base/peer-state.out"
+grep -q '^PEER 127.0.0.1 19999 3 1 ' "$base/b.dat.peers"
+
 $client init-workdir "$base/work" 127.0.0.1 19188 > "$base/init.out"
 $client add-mine-job "$base/work" --target 3 > "$base/add-3.out"
 $client run-jobs "$base/work" > "$base/mine-3.out" 2>&1
