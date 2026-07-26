@@ -390,6 +390,23 @@ grep -q '^VALIDATOR pcpq1_b admission=reserve holdings=10 total_micro_units=5000
 grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=123 last_distribution_integer=23 next_distribution_integer=1023 due=0 .* pool_total_micro_units=0 distributions=1$' "$tmp/fee-distribution-status.txt"
 grep -q '^LAST_FEE_DISTRIBUTION integer=23 epoch=2 prime=101 micro_units=3$' "$tmp/fee-distribution-status.txt"
 
+"$ops" release-check \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 \
+  --interval-records 1000 > "$tmp/release-check.txt"
+
+grep -q '^PRIMECHAIN_RELEASE_CHECK generated_at=' "$tmp/release-check.txt"
+grep -q '^SECTION version-network$' "$tmp/release-check.txt"
+grep -q '^RESULT version-network OK$' "$tmp/release-check.txt"
+grep -q '^RESULT doctor-network OK$' "$tmp/release-check.txt"
+grep -q '^RESULT mempool-network OK$' "$tmp/release-check.txt"
+grep -q '^RESULT chain-doctor OK$' "$tmp/release-check.txt"
+grep -q '^RESULT fee-distribution-status OK$' "$tmp/release-check.txt"
+grep -q '^RESULT launch-summary OK$' "$tmp/release-check.txt"
+grep -q '^RELEASE_CHECK_OK validators=2$' "$tmp/release-check.txt"
+
 
 "$ops" launch-status-json \
   --client "$tmp/bin/primechain-client" \

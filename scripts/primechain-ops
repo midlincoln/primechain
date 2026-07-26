@@ -9,6 +9,7 @@ usage:
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops version-network --validator <host:port> ... [options]
+  primechain-ops release-check --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops chain-doctor --workdir <client-workdir> [options]
   primechain-ops chain-recover --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops peer-health --validator <host:port> ... [options]
@@ -66,6 +67,12 @@ doctor-network options:
 version-network options:
   --validator <host:port>               repeat once per validator to compare build metadata
   --client <primechain-client>          default: <repo>/build/primechain-client
+
+release-check options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --interval-records <count>            default: 1000
 
 chain-doctor options:
   --workdir <client-workdir>            required; contains data/chain.dat
@@ -675,6 +682,79 @@ cmd_version_network() {
     echo "VERSION_NETWORK_OK validators=${#validators[@]}"
   else
     echo "VERSION_NETWORK_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
+
+
+cmd_release_check() {
+  local client="$default_client"
+  local workdir=""
+  local interval_records=1000
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --interval-records) require_value "$1" "${2:-}"; interval_records="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -f "$workdir/data/chain.dat" ] || die "record store not found: $workdir/data/chain.dat"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  local failed=0
+  local validator_args=()
+  local validator
+  for validator in "${validators[@]}"; do
+    validator_args+=(--validator "$validator")
+  done
+
+  echo "PRIMECHAIN_RELEASE_CHECK generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "WORKDIR $workdir"
+  echo "VALIDATORS ${validators[*]}"
+
+  run_release_section() {
+    local name="$1"
+    shift
+    local out="$tmpdir/$name.out"
+    local err="$tmpdir/$name.err"
+    echo
+    echo "SECTION $name"
+    if "$@" >"$out" 2>"$err"; then
+      cat "$out"
+      echo "RESULT $name OK"
+    else
+      cat "$out" || true
+      sed 's/^/  /' "$err" >&2 || true
+      echo "RESULT $name FAIL"
+      failed=1
+    fi
+  }
+
+  run_release_section version-network cmd_version_network --client "$client" "${validator_args[@]}"
+  run_release_section doctor-network cmd_doctor_network --client "$client" "${validator_args[@]}"
+  run_release_section mempool-network cmd_mempool_network --client "$client" "${validator_args[@]}"
+  run_release_section chain-doctor cmd_chain_doctor --client "$client" --workdir "$workdir"
+  run_release_section fee-distribution-status cmd_fee_distribution_status --client "$client" --workdir "$workdir" --interval-records "$interval_records"
+  run_release_section launch-summary cmd_launch_summary --client "$client" --workdir "$workdir" "${validator_args[@]}"
+
+  rm -rf "$tmpdir"
+  if [ "$failed" -eq 0 ]; then
+    echo
+    echo "RELEASE_CHECK_OK validators=${#validators[@]}"
+  else
+    echo
+    echo "RELEASE_CHECK_FAIL validators=${#validators[@]}"
   fi
   return "$failed"
 }
@@ -2379,6 +2459,7 @@ main() {
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
     version-network) cmd_version_network "$@" ;;
+    release-check) cmd_release_check "$@" ;;
     chain-doctor) cmd_chain_doctor "$@" ;;
     chain-recover) cmd_chain_recover "$@" ;;
     peer-health) cmd_peer_health "$@" ;;
