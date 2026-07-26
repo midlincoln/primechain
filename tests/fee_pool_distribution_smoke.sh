@@ -65,6 +65,13 @@ grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19187 reachable=1 ' "$base/peer-
 grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19189 reachable=1 ' "$base/peer-health.out"
 grep -q '^END_PEER_HEALTH$' "$base/peer-health.out"
 
+$client query 127.0.0.1 19188 ADD_PEER 127.0.0.1 19999 > "$base/add-dead-peer.out"
+grep -q '^PEER_ADDED 127.0.0.1 19999$' "$base/add-dead-peer.out"
+for i in 1 2 3; do
+    $client query 127.0.0.1 19188 GET_PEER_HEALTH > "$base/peer-health-dead-$i.out"
+done
+grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19999 reachable=0 failures=3 quarantined=1 ' "$base/peer-health-dead-3.out"
+
 $client init-workdir "$base/work" 127.0.0.1 19188 > "$base/init.out"
 $client add-mine-job "$base/work" --target 3 > "$base/add-3.out"
 $client run-jobs "$base/work" > "$base/mine-3.out" 2>&1

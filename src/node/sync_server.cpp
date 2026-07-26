@@ -52,6 +52,7 @@ constexpr std::uint64_t kMaxRecordRangeCount = 10000;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
 constexpr std::size_t kMaxCompositeCommitments = 1024;
 constexpr std::size_t kMaxKnownPeers = 32;
+constexpr std::uint64_t kPeerQuarantineFailureThreshold = 3;
 constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 3000;
 constexpr std::size_t kMaxCommandsPerConnection = 128;
@@ -65,6 +66,12 @@ void handleSignal(int) {
 struct PeerEndpoint {
     std::string host;
     int port{0};
+};
+
+struct PeerRuntimeState {
+    std::uint64_t consecutive_failures{0};
+    bool quarantined{false};
+    std::string last_error;
 };
 
 struct CommitPhaseTimeoutVote {
@@ -103,6 +110,10 @@ struct ValidatorCandidateStats {
 
 bool samePeer(const PeerEndpoint& left, const PeerEndpoint& right) {
     return left.host == right.host && left.port == right.port;
+}
+
+std::string peerKey(const PeerEndpoint& peer) {
+    return peer.host + ":" + std::to_string(peer.port);
 }
 
 bool validPeerEndpoint(const PeerEndpoint& peer) {
@@ -1832,7 +1843,7 @@ public:
     }
 
     bool syncFromKnownPeers(std::string& error) {
-        return syncFromPeers(peers_, error);
+        return syncFromPeers(activeKnownPeers(), error);
     }
 
     bool hasKnownPeers() const {
@@ -1848,7 +1859,7 @@ public:
     }
 
     bool syncFromPeersPastInteger(primechain::PrimeValue integer, std::string& error) {
-        if (!syncFromPeers(peers_, error)) return false;
+        if (!syncFromPeers(activeKnownPeers(), error)) return false;
         primechain::node::SequentialNode refreshed(store_path_);
         if (!refreshed.load(error)) return false;
         if (refreshed.status().has_genesis && refreshed.status().frontier_integer >= integer) {
@@ -1861,9 +1872,13 @@ public:
 
     bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) {
         bool synced_any = false;
+        std::size_t attempted = 0;
         for (const auto& peer : peers) {
+            if (peerQuarantined(peer)) continue;
+            ++attempted;
             error.clear();
             if (syncFromPeer(peer.host, peer.port, error)) {
+                markPeerSuccess(peer);
                 synced_any = true;
                 std::string commitment_error;
                 if (!syncCommitmentsFromPeer(peer.host, peer.port, commitment_error)) {
@@ -1879,10 +1894,11 @@ public:
                 }
                 continue;
             }
+            markPeerFailure(peer, error);
             std::cerr << "peer sync warning from " << peer.host << ":" << peer.port
                       << ": " << error << "\n";
         }
-        if (synced_any || peers.empty()) {
+        if (synced_any || attempted == 0) {
             error.clear();
             return true;
         }
@@ -1890,15 +1906,17 @@ public:
     }
 
     void discoverPeersFromKnown() {
-        const auto snapshot = peers_;
+        const auto snapshot = activeKnownPeers();
         for (const auto& peer : snapshot) {
             std::string error;
             const auto discovered = requestPeerList(peer.host, peer.port, error);
             if (!error.empty()) {
+                markPeerFailure(peer, error);
                 std::cerr << "peer discovery warning from " << peer.host << ":" << peer.port
                           << ": " << error << "\n";
                 continue;
             }
+            markPeerSuccess(peer);
             for (const auto& discovered_peer : discovered) {
                 addPeer(discovered_peer);
             }
@@ -2049,6 +2067,49 @@ private:
         return false;
     }
 
+    PeerRuntimeState& peerRuntime(const PeerEndpoint& peer) {
+        return peer_state_[peerKey(peer)];
+    }
+
+    const PeerRuntimeState* findPeerRuntime(const PeerEndpoint& peer) const {
+        const auto found = peer_state_.find(peerKey(peer));
+        return found == peer_state_.end() ? nullptr : &found->second;
+    }
+
+    bool peerQuarantined(const PeerEndpoint& peer) const {
+        const auto* state = findPeerRuntime(peer);
+        return state != nullptr && state->quarantined;
+    }
+
+    void markPeerSuccess(const PeerEndpoint& peer) {
+        auto& state = peerRuntime(peer);
+        state.consecutive_failures = 0;
+        state.quarantined = false;
+        state.last_error.clear();
+    }
+
+    void markPeerFailure(const PeerEndpoint& peer, const std::string& error) {
+        auto& state = peerRuntime(peer);
+        ++state.consecutive_failures;
+        state.last_error = error.empty() ? "unknown" : error;
+        if (state.consecutive_failures >= kPeerQuarantineFailureThreshold) {
+            state.quarantined = true;
+        }
+    }
+
+    std::vector<PeerEndpoint> activePeers(const std::vector<PeerEndpoint>& peers) const {
+        std::vector<PeerEndpoint> out;
+        out.reserve(peers.size());
+        for (const auto& peer : peers) {
+            if (!peerQuarantined(peer)) out.push_back(peer);
+        }
+        return out;
+    }
+
+    std::vector<PeerEndpoint> activeKnownPeers() const {
+        return activePeers(peers_);
+    }
+
     bool addPeer(const PeerEndpoint& peer) {
         if (!validPeerEndpoint(peer) || isSelfPeer(peer)) {
             return false;
@@ -2057,12 +2118,14 @@ private:
             return samePeer(existing, peer);
         });
         if (found != peers_.end()) {
+            peerRuntime(peer);
             return true;
         }
         if (peers_.size() >= kMaxKnownPeers) {
             return false;
         }
         peers_.push_back(peer);
+        peerRuntime(peer);
         return true;
     }
 
@@ -2077,7 +2140,7 @@ private:
     }
 
 
-    void sendPeerHealth(int fd) const {
+    void sendPeerHealth(int fd) {
         std::string error;
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) {
@@ -2095,10 +2158,15 @@ private:
             std::string status_error;
             const auto status = requestPeerStatus(peer.host, peer.port, status_error);
             if (!status.has_value()) {
+                markPeerFailure(peer, status_error);
+                const auto& state = peerRuntime(peer);
                 out << "PEER_HEALTH_ENTRY"
                     << " host=" << peer.host
                     << " port=" << peer.port
                     << " reachable=0"
+                    << " failures=" << state.consecutive_failures
+                    << " quarantined=" << (state.quarantined ? 1 : 0)
+                    << " last_error=" << healthToken(state.last_error)
                     << " error=" << healthToken(status_error) << "\n";
                 continue;
             }
@@ -2106,20 +2174,31 @@ private:
             std::string list_error;
             const auto listed_peers = requestPeerList(peer.host, peer.port, list_error);
             const auto peer_hash = primechain::crypto::toHex(status->latest_record_hash);
+            const auto hash_match = peer_hash == local_hash;
+            const auto peer_list_ok = list_error.empty();
+            if (hash_match && peer_list_ok) {
+                markPeerSuccess(peer);
+            } else {
+                markPeerFailure(peer, hash_match ? list_error : "hash mismatch");
+            }
+            const auto& state = peerRuntime(peer);
             const auto frontier_delta = static_cast<std::int64_t>(status->frontier_integer) -
                 static_cast<std::int64_t>(local.frontier_integer);
             out << "PEER_HEALTH_ENTRY"
                 << " host=" << peer.host
                 << " port=" << peer.port
                 << " reachable=1"
+                << " failures=" << state.consecutive_failures
+                << " quarantined=" << (state.quarantined ? 1 : 0)
+                << " last_error=" << (state.last_error.empty() ? "none" : healthToken(state.last_error))
                 << " has_genesis=" << (status->has_genesis ? 1 : 0)
                 << " frontier=" << status->frontier_integer
                 << " height=" << status->height
                 << " hash=" << peer_hash
-                << " hash_match=" << (peer_hash == local_hash ? 1 : 0)
+                << " hash_match=" << (hash_match ? 1 : 0)
                 << " frontier_delta=" << frontier_delta
-                << " peer_list_ok=" << (list_error.empty() ? 1 : 0)
-                << " peer_count=" << (list_error.empty() ? listed_peers.size() : 0);
+                << " peer_list_ok=" << (peer_list_ok ? 1 : 0)
+                << " peer_count=" << (peer_list_ok ? listed_peers.size() : 0);
             if (!list_error.empty()) out << " peer_list_error=" << healthToken(list_error);
             out << "\n";
         }
@@ -2437,7 +2516,7 @@ private:
     }
 
     void propagateTransaction(const primechain::protocol::TransactionV0& tx) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitTransactionToPeer(peer, tx, error)) {
                 std::cerr << "mempool propagation warning to " << peer.host << ":" << peer.port
@@ -3094,7 +3173,7 @@ private:
         auto local = makeLocalCommitPhaseTimeoutVote(
             previous_hash, integer, current_round, next_round, error);
         if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) return false;
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             if (commitPhaseTimeoutCertified(integer, current_round, next_round)) break;
             std::string peer_error;
             const auto vote = requestCommitPhaseTimeoutVote(peer, local, peer_error);
@@ -3267,7 +3346,7 @@ private:
         if (!makeLocalFinalizationVote(kind, payload, nullptr, local_vote, error) ||
             !acceptFinalizationVote(local_vote, candidate_hash, round,
                 record.finalized_by.votes, error)) return false;
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string peer_error;
             const auto vote = requestRecordFinalizationVote(peer, kind, payload, local_vote, peer_error);
             if (!vote.has_value()) {
@@ -3305,7 +3384,7 @@ private:
         std::string& error) {
         auto local = makeLocalRoundChangeVote(previous_hash, integer, new_round, error);
         if (local.signature.empty() || !acceptRoundChangeVote(local, error)) return false;
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             if (certifiedRoundChanges(integer, new_round).size() >= validatorQuorumRequired()) break;
             std::string peer_error;
             const auto vote = requestRoundChangeVote(peer, local, peer_error);
@@ -3575,7 +3654,7 @@ private:
     }
 
     void propagatePhaseVote(const primechain::storage::CommitPhaseVote& vote) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitPhaseVoteToPeer(peer, vote, error)) {
                 std::cerr << "phase vote propagation warning to " << peer.host << ":"
@@ -3705,7 +3784,7 @@ private:
         }
         if (phaseClosed(integer)) return true;
 
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string peer_error;
             if (!requestPeerCommitPhaseClose(peer, integer, peer_error)) {
                 std::cerr << "commit phase close warning from " << peer.host << ":"
@@ -3880,7 +3959,7 @@ private:
     }
 
     void propagateCommit(const primechain::storage::StoredCommitment& commitment) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitCommitToPeer(peer, commitment, error)) {
                 std::cerr << "commitment propagation warning to " << peer.host << ":" << peer.port
@@ -4050,7 +4129,7 @@ private:
     }
 
     void propagateEpochVote(const primechain::storage::ValidatorEpochVoteRecord& record) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitEpochVoteToPeer(peer, record, error)) {
                 std::cerr << "epoch vote propagation warning to " << peer.host << ":"
@@ -4227,7 +4306,7 @@ private:
     }
 
     void propagatePolicyVote(const EconomicPolicyVoteRecord& record) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitPolicyVoteToPeer(peer, record, error)) {
                 std::cerr << "policy vote propagation warning to " << peer.host << ":"
@@ -4544,7 +4623,7 @@ private:
         }
         pending_validator_work_bindings_[key] = binding;
         if (propagate) {
-            for (const auto& peer : peers_) {
+            for (const auto& peer : activeKnownPeers()) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_WORK_BINDING_PEER " << previous_hex << " "
                             << binding.record_integer << " " << binding.candidate_address << " "
@@ -4615,7 +4694,7 @@ private:
         }
         pending_validator_applications_[application.candidate_address] = application;
         if (propagate) {
-            for (const auto& peer : peers_) {
+            for (const auto& peer : activeKnownPeers()) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_APPLICATION_PEER " << previous_hex << " "
                             << application.record_integer << " " << application.candidate_address << " "
@@ -4684,7 +4763,7 @@ private:
         }
         pending_endpoint_updates_[update.validator_address] = update;
         if (propagate) {
-            for (const auto& peer : peers_) {
+            for (const auto& peer : activeKnownPeers()) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_ENDPOINT_PEER " << previous_hex << " " << record_integer
                             << " " << update.validator_address << " " << update.host << " "
@@ -5032,7 +5111,7 @@ private:
     }
 
     void propagateReveal(const SignedCompositeReveal& reveal) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitRevealToPeer(peer, reveal, error)) {
                 std::cerr << "reveal propagation warning to " << peer.host << ":"
@@ -5042,7 +5121,7 @@ private:
     }
 
     void syncCommitmentsFromPeersFor(primechain::PrimeValue) {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!syncCommitmentsFromPeer(peer.host, peer.port, error)) {
                 std::cerr << "commitment sync warning from " << peer.host << ":" << peer.port
@@ -5369,7 +5448,7 @@ private:
     }
 
     void propagateSignedPrime(const std::string& line) const {
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitSignedPrimeToPeer(peer, line, error)) {
                 std::cerr << "prime evidence propagation warning to " << peer.host << ":"
@@ -5598,7 +5677,7 @@ private:
 
     void propagateRecord(const primechain::storage::StoredRecord& record) {
         pruneFinalizedCommitments(record.integer);
-        for (const auto& peer : peers_) {
+        for (const auto& peer : activeKnownPeers()) {
             std::string error;
             if (!submitRecordToPeer(peer, record, error)) {
                 std::cerr << "record propagation warning to " << peer.host << ":" << peer.port
@@ -5888,6 +5967,7 @@ private:
     std::string bind_address_;
     int listen_port_{0};
     std::vector<PeerEndpoint> peers_;
+    std::map<std::string, PeerRuntimeState> peer_state_;
     bool advance_enabled_{false};
     bool ack_mempool_enabled_{false};
     bool factorization_helper_enabled_{false};
