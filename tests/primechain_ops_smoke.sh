@@ -338,6 +338,33 @@ grep -q '^WALLET_PENDING 192.0.2.10:8339 ' "$tmp/wallet-dashboard.txt"
 grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-dashboard.txt"
 
 
+"$ops" explorer-dashboard \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 \
+  --last-records 2 \
+  --last-wallet-events 1 \
+  --interval-records 1000 > "$tmp/explorer-dashboard.txt"
+
+grep -q '^PRIMECHAIN_EXPLORER_DASHBOARD generated_at=' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION network-health$' "$tmp/explorer-dashboard.txt"
+grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION chain-report$' "$tmp/explorer-dashboard.txt"
+grep -q '^CHAIN has_genesis=1 height=121 frontier=123 latest_hash=abc123 records=122 prime_records=30 composite_records=92 transactions=21$' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION fee-distribution$' "$tmp/explorer-dashboard.txt"
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 ' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION latest-records$' "$tmp/explorer-dashboard.txt"
+grep -q '^LATEST_RECORDS .* showing=2$' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION wallet-summary$' "$tmp/explorer-dashboard.txt"
+grep -q '^PRIMECHAIN_WALLET_SUMMARY generated_at=' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION wallet-pending$' "$tmp/explorer-dashboard.txt"
+grep -q '^WALLET_PENDING 192.0.2.10:8339 ' "$tmp/explorer-dashboard.txt"
+grep -q '^SECTION wallet-history$' "$tmp/explorer-dashboard.txt"
+grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/explorer-dashboard.txt"
+
+
 "$ops" record \
   --client "$tmp/bin/primechain-client" \
   --workdir "$tmp/workdir" \

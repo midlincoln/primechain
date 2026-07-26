@@ -17,6 +17,7 @@ usage:
   primechain-ops wallet-pending --workdir <client-workdir> --validator <host:port> [options]
   primechain-ops wallet-history --workdir <client-workdir> [options]
   primechain-ops wallet-dashboard --workdir <client-workdir> --validator <host:port> [options]
+  primechain-ops explorer-dashboard --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops record --workdir <client-workdir> --integer <n> [options]
   primechain-ops latest-records --workdir <client-workdir> [options]
   primechain-ops tx --workdir <client-workdir> --hash <tx-hash> [options]
@@ -121,6 +122,15 @@ wallet-dashboard options:
   --wallet <wallet>                     default: <workdir>/wallets/prime.wallet
   --validator <host:port>               required for nonce and pending mempool
   --last <count>                        default: 10 recent history events
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+explorer-dashboard options:
+  --workdir <client-workdir>            required; contains data/chain.dat and peer config
+  --wallet <wallet>                     default: <workdir>/wallets/prime.wallet
+  --validator <host:port>               repeat once per validator; first is used for wallet nonce/pending
+  --last-records <count>                default: 10 latest records
+  --last-wallet-events <count>          default: 10 recent wallet events
+  --interval-records <count>            default: 1000 fee distribution interval
   --client <primechain-client>          default: <repo>/build/primechain-client
 
 address-report options:
@@ -1476,6 +1486,89 @@ cmd_wallet_dashboard() {
   rm -rf "$tmpdir"
 }
 
+cmd_explorer_dashboard() {
+  local client="$default_client"
+  local workdir=""
+  local wallet=""
+  local last_records=10
+  local last_wallet_events=10
+  local interval_records=1000
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --wallet) require_value "$1" "${2:-}"; wallet="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --last-records) require_value "$1" "${2:-}"; last_records="$2"; shift 2 ;;
+      --last-wallet-events) require_value "$1" "${2:-}"; last_wallet_events="$2"; shift 2 ;;
+      --interval-records) require_value "$1" "${2:-}"; interval_records="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -n "$wallet" ] || wallet="$workdir/wallets/prime.wallet"
+  [ -f "$wallet" ] || die "wallet not found: $wallet"
+
+  local chain="$workdir/data/chain.dat"
+  [ -f "$chain" ] || die "record store not found: $chain"
+
+  local primary_validator="${validators[0]}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  "$client" sync-peer "$workdir" >"$tmpdir/sync.out" 2>"$tmpdir/sync.err" || {
+    sed 's/^/  /' "$tmpdir/sync.err" >&2 || true
+    rm -rf "$tmpdir"
+    die "sync-peer failed"
+  }
+
+  echo "PRIMECHAIN_EXPLORER_DASHBOARD generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "WORKDIR $workdir"
+  echo "WALLET $wallet"
+  echo "VALIDATORS ${validators[*]}"
+  echo
+
+  echo "SECTION network-health"
+  local doctor_args=(--client "$client")
+  local validator
+  for validator in "${validators[@]}"; do
+    doctor_args+=(--validator "$validator")
+  done
+  cmd_doctor_network "${doctor_args[@]}"
+  echo
+
+  echo "SECTION chain-report"
+  "$client" launch-report "$chain"
+  echo
+
+  echo "SECTION fee-distribution"
+  "$client" fee-distribution-status "$chain" "$interval_records"
+  echo
+
+  echo "SECTION latest-records"
+  "$client" latest-records "$chain" --last "$last_records"
+  echo
+
+  echo "SECTION wallet-summary"
+  cmd_wallet_summary --client "$client" --workdir "$workdir" --wallet "$wallet" --validator "$primary_validator" --no-sync
+  echo
+
+  echo "SECTION wallet-pending"
+  cmd_wallet_pending --client "$client" --workdir "$workdir" --wallet "$wallet" --validator "$primary_validator"
+  echo
+
+  echo "SECTION wallet-history"
+  cmd_wallet_history --client "$client" --workdir "$workdir" --wallet "$wallet" --last "$last_wallet_events" --no-sync
+
+  rm -rf "$tmpdir"
+}
+
 cmd_wallet_history() {
   local client="$default_client"
   local workdir=""
@@ -1735,6 +1828,7 @@ main() {
     wallet-pending) cmd_wallet_pending "$@" ;;
     wallet-history) cmd_wallet_history "$@" ;;
     wallet-dashboard) cmd_wallet_dashboard "$@" ;;
+    explorer-dashboard) cmd_explorer_dashboard "$@" ;;
     record) cmd_record_lookup "$@" ;;
     latest-records) cmd_latest_records "$@" ;;
     tx) cmd_tx_lookup "$@" ;;
