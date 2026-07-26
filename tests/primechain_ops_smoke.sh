@@ -67,6 +67,15 @@ case "$cmd" in
   sync-peer)
     echo "SYNC_UP_TO_DATE 123"
     ;;
+  sync)
+    echo "recovered-chain" > "$6"
+    echo "sync download complete"
+    echo "output_store: $6"
+    echo "records: 122"
+    echo "start: $4"
+    echo "end: $5"
+    echo "frontier_integer: $5"
+    ;;
   new-miner)
     echo "wallet" > "$2"
     ;;
@@ -316,6 +325,20 @@ grep -q '^CHAIN_DOCTOR .*chain.dat$' "$tmp/chain-doctor.txt"
 grep -q '^STORE_SUMMARY records=122 prime_records=30 composite_records=92 has_genesis=yes height=121 frontier=123 latest_hash=abc123$' "$tmp/chain-doctor.txt"
 grep -q '^OK sequential-validation$' "$tmp/chain-doctor.txt"
 grep -q '^CHAIN_DOCTOR_OK$' "$tmp/chain-doctor.txt"
+
+echo "old-chain" > "$tmp/workdir/data/chain.dat"
+"$ops" chain-recover \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 > "$tmp/chain-recover.txt"
+
+grep -q '^RECOVERY_SOURCE 192.0.2.10:8339 frontier=123 hash=abc123 agreement=2$' "$tmp/chain-recover.txt"
+grep -q '^RESULT download OK candidate=' "$tmp/chain-recover.txt"
+grep -q '^RECOVERY_INSTALLED .*chain.dat backup_dir=' "$tmp/chain-recover.txt"
+grep -q '^CHAIN_RECOVER_OK$' "$tmp/chain-recover.txt"
+grep -q '^recovered-chain$' "$tmp/workdir/data/chain.dat"
+ls "$tmp/workdir"/recovery-backup-*/chain.dat >/dev/null
 
 "$ops" evidence \
   --client "$tmp/bin/primechain-client" \

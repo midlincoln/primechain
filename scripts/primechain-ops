@@ -9,6 +9,7 @@ usage:
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
   primechain-ops chain-doctor --workdir <client-workdir> [options]
+  primechain-ops chain-recover --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops peer-health --validator <host:port> ... [options]
   primechain-ops peer-state --validator <host:port> ... [options]
   primechain-ops mempool-health --validator <host:port> ... [options]
@@ -64,6 +65,13 @@ doctor-network options:
 chain-doctor options:
   --workdir <client-workdir>            required; contains data/chain.dat
   --client <primechain-client>          default: <repo>/build/primechain-client
+
+chain-recover options:
+  --workdir <client-workdir>            required; contains data/chain.dat
+  --validator <host:port>               repeat once per healthy recovery source
+  --min-agreement <count>               default: 2 when multiple validators are supplied, else 1
+  --client <primechain-client>          default: <repo>/build/primechain-client
+  --dry-run                             validate recovery source but do not replace local files
 
 peer-health options:
   --validator <host:port>               repeat once per validator to query its known peers
@@ -680,6 +688,179 @@ cmd_chain_doctor() {
   else
     echo "CHAIN_DOCTOR_FAIL"
   fi
+  return "$failed"
+}
+
+cmd_chain_recover() {
+  local client="$default_client"
+  local workdir=""
+  local min_agreement=""
+  local dry_run=0
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --min-agreement) require_value "$1" "${2:-}"; min_agreement="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+  [ -n "$min_agreement" ] || { if [ "${#validators[@]}" -gt 1 ]; then min_agreement=2; else min_agreement=1; fi; }
+
+  local chain="$workdir/data/chain.dat"
+  local data_dir="$workdir/data"
+  local reports_dir="$workdir/reports"
+  mkdir -p "$data_dir" "$reports_dir"
+
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  local report="$reports_dir/chain-recover-$stamp.txt"
+  local tmpdir
+  tmpdir="$(mktemp -d "$workdir/chain-recover.XXXXXX")"
+  local candidate="$tmpdir/chain.dat"
+  local candidate_report="$tmpdir/launch-report.out"
+  local backup_dir="$workdir/recovery-backup-$stamp"
+
+  local failed=0
+  {
+    echo "CHAIN_RECOVER generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "WORKDIR $workdir"
+    echo "CHAIN $chain"
+    echo "VALIDATORS ${validators[*]}"
+    echo "MIN_AGREEMENT $min_agreement"
+
+    echo "SECTION local-doctor-before"
+    if cmd_chain_doctor --client "$client" --workdir "$workdir"; then
+      echo "RESULT local-doctor-before OK"
+    else
+      echo "RESULT local-doctor-before FAIL"
+    fi
+
+    declare -A group_count=()
+    declare -A group_node=()
+    declare -A group_hash=()
+    declare -A group_frontier=()
+    local validator node_host node_port status frontier hash key
+    for validator in "${validators[@]}"; do
+      parse_node "$validator" node_host node_port
+      if status="$($client status "$node_host" "$node_port" 2>&1)"; then
+        frontier="$(echo "$status" | awk '$1 == "STATUS" { print $7 }')"
+        hash="$(echo "$status" | awk '$1 == "STATUS" { print $8 }')"
+        if [ -z "$frontier" ] || [ -z "$hash" ]; then
+          echo "SOURCE_FAIL $validator invalid_status=$status"
+          continue
+        fi
+        key="$frontier|$hash"
+        group_count[$key]=$(( ${group_count[$key]:-0} + 1 ))
+        group_node[$key]="${group_node[$key]:-$validator}"
+        group_hash[$key]="$hash"
+        group_frontier[$key]="$frontier"
+        echo "SOURCE_OK $validator frontier=$frontier hash=$hash"
+      else
+        echo "SOURCE_FAIL $validator $status"
+      fi
+    done
+
+    local best_key=""
+    local best_frontier=0
+    local best_count=0
+    for key in "${!group_count[@]}"; do
+      frontier="${group_frontier[$key]}"
+      if [ "${group_count[$key]}" -ge "$min_agreement" ] && \
+         { [ -z "$best_key" ] || [ "$frontier" -gt "$best_frontier" ]; }; then
+        best_key="$key"
+        best_frontier="$frontier"
+        best_count="${group_count[$key]}"
+      fi
+    done
+
+    if [ -z "$best_key" ]; then
+      echo "RECOVERY_FAIL no source group reached min_agreement=$min_agreement"
+      failed=1
+    else
+      local source="${group_node[$best_key]}"
+      local source_host="${source%:*}"
+      local source_port="${source##*:}"
+      local source_hash="${group_hash[$best_key]}"
+      echo "RECOVERY_SOURCE $source frontier=$best_frontier hash=$source_hash agreement=$best_count"
+
+      if [ "$best_frontier" -lt 2 ]; then
+        echo "RECOVERY_FAIL source frontier below genesis"
+        failed=1
+      elif "$client" sync "$source_host" "$source_port" 2 "$best_frontier" "$candidate"; then
+        echo "RESULT download OK candidate=$candidate"
+        if "$client" launch-report "$candidate" >"$candidate_report" 2>&1; then
+          cat "$candidate_report" | grep -E '^(CHAIN |VALIDATOR_STATE |VALIDATOR_EVIDENCE_SUMMARY |ECONOMIC_POLICY |VALIDATOR_FEE_POOL |BOARD )' || true
+          local candidate_hash candidate_frontier
+          candidate_hash="$(awk '/^CHAIN / { for (i=1; i<=NF; ++i) { split($i,a,"="); if (a[1] == "latest_hash") print a[2] } }' "$candidate_report")"
+          candidate_frontier="$(awk '/^CHAIN / { for (i=1; i<=NF; ++i) { split($i,a,"="); if (a[1] == "frontier") print a[2] } }' "$candidate_report")"
+          if [ "$candidate_frontier" != "$best_frontier" ] || [ "$candidate_hash" != "$source_hash" ]; then
+            echo "RECOVERY_FAIL candidate tip mismatch expected_frontier=$best_frontier expected_hash=$source_hash got_frontier=$candidate_frontier got_hash=$candidate_hash"
+            failed=1
+          elif [ "$dry_run" -eq 1 ]; then
+            echo "RECOVERY_DRY_RUN candidate_valid=1"
+          else
+            mkdir -p "$backup_dir"
+            local item base
+            for item in "$chain" "$chain.idx" "$chain.snapshot" "$chain.commitments" "$chain.phases" "$chain.epochs" "$chain.finalization" "$chain.rounds" "$chain.peers"; do
+              if [ -e "$item" ]; then
+                base="$(basename "$item")"
+                if cp -a "$item" "$backup_dir/$base"; then
+                  echo "BACKUP $item $backup_dir/$base"
+                else
+                  echo "RECOVERY_FAIL backup failed source=$item destination=$backup_dir/$base"
+                  failed=1
+                  break
+                fi
+              fi
+            done
+            if [ "$failed" -eq 0 ]; then
+              if mv "$candidate" "$chain"; then
+                rm -f "$chain.idx" "$chain.snapshot"
+                echo "RECOVERY_INSTALLED $chain backup_dir=$backup_dir"
+                if cmd_chain_doctor --client "$client" --workdir "$workdir"; then
+                  echo "RESULT local-doctor-after OK"
+                else
+                  echo "RESULT local-doctor-after FAIL"
+                  failed=1
+                fi
+              else
+                echo "RECOVERY_FAIL install failed"
+                failed=1
+              fi
+            fi
+          fi
+        else
+          cat "$candidate_report" | sed 's/^/  /' || true
+          echo "RECOVERY_FAIL candidate validation failed"
+          failed=1
+        fi
+      else
+        echo "RECOVERY_FAIL download failed"
+        failed=1
+      fi
+    fi
+
+    if [ "$failed" -eq 0 ]; then
+      echo "CHAIN_RECOVER_OK"
+    else
+      echo "CHAIN_RECOVER_FAIL"
+    fi
+    echo "$failed" > "$tmpdir/status"
+  } | tee "$report"
+
+  failed="$(cat "$tmpdir/status" 2>/dev/null || echo 1)"
+  rm -rf "$tmpdir"
+  echo "CHAIN_RECOVER_REPORT $report"
   return "$failed"
 }
 
@@ -2140,6 +2321,7 @@ main() {
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
     chain-doctor) cmd_chain_doctor "$@" ;;
+    chain-recover) cmd_chain_recover "$@" ;;
     peer-health) cmd_peer_health "$@" ;;
     peer-state) cmd_peer_state "$@" ;;
     mempool-health) cmd_mempool_health "$@" ;;
