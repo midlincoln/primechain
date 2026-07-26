@@ -1,53 +1,68 @@
-# Prime Mining Prototype
+# Primechain
 
-This repository is the implementation start for Prime Mining: a deterministic prime-chain proof-of-work protocol.
+Primechain is a deterministic arithmetic-record blockchain prototype. The chain advances one integer at a time: each finalized record classifies the next integer as prime or composite, carries a locally verifiable mathematical proof, and may include a transaction batch.
 
-The current code is a C++ consensus prototype for a sequential arithmetic-record chain. It validates one prime or composite classification per integer, authenticated mining submissions, transactions, controlled validator quorum, peer synchronization, and replay from an append-only store.
+The current implementation is a C++17 launch-testnet prototype with authenticated mining submissions, ML-DSA-65 wallet and validator identities, controlled validator quorum, on-chain validator endpoint records, transaction replay, validator fee pools, and append-only chain storage.
 
-## Current Scope
+## Current Launch-Testnet Status
 
-Implemented:
+Implemented and tested in the current public repository:
 
-- CMake C++17 project structure
-- core protocol data types
-- SHA3-256 consensus hashing
-- small-integer primality checks
-- composite proof generation and verification
-- TCP node listening on localhost
-- ML-DSA-65 miner, wallet, and validator identities
-- terminal miner that submits authenticated arithmetic records to the TCP node
-- unified `primechain-client` wrapper for common operator workflows
-- crash-recoverable append-only chain store with a durable integer index
-- consensus validation for:
-  - previous hash linkage
-  - next-prime rule
-  - composite interval bounds
-  - required composite proof coverage
-- consensus tests
+- sequential arithmetic records for prime and composite integers
+- SHA3-256 record hashing and ML-DSA-65 protocol signatures
+- signed Pratt prime submissions with authenticated reward addresses
+- signed composite commit/reveal submissions with factor evidence
+- transaction submission, mempool sync, contiguous sender nonces, and fee accounting
+- controlled validator quorum with replay-derived active validator epochs
+- on-chain validator endpoint updates and reserve-backed validator admission workflows
+- deterministic validator fee-pool distribution
+- crash-recoverable append-only chain store, rebuildable indexes, and replay snapshots
+- TCP peer sync, record propagation, mempool propagation, peer health, and peer state tools
+- operator tooling for validator service setup, network doctors, release checks, launch summaries, wallet dashboards, transaction lookup, and address reports
 
-Not implemented yet:
+The tested one-validator-to-three-validator launch procedure is documented in [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). The production backlog is tracked in [`docs/production-roadmap-v0.md`](docs/production-roadmap-v0.md).
 
-- archival pruning and production-scale database compaction
-- permissionless validator selection
+Still not production-ready:
+
+- permissionless validator selection and Sybil-resistance economics
 - authenticated/encrypted peer transport
-- ECPP or APR-CL certificate formats
+- production-scale archival strategy and deterministic state-root pruning
+- formal external protocol specification and conformance vectors
+- ECPP or APR-CL certificate formats for larger prime certificates
+- packaged releases and reproducible binary builds
 
-## Build
+## Quick Start
 
 ```bash
-mkdir -p build
+git clone https://github.com/midlincoln/primechain.git
+cd primechain
 git submodule update --init
-cd build
-cmake ..
-cmake --build .
+cmake -S . -B build
+cmake --build build -- -j2
+./build/primechain-client version
 ```
 
 ## Run Tests
 
 ```bash
+cmake --build build -- -j2
 cd build
 ctest --output-on-failure
 ```
+
+## Operator Health Check
+
+After configuring a launch workdir and validators, the compact readiness check is:
+
+```bash
+./scripts/primechain-ops release-check \
+  --workdir ~/pc-launch-testnet \
+  --validator 192.81.209.230:8339 \
+  --validator 137.184.129.231:8339 \
+  --validator 67.205.172.245:8339
+```
+
+It runs build-version agreement, network agreement, mempool agreement, local chain storage checks, fee-distribution status, and a launch summary. A healthy run ends with `RELEASE_CHECK_OK`.
 
 ## Primechain Client
 
