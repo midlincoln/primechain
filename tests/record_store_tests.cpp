@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -46,6 +47,23 @@ primechain::protocol::CompositeRecordV0 makeComposite4(
 std::uint64_t fileSize(const std::string& path) {
     struct stat info {};
     return stat(path.c_str(), &info) == 0 ? static_cast<std::uint64_t>(info.st_size) : 0;
+}
+
+std::uint64_t recoveryBackupCount(const std::string& path) {
+    const auto separator = path.find_last_of('/');
+    const std::string directory = separator == std::string::npos ? "." : path.substr(0, separator);
+    const std::string name = separator == std::string::npos ? path : path.substr(separator + 1);
+    const std::string prefix = name + ".recovery-backup.";
+
+    DIR* dir = opendir(directory.c_str());
+    if (dir == nullptr) return 0;
+    std::uint64_t count = 0;
+    while (const auto* entry = readdir(dir)) {
+        const std::string entry_name = entry->d_name;
+        if (entry_name.rfind(prefix, 0) == 0) ++count;
+    }
+    closedir(dir);
+    return count;
 }
 
 } // namespace
@@ -160,6 +178,7 @@ int main(int argc, char** argv) {
     }
 
     const std::uint64_t complete_size = fileSize(path);
+    const std::uint64_t backups_before_recovery = recoveryBackupCount(path);
     {
         std::ofstream out(path, std::ios::binary | std::ios::app);
         const char interrupted_header[] = "partial-record";
@@ -175,6 +194,8 @@ int main(int argc, char** argv) {
     if (!expect(recovered_tip->record_hash == composite.record_hash,
             "recovery preserves complete tip")) return 1;
     if (!expect(fileSize(path) == complete_size, "recovery truncates incomplete bytes")) return 1;
+    if (!expect(recoveryBackupCount(path) == backups_before_recovery + 1,
+            "recovery creates backup before truncation")) return 1;
 
     {
         std::ofstream out(path + ".idx", std::ios::binary | std::ios::trunc);

@@ -308,6 +308,15 @@ grep -q '^MEMPOOL_NETWORK_OK validators=2$' "$tmp/mempool-network.txt"
 
 mkdir -p "$tmp/workdir/data"
 touch "$tmp/workdir/data/chain.dat"
+"$ops" chain-doctor \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" > "$tmp/chain-doctor.txt"
+
+grep -q '^CHAIN_DOCTOR .*chain.dat$' "$tmp/chain-doctor.txt"
+grep -q '^STORE_SUMMARY records=122 prime_records=30 composite_records=92 has_genesis=yes height=121 frontier=123 latest_hash=abc123$' "$tmp/chain-doctor.txt"
+grep -q '^OK sequential-validation$' "$tmp/chain-doctor.txt"
+grep -q '^CHAIN_DOCTOR_OK$' "$tmp/chain-doctor.txt"
+
 "$ops" evidence \
   --client "$tmp/bin/primechain-client" \
   --workdir "$tmp/workdir" \

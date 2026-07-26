@@ -8,6 +8,7 @@ usage:
   primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
+  primechain-ops chain-doctor --workdir <client-workdir> [options]
   primechain-ops peer-health --validator <host:port> ... [options]
   primechain-ops peer-state --validator <host:port> ... [options]
   primechain-ops mempool-health --validator <host:port> ... [options]
@@ -58,6 +59,10 @@ doctor-validator options:
 
 doctor-network options:
   --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+chain-doctor options:
+  --workdir <client-workdir>            required; contains data/chain.dat
   --client <primechain-client>          default: <repo>/build/primechain-client
 
 peer-health options:
@@ -607,6 +612,76 @@ cmd_doctor_network() {
   [ "$failed" -eq 0 ] || return 1
 }
 
+
+cmd_chain_doctor() {
+  local client="$default_client"
+  local workdir=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workdir) require_value "$1" "${2:-}"; workdir="$2"; shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$workdir" ] || die "--workdir is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+  [ -d "$workdir" ] || die "workdir not found: $workdir"
+
+  local chain="$workdir/data/chain.dat"
+  local index="$chain.idx"
+  local failed=0
+  echo "CHAIN_DOCTOR $chain"
+  if [ ! -f "$chain" ]; then
+    echo "FAIL chain-missing path=$chain"
+    echo "CHAIN_DOCTOR_FAIL"
+    return 1
+  fi
+  echo "STORE_FILE bytes=$(wc -c < "$chain") index_present=$([ -f "$index" ] && echo 1 || echo 0)"
+
+  local inspect_out launch_out
+  if inspect_out="$($client inspect "$chain" 2>&1)"; then
+    echo "$inspect_out" | awk '
+      /^records:/ { records=$2 }
+      /^prime_records:/ { prime=$2 }
+      /^composite_records:/ { composite=$2 }
+      /^has_genesis:/ { genesis=$2 }
+      /^height:/ { height=$2 }
+      /^frontier_integer:/ { frontier=$2 }
+      /^latest_record_hash:/ { hash=$2 }
+      END { printf "STORE_SUMMARY records=%s prime_records=%s composite_records=%s has_genesis=%s height=%s frontier=%s latest_hash=%s\n", records, prime, composite, genesis, height, frontier, hash }'
+    echo "OK inspect"
+  else
+    echo "FAIL inspect"
+    echo "$inspect_out" | sed 's/^/  /'
+    failed=1
+  fi
+
+  if launch_out="$($client launch-report "$chain" 2>&1)"; then
+    echo "$launch_out" | grep -E '^(CHAIN |VALIDATOR_STATE |VALIDATOR_EVIDENCE_SUMMARY |ECONOMIC_POLICY |VALIDATOR_FEE_POOL |BOARD )' || true
+    echo "OK sequential-validation"
+  else
+    echo "FAIL sequential-validation"
+    echo "$launch_out" | sed 's/^/  /'
+    echo "RECOVERY_HINT stop the node, back up $chain, then resync from a healthy validator into a replacement store"
+    failed=1
+  fi
+
+  if ls "$chain".recovery-backup.* >/dev/null 2>&1; then
+    echo "RECOVERY_BACKUPS_PRESENT count=$(ls "$chain".recovery-backup.* 2>/dev/null | wc -l)"
+  else
+    echo "RECOVERY_BACKUPS_PRESENT count=0"
+  fi
+
+  if [ "$failed" -eq 0 ]; then
+    echo "CHAIN_DOCTOR_OK"
+  else
+    echo "CHAIN_DOCTOR_FAIL"
+  fi
+  return "$failed"
+}
 
 cmd_peer_health() {
   local client="$default_client"
@@ -2064,6 +2139,7 @@ main() {
     print-validator-service) cmd_install_or_print print "$@" ;;
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
+    chain-doctor) cmd_chain_doctor "$@" ;;
     peer-health) cmd_peer_health "$@" ;;
     peer-state) cmd_peer_state "$@" ;;
     mempool-health) cmd_mempool_health "$@" ;;

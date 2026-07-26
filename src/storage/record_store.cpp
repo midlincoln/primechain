@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
@@ -222,9 +223,74 @@ bool scanStore(
     return true;
 }
 
+bool backupRecordStoreBeforeRecovery(
+    const std::string& path,
+    std::string& backup_path,
+    std::string& error) {
+    const std::string backup_prefix = path + ".recovery-backup." +
+        std::to_string(static_cast<std::uint64_t>(std::time(nullptr)));
+
+    const int source_fd = open(path.c_str(), O_RDONLY);
+    if (source_fd < 0) {
+        error = "could not open record store for recovery backup: " + std::string(std::strerror(errno));
+        return false;
+    }
+
+    int backup_fd = -1;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        backup_path = backup_prefix + "." + std::to_string(attempt);
+        backup_fd = open(backup_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (backup_fd >= 0) break;
+        if (errno != EEXIST) break;
+    }
+    if (backup_fd < 0) {
+        const int saved_errno = errno;
+        close(source_fd);
+        error = "could not create record store recovery backup: " + std::string(std::strerror(saved_errno));
+        return false;
+    }
+
+    std::vector<std::uint8_t> buffer(64 * 1024);
+    bool ok = true;
+    while (true) {
+        const ssize_t count = read(source_fd, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            error = "failed while reading record store for recovery backup: " +
+                std::string(std::strerror(errno));
+            ok = false;
+            break;
+        }
+        if (count == 0) break;
+        if (!writeAll(backup_fd, buffer.data(), static_cast<std::size_t>(count))) {
+            error = "failed while writing record store recovery backup: " +
+                std::string(std::strerror(errno));
+            ok = false;
+            break;
+        }
+    }
+    close(source_fd);
+    if (ok && fsync(backup_fd) != 0) {
+        error = "could not sync record store recovery backup: " + std::string(std::strerror(errno));
+        ok = false;
+    }
+    if (close(backup_fd) != 0 && ok) {
+        error = "could not close record store recovery backup: " + std::string(std::strerror(errno));
+        ok = false;
+    }
+    if (!ok) {
+        std::remove(backup_path.c_str());
+        return false;
+    }
+    return syncParentDirectory(backup_path, error);
+}
+
 bool truncateIncompleteTail(const std::string& path, std::uint64_t valid_size, std::string& error) {
+    std::string backup_path;
+    if (!backupRecordStoreBeforeRecovery(path, backup_path, error)) return false;
     if (truncate(path.c_str(), static_cast<off_t>(valid_size)) != 0) {
-        error = "could not truncate incomplete record tail: " + std::string(std::strerror(errno));
+        error = "could not truncate incomplete record tail after backup " + backup_path + ": " +
+            std::string(std::strerror(errno));
         return false;
     }
     const int fd = open(path.c_str(), O_RDONLY);
