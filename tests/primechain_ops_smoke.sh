@@ -183,6 +183,7 @@ case "$cmd" in
         ;;
       GET_MEMPOOL)
         echo "MEMPOOL 0"
+        echo "END_MEMPOOL"
         ;;
       GET_MEMPOOL_SUMMARY)
         echo "MEMPOOL_SUMMARY transactions=0 max_transactions=1000 max_per_sender=25 max_age_seconds=3600 unique_senders=0 total_input_micro_units=0 total_output_micro_units=0 total_fee_micro_units=0 oldest_age_seconds=0 newest_age_seconds=0 active_peers=1"
@@ -295,6 +296,15 @@ grep -q '^PEER_STATE_OK validators=1$' "$tmp/peer-state-reset.txt"
 grep -q '^NODE_MEMPOOL 192.0.2.10:8339$' "$tmp/mempool-health.txt"
 grep -q '^MEMPOOL_SUMMARY transactions=0 ' "$tmp/mempool-health.txt"
 grep -q '^MEMPOOL_HEALTH_OK validators=2$' "$tmp/mempool-health.txt"
+
+"$ops" mempool-network \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 > "$tmp/mempool-network.txt"
+
+grep -q '^NODE_MEMPOOL_SET 192.0.2.10:8339$' "$tmp/mempool-network.txt"
+grep -q '^MEMPOOL_SET count=0 hashes=none$' "$tmp/mempool-network.txt"
+grep -q '^MEMPOOL_NETWORK_OK validators=2$' "$tmp/mempool-network.txt"
 
 mkdir -p "$tmp/workdir/data"
 touch "$tmp/workdir/data/chain.dat"

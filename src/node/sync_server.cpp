@@ -1215,6 +1215,82 @@ bool submitTransactionToPeer(
     return false;
 }
 
+bool fetchMempoolFromPeer(
+    const std::string& host,
+    int port,
+    std::vector<primechain::protocol::TransactionV0>& transactions,
+    std::string& error) {
+    auto socket = connectToServer(host, port);
+    if (!socket.has_value()) {
+        error = "could not connect to peer";
+        return false;
+    }
+
+    if (!writeCommand(socket->fd(), "GET_MEMPOOL\n")) {
+        error = "could not request peer mempool";
+        return false;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+
+    const auto header = readLine(socket->fd());
+    if (!header.has_value()) {
+        error = "peer did not return mempool header";
+        return false;
+    }
+
+    std::istringstream header_in(*header);
+    std::string header_tag;
+    std::uint64_t expected_count = 0;
+    header_in >> header_tag >> expected_count;
+    if (!header_in || header_tag != "MEMPOOL") {
+        error = "invalid peer mempool header";
+        return false;
+    }
+    if (expected_count > kMaxMempoolTransactions) {
+        error = "peer mempool exceeds configured limit";
+        return false;
+    }
+
+    std::uint64_t received = 0;
+    while (const auto line = readLine(socket->fd())) {
+        if (*line == "END_MEMPOOL") {
+            break;
+        }
+        std::istringstream in(*line);
+        std::string tag;
+        std::string hash_hex;
+        std::size_t size = 0;
+        std::string tx_hex;
+        in >> tag >> hash_hex >> size >> tx_hex;
+        if (!in || tag != "TX" || tx_hex.empty()) {
+            error = "invalid peer mempool transaction line";
+            return false;
+        }
+        const auto bytes = hexToBytes(tx_hex);
+        if (bytes.size() != size) {
+            error = "peer mempool transaction size mismatch";
+            return false;
+        }
+        std::string tx_error;
+        const auto tx = primechain::protocol::deserializeTransaction(bytes, tx_error);
+        if (!tx.has_value()) {
+            error = "invalid peer mempool transaction: " + tx_error;
+            return false;
+        }
+        if (primechain::crypto::toHex(primechain::protocol::transactionHash(*tx)) != hash_hex) {
+            error = "peer mempool transaction hash mismatch";
+            return false;
+        }
+        transactions.push_back(*tx);
+        ++received;
+    }
+    if (received != expected_count) {
+        error = "peer mempool count mismatch";
+        return false;
+    }
+    return true;
+}
+
 std::string signedRevealLine(const SignedCompositeReveal& reveal, bool peer_command) {
     std::ostringstream out;
     out << (peer_command ? "SUBMIT_SIGNED_REVEAL_PEER " : "SUBMIT_SIGNED_REVEAL ")
@@ -1952,6 +2028,81 @@ public:
         return syncFromPeers(activeKnownPeers(), error);
     }
 
+    bool acceptPeerMempoolTransaction(
+        const primechain::protocol::TransactionV0& tx,
+        std::string& error) {
+        revalidateMempool();
+        if (mempool_.size() >= kMaxMempoolTransactions) {
+            error = "mempool full";
+            return false;
+        }
+
+        if (!primechain::protocol::isProtocolFeePoolAddress(tx.sender_address) &&
+            !primechain::protocol::verifyAuthenticatedTransactionSignature(tx, error)) {
+            error = "invalid transaction signature: " + error;
+            return false;
+        }
+
+        const auto hash = primechain::protocol::transactionHash(tx);
+        std::size_t sender_pending = 0;
+        for (const auto& existing : mempool_) {
+            if (primechain::protocol::transactionHash(existing) == hash) {
+                error.clear();
+                return true;
+            }
+            if (existing.sender_address == tx.sender_address) {
+                ++sender_pending;
+                if (existing.nonce == tx.nonce) {
+                    error = "conflicting transaction for sender nonce";
+                    return false;
+                }
+            }
+        }
+        if (sender_pending >= kMaxMempoolTransactionsPerSender) {
+            error = "sender mempool limit exceeded";
+            return false;
+        }
+
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        auto pending = mempool_;
+        pending.push_back(tx);
+        error.clear();
+        if (!node.validatePendingTransactions(pending, error)) {
+            error = "invalid pending transaction: " + error;
+            return false;
+        }
+
+        mempool_first_seen_[primechain::crypto::toHex(hash)] = currentUnixTime();
+        mempool_.push_back(tx);
+        return true;
+    }
+
+    bool syncMempoolFromPeerEndpoint(const PeerEndpoint& peer, std::string& error) {
+        std::vector<primechain::protocol::TransactionV0> peer_transactions;
+        if (!fetchMempoolFromPeer(peer.host, peer.port, peer_transactions, error)) {
+            return false;
+        }
+
+        std::uint64_t accepted = 0;
+        std::uint64_t skipped = 0;
+        for (const auto& tx : peer_transactions) {
+            std::string tx_error;
+            const auto before = mempool_.size();
+            if (acceptPeerMempoolTransaction(tx, tx_error)) {
+                if (mempool_.size() > before) ++accepted;
+                else ++skipped;
+            } else {
+                ++skipped;
+                std::cerr << "mempool sync skipped transaction from "
+                          << peer.host << ":" << peer.port << ": " << tx_error << "\n";
+            }
+        }
+        error = "accepted=" + std::to_string(accepted) +
+            " skipped=" + std::to_string(skipped);
+        return true;
+    }
+
     bool hasKnownPeers() const {
         return !peers_.empty();
     }
@@ -1997,6 +2148,11 @@ public:
                         std::cerr << "phase vote sync warning from " << peer.host << ":" << peer.port
                                   << ": " << phase_error << "\n";
                     }
+                }
+                std::string mempool_error;
+                if (!syncMempoolFromPeerEndpoint(peer, mempool_error)) {
+                    std::cerr << "mempool sync warning from " << peer.host << ":" << peer.port
+                              << ": " << mempool_error << "\n";
                 }
                 continue;
             }

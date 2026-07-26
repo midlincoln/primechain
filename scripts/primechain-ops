@@ -11,6 +11,7 @@ usage:
   primechain-ops peer-health --validator <host:port> ... [options]
   primechain-ops peer-state --validator <host:port> ... [options]
   primechain-ops mempool-health --validator <host:port> ... [options]
+  primechain-ops mempool-network --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
@@ -71,6 +72,10 @@ peer-state options:
 
 mempool-health options:
   --validator <host:port>               repeat once per validator to query mempool summary
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+mempool-network options:
+  --validator <host:port>               repeat once per validator to compare pending tx hashes
   --client <primechain-client>          default: <repo>/build/primechain-client
 
 evidence options:
@@ -754,6 +759,60 @@ cmd_mempool_health() {
     echo "MEMPOOL_HEALTH_OK validators=${#validators[@]}"
   else
     echo "MEMPOOL_HEALTH_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
+
+cmd_mempool_network() {
+  local client="$default_client"
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  local expected_hashes=""
+  local failed=0
+  local validator node_host node_port output header count hashes
+  for validator in "${validators[@]}"; do
+    parse_node "$validator" node_host node_port
+    echo "NODE_MEMPOOL_SET $validator"
+    if output="$("$client" query "$node_host" "$node_port" GET_MEMPOOL 2>&1)"; then
+      header="$(echo "$output" | awk '$1 == "MEMPOOL" { print; exit }')"
+      if [ -z "$header" ]; then
+        echo "FAIL mempool-missing $validator"
+        failed=1
+        continue
+      fi
+      count="$(echo "$header" | awk '{ print $2 }')"
+      hashes="$(echo "$output" | awk '$1 == "TX" { print $2 }' | sort | tr '\n' ' ' | sed 's/ $//')"
+      echo "MEMPOOL_SET count=$count hashes=${hashes:-none}"
+      echo "$output" | awk '$1 == "TX" { print "MEMPOOL_TX hash=" $2 " bytes=" $3 }'
+      if [ -z "$expected_hashes" ] && [ "$validator" = "${validators[0]}" ]; then
+        expected_hashes="$hashes"
+      elif [ "$hashes" != "$expected_hashes" ]; then
+        echo "FAIL mempool-set-disagreement $validator"
+        failed=1
+      fi
+    else
+      echo "FAIL mempool-query $validator"
+      echo "  $output" >&2
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "MEMPOOL_NETWORK_OK validators=${#validators[@]}"
+  else
+    echo "MEMPOOL_NETWORK_FAIL validators=${#validators[@]}"
   fi
   return "$failed"
 }
@@ -2008,6 +2067,7 @@ main() {
     peer-health) cmd_peer_health "$@" ;;
     peer-state) cmd_peer_state "$@" ;;
     mempool-health) cmd_mempool_health "$@" ;;
+    mempool-network) cmd_mempool_network "$@" ;;
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;
