@@ -98,6 +98,11 @@ case "$cmd" in
     echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=sent tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=100 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
     echo "TX_EVENT integer=4 height=2 kind=COMPOSITE direction=fee-paid tx_hash=tx-smoke-123 version=2 nonce=1 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
     ;;
+  wallet-pending)
+    echo "WALLET_PENDING $2:$3 wallet=$4 address=pcpq1_sender mempool=1 transactions=1 events=2"
+    echo "PENDING_TX direction=sent tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=50 amount_denominator=1 sender=pcpq1_sender receiver=pcpq1_receiver"
+    echo "PENDING_TX direction=fee-paid tx_hash=tx-pending-123 version=2 nonce=2 prime=3 amount_micro_units=1 amount_denominator=1 sender=pcpq1_sender receiver=validator-fee-pool"
+    ;;
   inspect)
     echo "record store inspection"
     echo "store_path: $2"
@@ -283,6 +288,29 @@ grep -q '^NONCE validator=192.0.2.10:8339 confirmed=0 next=1$' "$tmp/wallet-summ
 grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-history.txt"
 grep -q '^TX_EVENT .* direction=sent .* prime=3 amount_micro_units=100 ' "$tmp/wallet-history.txt"
 grep -q '^TX_EVENT .* direction=fee-paid .* receiver=validator-fee-pool$' "$tmp/wallet-history.txt"
+
+
+"$ops" wallet-pending \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --validator 192.0.2.10:8339 > "$tmp/wallet-pending.txt"
+
+grep -q '^WALLET_PENDING 192.0.2.10:8339 .* mempool=1 transactions=1 events=2$' "$tmp/wallet-pending.txt"
+grep -q '^PENDING_TX direction=sent tx_hash=tx-pending-123 ' "$tmp/wallet-pending.txt"
+
+
+"$ops" wallet-dashboard \
+  --client "$tmp/bin/primechain-client" \
+  --workdir "$tmp/workdir" \
+  --wallet "$tmp/sender.wallet" \
+  --validator 192.0.2.10:8339 \
+  --last 1 > "$tmp/wallet-dashboard.txt"
+
+grep -q '^PRIMECHAIN_WALLET_DASHBOARD generated_at=' "$tmp/wallet-dashboard.txt"
+grep -q '^PRIMECHAIN_WALLET_SUMMARY generated_at=' "$tmp/wallet-dashboard.txt"
+grep -q '^WALLET_PENDING 192.0.2.10:8339 ' "$tmp/wallet-dashboard.txt"
+grep -q '^WALLET_HISTORY .* address=pcpq1_sender events=2$' "$tmp/wallet-dashboard.txt"
 
 
 "$ops" wallet-receive \

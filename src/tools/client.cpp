@@ -687,6 +687,123 @@ void appendWalletTransactionEvent(
     events.push_back(event.str());
 }
 
+std::vector<primechain::protocol::TransactionV0> parseMempoolTransactions(
+    const std::string& mempool_text,
+    std::uint64_t& mempool_count,
+    std::string& error) {
+    std::istringstream in(mempool_text);
+    std::string line;
+    std::vector<primechain::protocol::TransactionV0> transactions;
+
+    if (!std::getline(in, line)) {
+        error = "empty mempool response";
+        return {};
+    }
+    {
+        std::istringstream header(line);
+        std::string tag;
+        header >> tag >> mempool_count;
+        if (!header || tag != "MEMPOOL") {
+            error = "unexpected mempool header: " + line;
+            return {};
+        }
+    }
+
+    while (std::getline(in, line)) {
+        if (line == "END_MEMPOOL") break;
+        std::istringstream tx_line(line);
+        std::string tag;
+        std::string tx_hash;
+        std::uint64_t byte_count = 0;
+        std::string tx_hex;
+        tx_line >> tag >> tx_hash >> byte_count >> tx_hex;
+        if (!tx_line || tag != "TX") {
+            error = "unexpected mempool transaction line: " + line;
+            return {};
+        }
+        const auto bytes = hexToBytes(tx_hex);
+        if (bytes.size() != byte_count) {
+            error = "mempool transaction byte count mismatch";
+            return {};
+        }
+        auto tx = primechain::protocol::deserializeTransaction(bytes, error);
+        if (!tx.has_value()) return {};
+        transactions.push_back(*tx);
+    }
+    return transactions;
+}
+
+int walletPending(const char* argv0, int argc, char** argv) {
+    if (argc != 5) return 1;
+    const std::string host = argv[2];
+    const std::string port = argv[3];
+    const std::string wallet_path = argv[4];
+    const auto address = loadMinerAddress(wallet_path);
+    if (!address.has_value()) return 1;
+
+    std::string mempool_text;
+    if (!captureTool(argv0, "primechain-sync-query", {host, port, "GET_MEMPOOL"}, mempool_text)) {
+        std::cerr << "wallet_pending_error: could not query mempool\n";
+        return 1;
+    }
+
+    std::uint64_t mempool_count = 0;
+    std::string error;
+    const auto transactions = parseMempoolTransactions(mempool_text, mempool_count, error);
+    if (!error.empty()) {
+        std::cerr << "wallet_pending_error: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> events;
+    std::set<std::string> matching_hashes;
+    for (const auto& tx : transactions) {
+        const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+        const bool from_wallet = tx.sender_address == *address;
+        for (const auto& output : tx.outputs) {
+            const bool to_wallet = output.receiver_address == *address;
+            if (!from_wallet && !to_wallet) continue;
+            matching_hashes.insert(tx_hash);
+            std::ostringstream event;
+            event << "PENDING_TX"
+                  << " direction=" << (from_wallet && to_wallet ? "self" : (from_wallet ? "sent" : "received"))
+                  << " tx_hash=" << tx_hash
+                  << " version=" << tx.version
+                  << " nonce=" << tx.nonce
+                  << " prime=" << output.prime
+                  << " amount_micro_units=" << output.amount.numerator
+                  << " amount_denominator=" << output.amount.denominator
+                  << " sender=" << tx.sender_address
+                  << " receiver=" << output.receiver_address;
+            events.push_back(event.str());
+        }
+        if (from_wallet && hasAmount(tx.fee.amount)) {
+            matching_hashes.insert(tx_hash);
+            std::ostringstream event;
+            event << "PENDING_TX"
+                  << " direction=fee-paid"
+                  << " tx_hash=" << tx_hash
+                  << " version=" << tx.version
+                  << " nonce=" << tx.nonce
+                  << " prime=" << tx.fee.prime
+                  << " amount_micro_units=" << tx.fee.amount.numerator
+                  << " amount_denominator=" << tx.fee.amount.denominator
+                  << " sender=" << tx.sender_address
+                  << " receiver=validator-fee-pool";
+            events.push_back(event.str());
+        }
+    }
+
+    std::cout << "WALLET_PENDING " << host << ":" << port
+              << " wallet=" << wallet_path
+              << " address=" << *address
+              << " mempool=" << mempool_count
+              << " transactions=" << matching_hashes.size()
+              << " events=" << events.size() << "\n";
+    for (const auto& event : events) std::cout << event << "\n";
+    return 0;
+}
+
 int walletHistory(int argc, char** argv) {
     if (argc != 4 && argc != 6) return 1;
     const std::string store_path = argv[2];
@@ -2422,6 +2539,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " address <wallet-file>\n"
               << "  " << argv0 << " balance <record-store> <wallet-file>\n"
               << "  " << argv0 << " wallet-history <record-store> <wallet-file> [--last count]\n"
+              << "  " << argv0 << " wallet-pending <host> <port> <wallet-file>\n"
               << "  " << argv0 << " mine <host> <port> <limit> --prime-identity <file> --composite-identity <file>\n"
               << "  " << argv0 << " is-prime <n>\n"
               << "  " << argv0 << " divisor <n>\n"
@@ -2569,6 +2687,10 @@ int main(int argc, char** argv) {
     if (command == "wallet-history") {
         if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
         return walletHistory(argc, argv);
+    }
+    if (command == "wallet-pending") {
+        if (argc != 5) { printUsage(argv[0]); return 1; }
+        return walletPending(argv[0], argc, argv);
     }
     if (command == "mine") {
         if (argc != 9) { printUsage(argv[0]); return 1; }

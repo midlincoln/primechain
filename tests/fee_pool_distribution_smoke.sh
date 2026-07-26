@@ -67,6 +67,15 @@ grep -q '^TX_ACCEPTED ' "$base/transfer-1.out"
 $send submit 127.0.0.1 19188 "$base/work/wallets/prime.wallet" "$receiver" 3 1000 1 2 > "$base/transfer-2.out"
 grep -q '^TX_ACCEPTED ' "$base/transfer-2.out"
 
+$client wallet-pending 127.0.0.1 19188 "$base/work/wallets/prime.wallet" > "$base/sender-pending.out"
+grep -q '^WALLET_PENDING .* mempool=2 transactions=2 events=4$' "$base/sender-pending.out"
+grep -E -q '^PENDING_TX direction=sent .* prime=3 amount_micro_units=1000 ' "$base/sender-pending.out"
+grep -E -q '^PENDING_TX direction=fee-paid .* prime=3 amount_micro_units=1 .* receiver=validator-fee-pool$' "$base/sender-pending.out"
+
+$client wallet-pending 127.0.0.1 19188 "$base/work/wallets/composite.wallet" > "$base/receiver-pending.out"
+grep -q '^WALLET_PENDING .* mempool=2 transactions=2 events=2$' "$base/receiver-pending.out"
+grep -E -q '^PENDING_TX direction=received .* prime=3 amount_micro_units=1000 ' "$base/receiver-pending.out"
+
 $client add-mine-job "$base/work" --target 4 > "$base/add-4.out"
 $client run-jobs "$base/work" > "$base/mine-4.out" 2>&1
 grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/mine-4.out"
