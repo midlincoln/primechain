@@ -56,6 +56,12 @@ $server 19189 "$base/c.dat" \
 echo $! > "$base/c.pid"
 sleep 0.6
 
+$client query 127.0.0.1 19188 GET_PEER_HEALTH > "$base/peer-health.out"
+grep -q '^PEER_HEALTH 2 ' "$base/peer-health.out"
+grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19187 reachable=1 ' "$base/peer-health.out"
+grep -q '^PEER_HEALTH_ENTRY host=127.0.0.1 port=19189 reachable=1 ' "$base/peer-health.out"
+grep -q '^END_PEER_HEALTH$' "$base/peer-health.out"
+
 $client init-workdir "$base/work" 127.0.0.1 19188 > "$base/init.out"
 $client add-mine-job "$base/work" --target 3 > "$base/add-3.out"
 $client run-jobs "$base/work" > "$base/mine-3.out" 2>&1

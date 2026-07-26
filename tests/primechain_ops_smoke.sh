@@ -205,6 +205,15 @@ case "$cmd" in
         fi
         echo "END_PEERS"
         ;;
+      GET_PEER_HEALTH)
+        echo "PEER_HEALTH 1 local_frontier=123 local_hash=abc123"
+        if [ "$host" = "192.0.2.10" ]; then
+          echo "PEER_HEALTH_ENTRY host=192.0.2.11 port=8339 reachable=1 has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
+        else
+          echo "PEER_HEALTH_ENTRY host=192.0.2.10 port=8339 reachable=1 has_genesis=1 frontier=123 height=121 hash=abc123 hash_match=1 frontier_delta=0 peer_list_ok=1 peer_count=1"
+        fi
+        echo "END_PEER_HEALTH"
+        ;;
       *)
         echo "unexpected query $q" >&2
         exit 1
@@ -234,6 +243,15 @@ chmod +x "$tmp/bin/primechain-send"
   --client "$tmp/bin/primechain-client" \
   --validator 192.0.2.10:8339 \
   --validator 192.0.2.11:8339 | grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$'
+
+"$ops" peer-health \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 > "$tmp/peer-health.txt"
+
+grep -q '^NODE_PEER_HEALTH 192.0.2.10:8339$' "$tmp/peer-health.txt"
+grep -q '^PEER_HEALTH_ENTRY host=192.0.2.11 port=8339 reachable=1 .* hash_match=1 ' "$tmp/peer-health.txt"
+grep -q '^PEER_HEALTH_OK validators=2$' "$tmp/peer-health.txt"
 
 
 mkdir -p "$tmp/workdir/data"

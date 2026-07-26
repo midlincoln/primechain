@@ -1,6 +1,8 @@
 #include <cerrno>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cstdint>
 #include <csignal>
 #include <cstring>
 #include <set>
@@ -109,6 +111,15 @@ bool validPeerEndpoint(const PeerEndpoint& peer) {
     }
     sockaddr_in addr{};
     return inet_pton(AF_INET, peer.host.c_str(), &addr.sin_addr) == 1;
+}
+
+
+std::string healthToken(std::string value) {
+    if (value.empty()) return "none";
+    for (char& ch : value) {
+        if (std::isspace(static_cast<unsigned char>(ch)) || ch == '=') ch = '_';
+    }
+    return value;
 }
 
 class Socket {
@@ -1496,6 +1507,10 @@ public:
                 sendPeers(fd);
                 continue;
             }
+            if (*line == "GET_PEER_HEALTH") {
+                sendPeerHealth(fd);
+                continue;
+            }
             if (line->rfind("ADD_PEER ", 0) == 0) {
                 addPeerCommand(fd, *line);
                 continue;
@@ -2047,6 +2062,57 @@ private:
             out << "PEER " << peer.host << " " << peer.port << "\n";
         }
         out << "END_PEERS\n";
+        writeAll(fd, out.str());
+    }
+
+
+    void sendPeerHealth(int fd) const {
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto& local = node.status();
+        const auto local_hash = primechain::crypto::toHex(local.latest_record_hash);
+
+        std::ostringstream out;
+        out << "PEER_HEALTH " << peers_.size()
+            << " local_frontier=" << local.frontier_integer
+            << " local_hash=" << local_hash << "\n";
+        for (const auto& peer : peers_) {
+            std::string status_error;
+            const auto status = requestPeerStatus(peer.host, peer.port, status_error);
+            if (!status.has_value()) {
+                out << "PEER_HEALTH_ENTRY"
+                    << " host=" << peer.host
+                    << " port=" << peer.port
+                    << " reachable=0"
+                    << " error=" << healthToken(status_error) << "\n";
+                continue;
+            }
+
+            std::string list_error;
+            const auto listed_peers = requestPeerList(peer.host, peer.port, list_error);
+            const auto peer_hash = primechain::crypto::toHex(status->latest_record_hash);
+            const auto frontier_delta = static_cast<std::int64_t>(status->frontier_integer) -
+                static_cast<std::int64_t>(local.frontier_integer);
+            out << "PEER_HEALTH_ENTRY"
+                << " host=" << peer.host
+                << " port=" << peer.port
+                << " reachable=1"
+                << " has_genesis=" << (status->has_genesis ? 1 : 0)
+                << " frontier=" << status->frontier_integer
+                << " height=" << status->height
+                << " hash=" << peer_hash
+                << " hash_match=" << (peer_hash == local_hash ? 1 : 0)
+                << " frontier_delta=" << frontier_delta
+                << " peer_list_ok=" << (list_error.empty() ? 1 : 0)
+                << " peer_count=" << (list_error.empty() ? listed_peers.size() : 0);
+            if (!list_error.empty()) out << " peer_list_error=" << healthToken(list_error);
+            out << "\n";
+        }
+        out << "END_PEER_HEALTH\n";
         writeAll(fd, out.str());
     }
 

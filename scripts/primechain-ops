@@ -8,6 +8,7 @@ usage:
   primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
+  primechain-ops peer-health --validator <host:port> ... [options]
   primechain-ops evidence --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops launch-summary --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops transaction-evidence --workdir <client-workdir> --sender-wallet <wallet> --receiver-wallet <wallet> --prime <p> --amount <micro-units> --target <integer> --validator <host:port> ... [options]
@@ -54,6 +55,10 @@ doctor-validator options:
 
 doctor-network options:
   --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+peer-health options:
+  --validator <host:port>               repeat once per validator to query its known peers
   --client <primechain-client>          default: <repo>/build/primechain-client
 
 evidence options:
@@ -571,6 +576,47 @@ cmd_doctor_network() {
   [ "$failed" -eq 0 ] || return 1
 }
 
+
+cmd_peer_health() {
+  local client="$default_client"
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  local failed=0
+  local validator peer_host peer_port output
+  for validator in "${validators[@]}"; do
+    parse_node "$validator" peer_host peer_port
+    echo "NODE_PEER_HEALTH $validator"
+    if output="$($client query "$peer_host" "$peer_port" GET_PEER_HEALTH 2>&1)"; then
+      echo "$output"
+      if echo "$output" | grep -q 'reachable=0\|hash_match=0'; then
+        failed=1
+      fi
+    else
+      echo "PEER_HEALTH_QUERY_FAILED $validator"
+      echo "  $output" >&2
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "PEER_HEALTH_OK validators=${#validators[@]}"
+  else
+    echo "PEER_HEALTH_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
 
 cmd_evidence() {
   local client="$default_client"
@@ -1819,6 +1865,7 @@ main() {
     print-validator-service) cmd_install_or_print print "$@" ;;
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
+    peer-health) cmd_peer_health "$@" ;;
     evidence) cmd_evidence "$@" ;;
     launch-summary) cmd_launch_summary "$@" ;;
     transaction-evidence) cmd_transaction_evidence "$@" ;;
