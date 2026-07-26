@@ -40,6 +40,7 @@
 #include "primechain/storage/record_store.hpp"
 #include "primechain/storage/round_change_store.hpp"
 #include "primechain/storage/validator_epoch_store.hpp"
+#include "primechain/version.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
 namespace {
@@ -71,6 +72,18 @@ std::map<std::uint32_t, std::size_t> g_active_remote_connections;
 
 void handleSignal(int) {
     g_running = 0;
+}
+
+std::string versionLine() {
+    std::ostringstream out;
+    out << "VERSION"
+        << " name=" << primechain::version::kName
+        << " version=" << primechain::version::kVersion
+        << " git_commit=" << primechain::version::kGitCommit
+        << " build_time=" << primechain::version::kBuildTimestamp
+        << " protocol=" << primechain::version::kProtocolVersion
+        << " network=" << primechain::version::kNetworkVersion;
+    return out.str();
 }
 
 struct PeerEndpoint {
@@ -1640,6 +1653,10 @@ public:
             }
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
+                continue;
+            }
+            if (*line == "GET_VERSION") {
+                writeAll(fd, versionLine() + "\n");
                 continue;
             }
             if (*line == "GET_VALIDATORS") {
@@ -6604,6 +6621,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
+              << "       " << argv0 << " --version\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
@@ -6616,6 +6634,10 @@ void printUsage(const char* argv0) {
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--help") {
         printUsage(argv[0]);
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--version") {
+        std::cout << versionLine() << "\n";
         return 0;
     }
 

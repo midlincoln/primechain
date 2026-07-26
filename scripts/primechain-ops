@@ -8,6 +8,7 @@ usage:
   primechain-ops print-validator-service --identity <wallet> --genesis-validator <addr> [options]
   primechain-ops doctor-validator [options]
   primechain-ops doctor-network --validator <host:port> --validator <host:port> ... [options]
+  primechain-ops version-network --validator <host:port> ... [options]
   primechain-ops chain-doctor --workdir <client-workdir> [options]
   primechain-ops chain-recover --workdir <client-workdir> --validator <host:port> ... [options]
   primechain-ops peer-health --validator <host:port> ... [options]
@@ -60,6 +61,10 @@ doctor-validator options:
 
 doctor-network options:
   --validator <host:port>               repeat once per validator
+  --client <primechain-client>          default: <repo>/build/primechain-client
+
+version-network options:
+  --validator <host:port>               repeat once per validator to compare build metadata
   --client <primechain-client>          default: <repo>/build/primechain-client
 
 chain-doctor options:
@@ -620,6 +625,59 @@ cmd_doctor_network() {
   [ "$failed" -eq 0 ] || return 1
 }
 
+
+cmd_version_network() {
+  local client="$default_client"
+  local validators=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --validator) require_value "$1" "${2:-}"; validators+=("$2"); shift 2 ;;
+      --client) require_value "$1" "${2:-}"; client="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ "${#validators[@]}" -gt 0 ] || die "at least one --validator host:port is required"
+  [ -x "$client" ] || die "client is not executable: $client"
+
+  local local_version
+  local_version="$($client version 2>&1)" || die "client version failed: $local_version"
+  echo "LOCAL $local_version"
+
+  local failed=0
+  local validator node_host node_port output comparable expected_comparable
+  for validator in "${validators[@]}"; do
+    parse_node "$validator" node_host node_port
+    if output="$($client query "$node_host" "$node_port" GET_VERSION 2>&1)"; then
+      echo "NODE_VERSION $validator $output"
+      if ! echo "$output" | grep -q '^VERSION '; then
+        echo "FAIL version-response $validator"
+        failed=1
+        continue
+      fi
+      comparable="$(echo "$output" | awk '{ for (i=2; i<=NF; ++i) if ($i !~ /^build_time=/) printf "%s%s", (seen++ ? " " : ""), $i; print "" }')"
+      if [ -z "${expected_comparable:-}" ]; then
+        expected_comparable="$comparable"
+      elif [ "$comparable" != "$expected_comparable" ]; then
+        echo "FAIL version-disagreement $validator"
+        failed=1
+      fi
+    else
+      echo "FAIL version-query $validator"
+      echo "  $output" >&2
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 0 ]; then
+    echo "VERSION_NETWORK_OK validators=${#validators[@]}"
+  else
+    echo "VERSION_NETWORK_FAIL validators=${#validators[@]}"
+  fi
+  return "$failed"
+}
 
 cmd_chain_doctor() {
   local client="$default_client"
@@ -2320,6 +2378,7 @@ main() {
     print-validator-service) cmd_install_or_print print "$@" ;;
     doctor-validator) cmd_doctor "$@" ;;
     doctor-network) cmd_doctor_network "$@" ;;
+    version-network) cmd_version_network "$@" ;;
     chain-doctor) cmd_chain_doctor "$@" ;;
     chain-recover) cmd_chain_recover "$@" ;;
     peer-health) cmd_peer_health "$@" ;;

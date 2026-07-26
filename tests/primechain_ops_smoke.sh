@@ -61,6 +61,9 @@ host="${2:-}"
 port="${3:-}"
 state_file="$(dirname "$0")/../tx-included"
 case "$cmd" in
+  version)
+    echo "VERSION name=primechain version=0.1.0 git_commit=testcommit build_time=2026-01-01T00:00:00Z protocol=1 network=launch-testnet-1"
+    ;;
   status)
     echo "STATUS 122 30 92 1 121 123 abc123"
     ;;
@@ -190,6 +193,9 @@ case "$cmd" in
       GET_NONCE)
         echo "NONCE ${5:-pcpq1_sender} 0 1"
         ;;
+      GET_VERSION)
+        echo "VERSION name=primechain version=0.1.0 git_commit=testcommit build_time=2026-01-01T00:00:00Z protocol=1 network=launch-testnet-1"
+        ;;
       GET_MEMPOOL)
         echo "MEMPOOL 0"
         echo "END_MEMPOOL"
@@ -269,6 +275,15 @@ chmod +x "$tmp/bin/primechain-send"
   --client "$tmp/bin/primechain-client" \
   --validator 192.0.2.10:8339 \
   --validator 192.0.2.11:8339 | grep -q '^NETWORK_OK validators=2 frontier=123 hash=abc123$'
+
+"$ops" version-network \
+  --client "$tmp/bin/primechain-client" \
+  --validator 192.0.2.10:8339 \
+  --validator 192.0.2.11:8339 > "$tmp/version-network.txt"
+
+grep -q '^LOCAL VERSION name=primechain version=0.1.0 git_commit=testcommit ' "$tmp/version-network.txt"
+grep -q '^NODE_VERSION 192.0.2.10:8339 VERSION name=primechain version=0.1.0 git_commit=testcommit ' "$tmp/version-network.txt"
+grep -q '^VERSION_NETWORK_OK validators=2$' "$tmp/version-network.txt"
 
 "$ops" peer-health \
   --client "$tmp/bin/primechain-client" \

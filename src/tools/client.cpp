@@ -25,6 +25,7 @@
 #include "primechain/protocol/records.hpp"
 #include "primechain/protocol/validator_governance.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/version.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
 namespace {
@@ -2912,8 +2913,20 @@ std::vector<std::string> tail(int argc, char** argv, int first) {
     return out;
 }
 
+void printVersion() {
+    std::cout << "VERSION"
+              << " name=" << primechain::version::kName
+              << " version=" << primechain::version::kVersion
+              << " git_commit=" << primechain::version::kGitCommit
+              << " build_time=" << primechain::version::kBuildTimestamp
+              << " protocol=" << primechain::version::kProtocolVersion
+              << " network=" << primechain::version::kNetworkVersion
+              << "\n";
+}
+
 void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
+              << "  " << argv0 << " version\n"
               << "  " << argv0 << " init-workdir <workdir> [host port]\n"
               << "  " << argv0 << " sync-peer <workdir> [host port]\n"
               << "  " << argv0 << " job-status <workdir>\n"
@@ -2969,6 +2982,11 @@ int main(int argc, char** argv) {
     }
 
     const std::string command = argv[1];
+    if (command == "version") {
+        if (argc != 2) { printUsage(argv[0]); return 1; }
+        printVersion();
+        return 0;
+    }
     if (command == "init-workdir") {
         if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
         return initWorkdir(argv[0], argc, argv);

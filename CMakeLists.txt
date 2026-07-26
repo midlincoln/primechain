@@ -26,6 +26,24 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE PRIMECHAIN_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT PRIMECHAIN_GIT_COMMIT)
+    set(PRIMECHAIN_GIT_COMMIT "unknown")
+endif()
+string(TIMESTAMP PRIMECHAIN_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/primechain/version.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/primechain/version.hpp
+    @ONLY
+)
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/primechain-ops
     ${CMAKE_CURRENT_BINARY_DIR}/primechain-ops
@@ -57,6 +75,7 @@ target_link_libraries(primechain_core PUBLIC OpenSSL::Crypto primechain_mldsa65)
 target_include_directories(primechain_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 target_compile_options(primechain_core

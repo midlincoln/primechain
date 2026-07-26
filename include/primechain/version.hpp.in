@@ -1,0 +1,12 @@
+#pragma once
+
+namespace primechain::version {
+
+constexpr const char* kName = "primechain";
+constexpr const char* kVersion = "@PROJECT_VERSION@";
+constexpr const char* kGitCommit = "@PRIMECHAIN_GIT_COMMIT@";
+constexpr const char* kBuildTimestamp = "@PRIMECHAIN_BUILD_TIMESTAMP@";
+constexpr const char* kProtocolVersion = "1";
+constexpr const char* kNetworkVersion = "launch-testnet-1";
+
+} // namespace primechain::version
