@@ -20,7 +20,7 @@ Implemented and tested in the current public repository:
 - TCP peer sync, record propagation, mempool propagation, peer health, and peer state tools
 - operator tooling for validator service setup, network doctors, release checks, launch summaries, wallet dashboards, transaction lookup, and address reports
 
-The tested one-validator-to-three-validator launch procedure is documented in [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). The production backlog is tracked in [`docs/production-roadmap-v0.md`](docs/production-roadmap-v0.md).
+The tested one-validator-to-three-validator launch procedure is documented in [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). The active public-launch and Bitcoin-readiness plan is tracked in [`docs/working-plan.md`](docs/working-plan.md), and the lower-level production backlog is tracked in [`docs/production-roadmap-v0.md`](docs/production-roadmap-v0.md).
 
 Still not production-ready:
 
