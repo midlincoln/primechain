@@ -5339,10 +5339,6 @@ private:
                 + std::to_string(frontier + 1) + "\n");
             return;
         }
-        if (quorumEnabled() && phaseFrozen(g)) {
-            writeAll(fd, "ERROR commit phase is closing or closed\n");
-            return;
-        }
         const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
@@ -5354,6 +5350,10 @@ private:
                 writeAll(fd, "ERROR provider already committed a different hash for integer "
                     + std::to_string(g) + "\n");
             }
+            return;
+        }
+        if (quorumEnabled() && phaseFrozen(g)) {
+            writeAll(fd, "ERROR commit phase is closing or closed\n");
             return;
         }
         if (commitments_.size() >= kMaxCompositeCommitments) {

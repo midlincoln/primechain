@@ -107,9 +107,23 @@ sleep 0.5
 $client query 127.0.0.1 19191 ADD_PEER 127.0.0.1 19192 > "$base/add-peer-node1.out"
 $client query 127.0.0.1 19192 ADD_PEER 127.0.0.1 19191 > "$base/add-peer-node2.out"
 
+first_post_admission_prime=$((record_integer + 1))
+$client add-mine-job "$base/work" --target "$first_post_admission_prime" > "$base/add-post-admission-prime.out"
+$client run-jobs "$base/work" > "$base/mine-post-admission-prime.out" 2>&1
+grep -q "^JOB_COMPLETE target=$first_post_admission_prime frontier=$first_post_admission_prime$" "$base/mine-post-admission-prime.out"
+
+first_post_admission_composite=$((record_integer + 2))
+commit_42=$($commitment sign-commit "$base/work/wallets/composite.wallet" "$first_post_admission_composite" 2 21 4242)
+$client query 127.0.0.1 19191 $commit_42 > "$base/commit-42.out"
+grep -q "^COMMIT_ACCEPTED $first_post_admission_composite " "$base/commit-42.out"
+$client query 127.0.0.1 19191 CLOSE_COMMIT_PHASE "$first_post_admission_composite" > "$base/close-42-a.out"
+grep -q "^PHASE_VOTE_ACCEPTED $first_post_admission_composite " "$base/close-42-a.out"
+$client query 127.0.0.1 19191 $commit_42 > "$base/commit-42-duplicate-closing.out"
+grep -q "^COMMIT_DUPLICATE $first_post_admission_composite " "$base/commit-42-duplicate-closing.out"
+
 # Mine through the first post-admission composite. With two active validators this
 # exercises quorum commit-phase close, commitment propagation, and retry idempotency.
-post_admission_target=$((record_integer + 3))
+post_admission_target=$first_post_admission_composite
 $client add-mine-job "$base/work" --target "$post_admission_target" > "$base/add-post-admission.out"
 $client run-jobs "$base/work" > "$base/mine-post-admission.out" 2>&1
 grep -q "^JOB_COMPLETE target=$post_admission_target frontier=$post_admission_target$" "$base/mine-post-admission.out"
