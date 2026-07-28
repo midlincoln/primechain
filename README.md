@@ -486,14 +486,14 @@ accepts it only when it spends the full selected fee-pool asset balance and pays
 eligible validators by sorted address order. Validators with a zero share are
 omitted from the transaction outputs.
 
-Upgraded validator-set records, starting at reward-record version 8, reserve 10%
-of each non-genesis prime asset for the active epoch's deterministic validator
-reward pool. Earlier records replay under their original reward rule, so existing
-chain history is not rebalanced. The remaining 90% stays with mathematical
-discovery: 45% to the prime prover and 45% to composite providers since the
-previous prime. If there were no composite providers, the prime prover receives
-the full 90% discovery allocation. The validator reward pool is spent manually
-with the same deterministic full-pool distribution rule.
+Validator-set chains reserve 10% of each non-genesis prime asset for the active
+epoch's deterministic validator reward pool. The remaining 90% stays with
+mathematical discovery: 45% to the prime prover and 45% to composite providers
+since the previous prime. If there were no composite providers, the prime prover
+receives the full 90% discovery allocation. The validator reward pool is spent
+manually with the same deterministic full-pool distribution rule. Existing
+launch-testnet chains that used the older reward rule should be treated as
+disposable evidence chains, not upgraded in place for mainnet economics.
 
 ```bash
 ./build/primechain-client fee-pool ./data/send-chain.dat
@@ -1092,7 +1092,7 @@ This is controlled-testnet finalization, not permissionless Sybil resistance.
 The timeout is a local trigger and is not trusted consensus time. Existing
 pre-migration quorum stores must be regenerated.
 
-Development reward rule: every mined prime asset has `1,000,000` integer micro-units. Unanchored development chains keep the old discovery-only split: if no composite records appeared since the previous prime, the prime miner receives the full asset; otherwise the prime miner receives half and composite proof providers split the other half. Upgraded validator-set records at version 8 and later use the launch-testnet split for every non-genesis prime: 45% prime prover, 45% composite providers, and 10% credited to `pcpool_validator_rewards_epoch_<epoch>` for later deterministic validator distribution. Earlier validator-set records replay under their original reward rule.
+Development reward rule: every mined prime asset has `1,000,000` integer micro-units. Unanchored development chains keep the old discovery-only split: if no composite records appeared since the previous prime, the prime miner receives the full asset; otherwise the prime miner receives half and composite proof providers split the other half. Validator-set chains use the fixed launch/mainnet split for every non-genesis prime: 45% prime prover, 45% composite providers, and 10% credited to `pcpool_validator_rewards_epoch_<epoch>` for later deterministic validator distribution. Do not upgrade old economics chains in place; start a fresh chain when changing reward policy.
 
 Development wallet/address tools:
 

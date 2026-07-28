@@ -1365,7 +1365,7 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
         return false;
     }
 
-    if (validator_set_.empty()) {
+    if (validator_set_.empty() || record.height == 0) {
         if (pending_composite_providers_.empty()) {
             credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
         } else {
@@ -1379,7 +1379,7 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
                 credit(provider, record.integer, per_composite);
             }
         }
-    } else if (record.version >= kValidatorRewardRecordVersion) {
+    } else {
         credit(validatorRewardPoolAddress(), record.integer, kValidatorPrimeRewardMicroUnits);
         if (pending_composite_providers_.empty()) {
             credit(record.proof.provider_address, record.integer,
@@ -1396,8 +1396,6 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
                 credit(provider, record.integer, per_composite);
             }
         }
-    } else {
-        credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
     }
 
     pending_composite_providers_.clear();

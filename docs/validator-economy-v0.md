@@ -255,7 +255,7 @@ arithmetic discovery -> miners/providers
 settlement finality  -> validator signers
 ```
 
-The current launch-testnet implementation fixes each non-genesis version-8 prime asset at:
+The current launch/mainnet implementation fixes each non-genesis validator-set prime asset at:
 
 ```text
 prime prover discovery reward       = 450,000 micro-units
@@ -269,8 +269,9 @@ receives the full 900,000 micro-unit discovery allocation. Otherwise the prime
 prover receives 450,000 plus any composite-pool remainder, and composite proof
 providers split 450,000 by record participation. The 100,000 validator share is
 credited to `pcpool_validator_rewards_epoch_<epoch>` and is not immediately paid
-to validator wallets. Earlier validator-set records replay under their original
-reward rule so a software upgrade does not rewrite chain history.
+to validator wallets. Existing testnet chains with earlier economics should be
+scrapped rather than upgraded in place; mainnet should start from a fresh genesis
+with one reward rule.
 
 Transaction fees accumulate separately in `pcpool_validator_fees_epoch_<epoch>`.
 Both validator fee-pool and validator reward-pool distributions are explicit
@@ -317,7 +318,7 @@ Recommended order:
 1. Document validator economy and governance.
 2. Add encrypted wallets and clean transfer UX.
 3. Add policy/reward state with fixed default parameters.
-4. Split prime rewards into discovery and validator reward pools. Done for version-8 records under the fixed 45/45/10 launch-testnet rule; treasury remains future work.
+4. Split prime rewards into discovery and validator reward pools. Done for validator-set chains under the fixed 45/45/10 launch/mainnet rule; treasury remains future work.
 5. Add economy and validator reputation report commands.
 6. Add policy epoch event records and validator votes.
 7. Add reserve locking and unbonding records.

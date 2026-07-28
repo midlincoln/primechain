@@ -1348,7 +1348,7 @@ int rewardsWorkdir(int argc, char** argv) {
         }
         if (record->proof.provider_address == *prime_address) ++summary.prime_records;
 
-        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
+        const bool validator_rewards_active = record->version != 0 && record->height != 0;
         if (pending_composite_providers.empty()) {
             if (record->proof.provider_address == *prime_address) {
                 summary.prime_micro_units += primeMinerRewardMicroUnits(
@@ -1438,7 +1438,7 @@ int rewardHistoryWorkdir(int argc, char** argv) {
                   << " role=record-provider record_height=" << record->height;
             events.push_back(event.str());
         }
-        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
+        const bool validator_rewards_active = record->version != 0 && record->height != 0;
         if (pending.empty()) {
             if (record->proof.provider_address == *prime_address) {
                 std::ostringstream event;
@@ -1597,7 +1597,7 @@ bool collectBoardReportStats(
         }
 
         if (count_record) {
-            const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
+            const bool validator_rewards_active = record->version != 0 && record->height != 0;
             if (pending.empty()) {
                 addDiscoveryReward(stats, record->proof.provider_address,
                     primeMinerRewardMicroUnits(validator_rewards_active, false, 0));
@@ -2514,7 +2514,7 @@ int validatorReputation(int argc, char** argv) {
             if (vote.validator_address == address) ++epoch_votes;
         }
 
-        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
+        const bool validator_rewards_active = record->version != 0 && record->height != 0;
         if (pending.empty()) {
             if (record->proof.provider_address == address) {
                 discovery_micro_units += primeMinerRewardMicroUnits(

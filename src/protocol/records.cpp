@@ -1086,7 +1086,7 @@ bool verifyCommitPhaseCertificate(
     std::string& error) {
     if (record.version == 0) return true;
     if (record.version != 1 && record.version != 2 && record.version != 3 &&
-        record.version != 4 && record.version != 5 && record.version != 6 && record.version != 8) {
+        record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7 && record.version != 8) {
         error = "unsupported composite record version";
         return false;
     }
