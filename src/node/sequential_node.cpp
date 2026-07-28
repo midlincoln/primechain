@@ -455,6 +455,7 @@ bool verifyRecordFinalizationWithLegacyFallback(
             validator_set, error)) {
         return true;
     }
+    if (!legacy_error.empty()) error = legacy_error;
     return false;
 }
 
@@ -481,6 +482,7 @@ bool verifyRecordFinalizationWithLegacyFallback(
             validator_set, error)) {
         return true;
     }
+    if (!legacy_error.empty()) error = legacy_error;
     return false;
 }
 
@@ -571,9 +573,11 @@ bool validateStoredPrimePayload(
     if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
         return false;
     }
+    error.clear();
     if (!protocol::verifyGenesisConfig(*decoded, error)) {
         return false;
     }
+    error.clear();
     if (!verifyRecordFinalizationWithLegacyFallback(*decoded, validator_set, error)) {
         return false;
     }

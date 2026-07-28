@@ -97,6 +97,10 @@ $client init-workdir "$base/work" 127.0.0.1 19188 > "$base/init.out"
 $client add-mine-job "$base/work" --target 3 > "$base/add-3.out"
 $client run-jobs "$base/work" > "$base/mine-3.out" 2>&1
 grep -q '^JOB_COMPLETE target=3 frontier=3$' "$base/mine-3.out"
+$client inspect "$base/work/data/chain.dat" > "$base/inspect-work-3.out"
+$client inspect "$base/b.dat" > "$base/inspect-node-3.out"
+grep -q 'frontier_integer: 3' "$base/inspect-work-3.out"
+grep -q 'frontier_integer: 3' "$base/inspect-node-3.out"
 
 receiver=$($client address "$base/work/wallets/composite.wallet")
 $send submit 127.0.0.1 19188 "$base/work/wallets/prime.wallet" "$receiver" 3 1000 1 1 > "$base/transfer-1.out"
