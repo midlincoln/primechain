@@ -17,6 +17,7 @@ namespace {
 
 constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
 constexpr std::uint64_t kValidatorReserveLockTxVersion = 4;
+constexpr std::uint64_t kValidatorRewardPoolDistributionTxVersion = 5;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
     return tx.version == 2 && crypto::isProtocolSignatureAddress(tx.sender_address);
@@ -34,11 +35,26 @@ bool isFeePoolDistributionV1(
            tx.sender_address == active_fee_pool_address;
 }
 
+bool isValidatorRewardPoolDistributionV1(
+    const protocol::TransactionV0& tx,
+    const Address& active_reward_pool_address) {
+    return tx.version == kValidatorRewardPoolDistributionTxVersion &&
+           tx.sender_address == active_reward_pool_address;
+}
+
 bool hasFeePoolDistributionV1(
     const std::vector<protocol::TransactionV0>& transactions,
     const Address& active_fee_pool_address) {
     return std::any_of(transactions.begin(), transactions.end(), [&](const auto& tx) {
         return isFeePoolDistributionV1(tx, active_fee_pool_address);
+    });
+}
+
+bool hasValidatorRewardPoolDistributionV1(
+    const std::vector<protocol::TransactionV0>& transactions,
+    const Address& active_reward_pool_address) {
+    return std::any_of(transactions.begin(), transactions.end(), [&](const auto& tx) {
+        return isValidatorRewardPoolDistributionV1(tx, active_reward_pool_address);
     });
 }
 
@@ -112,38 +128,37 @@ bool validateValidatorReserveLockShape(
     return true;
 }
 
-bool validateFeePoolDistributionShape(
+bool validateValidatorPoolDistributionShape(
     const protocol::TransactionV0& tx,
-    const Address& active_fee_pool_address,
+    const std::string& pool_name,
     const std::vector<Address>& distribution_recipients,
     std::uint64_t pool_balance_micro_units,
     std::string& error) {
-    if (!isFeePoolDistributionV1(tx, active_fee_pool_address)) return true;
     if (distribution_recipients.empty()) {
-        error = "fee pool distribution requires eligible validator recipients";
+        error = pool_name + " distribution requires eligible validator recipients";
         return false;
     }
     if (!tx.sender_public_key.empty() || !tx.signature.empty()) {
-        error = "fee pool distribution must not carry a wallet signature";
+        error = pool_name + " distribution must not carry a wallet signature";
         return false;
     }
     if (tx.inputs.size() != 1) {
-        error = "fee pool distribution must spend one asset";
+        error = pool_name + " distribution must spend one asset";
         return false;
     }
     if (tx.fee.prime != tx.inputs.front().prime ||
         tx.fee.amount.numerator != 0 ||
         tx.fee.amount.denominator != 1) {
-        error = "fee pool distribution must have zero fee in the distributed asset";
+        error = pool_name + " distribution must have zero fee in the distributed asset";
         return false;
     }
     const auto distributed = microUnits(tx.inputs.front().amount);
     if (!distributed.has_value()) {
-        error = "fee pool distribution input must be positive integer micro-units";
+        error = pool_name + " distribution input must be positive integer micro-units";
         return false;
     }
     if (*distributed != pool_balance_micro_units) {
-        error = "fee pool distribution must spend the full active pool balance";
+        error = pool_name + " distribution must spend the full active pool balance";
         return false;
     }
 
@@ -154,7 +169,7 @@ bool validateFeePoolDistributionShape(
         const auto expected_share = base_share + (i < remainder ? 1 : 0);
         if (expected_share == 0) continue;
         if (output_index >= tx.outputs.size()) {
-            error = "fee pool distribution is missing validator outputs";
+            error = pool_name + " distribution is missing validator outputs";
             return false;
         }
         const auto& output = tx.outputs[output_index++];
@@ -162,12 +177,12 @@ bool validateFeePoolDistributionShape(
             output.prime != tx.inputs.front().prime ||
             output.amount.denominator != 1 ||
             output.amount.numerator != expected_share) {
-            error = "fee pool distribution outputs do not match deterministic validator split";
+            error = pool_name + " distribution outputs do not match deterministic validator split";
             return false;
         }
     }
     if (output_index != tx.outputs.size()) {
-        error = "fee pool distribution has extra validator outputs";
+        error = pool_name + " distribution has extra validator outputs";
         return false;
     }
     return true;
@@ -331,11 +346,13 @@ bool validatePrimeProviderSignature(
 bool validateTransactionSignature(
     const protocol::TransactionV0& tx,
     const Address& active_fee_pool_address,
+    const Address& active_reward_pool_address,
     bool allow_development,
     std::string& error) {
-    if (isFeePoolDistributionV1(tx, active_fee_pool_address)) {
+    if (isFeePoolDistributionV1(tx, active_fee_pool_address) ||
+        isValidatorRewardPoolDistributionV1(tx, active_reward_pool_address)) {
         if (!tx.sender_public_key.empty() || !tx.signature.empty()) {
-            error = "fee pool distribution must not be wallet-signed";
+            error = "validator pool distribution must not be wallet-signed";
             return false;
         }
         return true;
@@ -579,6 +596,7 @@ bool SequentialNode::load(std::string& error) {
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
     fee_distribution_participants_.clear();
+    validator_reward_distribution_participants_.clear();
     loaded_from_snapshot_ = false;
 
     const auto latest = store_.latest(error);
@@ -647,7 +665,7 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6 && decoded->version != 7) ||
+                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6 && decoded->version != 7 && decoded->version != 8) ||
                   decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
@@ -679,11 +697,12 @@ bool SequentialNode::load(std::string& error) {
             const bool reset_fee_participants =
                 hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
                 hasValidatorEpochTransition(decoded->validator_epoch);
-            if (reset_fee_participants) {
-                fee_distribution_participants_.clear();
-            } else {
-                noteValidatorParticipation(*decoded);
-            }
+            const bool reset_reward_participants =
+                hasValidatorRewardPoolDistributionV1(decoded->transactions, validatorRewardPoolAddress()) ||
+                hasValidatorEpochTransition(decoded->validator_epoch);
+            if (reset_fee_participants) fee_distribution_participants_.clear();
+            if (reset_reward_participants) validator_reward_distribution_participants_.clear();
+            noteValidatorParticipation(*decoded, !reset_fee_participants, !reset_reward_participants);
             if (hasValidatorEpochTransition(decoded->validator_epoch)) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
                 validator_epoch_ = decoded->validator_epoch.epoch;
@@ -727,11 +746,12 @@ bool SequentialNode::load(std::string& error) {
             const bool reset_fee_participants =
                 hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
                 hasValidatorEpochTransition(decoded->validator_epoch);
-            if (reset_fee_participants) {
-                fee_distribution_participants_.clear();
-            } else {
-                noteValidatorParticipation(*decoded);
-            }
+            const bool reset_reward_participants =
+                hasValidatorRewardPoolDistributionV1(decoded->transactions, validatorRewardPoolAddress()) ||
+                hasValidatorEpochTransition(decoded->validator_epoch);
+            if (reset_fee_participants) fee_distribution_participants_.clear();
+            if (reset_reward_participants) validator_reward_distribution_participants_.clear();
+            noteValidatorParticipation(*decoded, !reset_fee_participants, !reset_reward_participants);
             if (hasValidatorEpochTransition(decoded->validator_epoch)) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
                 validator_epoch_ = decoded->validator_epoch.epoch;
@@ -778,6 +798,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
     fee_distribution_participants_.clear();
+    validator_reward_distribution_participants_.clear();
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -796,7 +817,7 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7) ||
+        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7 && record.version != 8) ||
          record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
@@ -889,8 +910,12 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     const auto fee_before = transfer_fee_micro_units_;
     const auto reserve_before = validator_min_reserve_micro_units_;
     const auto fee_participants_before = fee_distribution_participants_;
+    const auto reward_participants_before = validator_reward_distribution_participants_;
     const bool reset_fee_participants =
         hasFeePoolDistributionV1(record.transactions, validatorFeePoolAddress()) ||
+        hasValidatorEpochTransition(record.validator_epoch);
+    const bool reset_reward_participants =
+        hasValidatorRewardPoolDistributionV1(record.transactions, validatorRewardPoolAddress()) ||
         hasValidatorEpochTransition(record.validator_epoch);
     if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyCompositeLedger(record, error)) {
@@ -901,6 +926,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         transfer_fee_micro_units_ = fee_before;
         validator_min_reserve_micro_units_ = reserve_before;
         fee_distribution_participants_ = fee_participants_before;
+        validator_reward_distribution_participants_ = reward_participants_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -912,16 +938,15 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         transfer_fee_micro_units_ = fee_before;
         validator_min_reserve_micro_units_ = reserve_before;
         fee_distribution_participants_ = fee_participants_before;
+        validator_reward_distribution_participants_ = reward_participants_before;
         return false;
     }
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
-    if (reset_fee_participants) {
-        fee_distribution_participants_.clear();
-    } else {
-        noteValidatorParticipation(record);
-    }
+    if (reset_fee_participants) fee_distribution_participants_.clear();
+    if (reset_reward_participants) validator_reward_distribution_participants_.clear();
+    noteValidatorParticipation(record, !reset_fee_participants, !reset_reward_participants);
     if (hasValidatorEpochTransition(record.validator_epoch)) {
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
@@ -946,8 +971,12 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     const auto fee_before = transfer_fee_micro_units_;
     const auto reserve_before = validator_min_reserve_micro_units_;
     const auto fee_participants_before = fee_distribution_participants_;
+    const auto reward_participants_before = validator_reward_distribution_participants_;
     const bool reset_fee_participants =
         hasFeePoolDistributionV1(record.transactions, validatorFeePoolAddress()) ||
+        hasValidatorEpochTransition(record.validator_epoch);
+    const bool reset_reward_participants =
+        hasValidatorRewardPoolDistributionV1(record.transactions, validatorRewardPoolAddress()) ||
         hasValidatorEpochTransition(record.validator_epoch);
     if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyPrimeLedger(record, error)) {
@@ -958,6 +987,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         transfer_fee_micro_units_ = fee_before;
         validator_min_reserve_micro_units_ = reserve_before;
         fee_distribution_participants_ = fee_participants_before;
+        validator_reward_distribution_participants_ = reward_participants_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -969,16 +999,15 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         transfer_fee_micro_units_ = fee_before;
         validator_min_reserve_micro_units_ = reserve_before;
         fee_distribution_participants_ = fee_participants_before;
+        validator_reward_distribution_participants_ = reward_participants_before;
         return false;
     }
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
-    if (reset_fee_participants) {
-        fee_distribution_participants_.clear();
-    } else {
-        noteValidatorParticipation(record);
-    }
+    if (reset_fee_participants) fee_distribution_participants_.clear();
+    if (reset_reward_participants) validator_reward_distribution_participants_.clear();
+    noteValidatorParticipation(record, !reset_fee_participants, !reset_reward_participants);
     if (hasValidatorEpochTransition(record.validator_epoch)) {
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
@@ -1006,50 +1035,69 @@ bool SequentialNode::applyEconomicPolicy(
     return true;
 }
 
-std::vector<Address> SequentialNode::feeDistributionRecipients() const {
-    if (validator_set_.empty()) return {};
-    if (fee_distribution_participants_.empty()) return validator_set_;
+std::vector<Address> eligibleValidatorsFromParticipants(
+    const std::vector<Address>& validator_set,
+    const std::vector<Address>& participants) {
+    if (validator_set.empty()) return {};
+    if (participants.empty()) return validator_set;
 
     std::vector<Address> recipients;
-    recipients.reserve(validator_set_.size());
-    for (const auto& validator : validator_set_) {
-        if (std::binary_search(
-                fee_distribution_participants_.begin(),
-                fee_distribution_participants_.end(),
-                validator)) {
+    recipients.reserve(validator_set.size());
+    for (const auto& validator : validator_set) {
+        if (std::binary_search(participants.begin(), participants.end(), validator)) {
             recipients.push_back(validator);
         }
     }
-    return recipients.empty() ? validator_set_ : recipients;
+    return recipients.empty() ? validator_set : recipients;
 }
 
-void SequentialNode::noteValidatorParticipation(const protocol::CompositeRecordV0& record) {
+std::vector<Address> SequentialNode::feeDistributionRecipients() const {
+    return eligibleValidatorsFromParticipants(validator_set_, fee_distribution_participants_);
+}
+
+std::vector<Address> SequentialNode::validatorRewardDistributionRecipients() const {
+    return eligibleValidatorsFromParticipants(
+        validator_set_, validator_reward_distribution_participants_);
+}
+
+void SequentialNode::noteValidatorParticipation(
+    const protocol::CompositeRecordV0& record,
+    bool note_fee,
+    bool note_reward) {
     for (const auto& vote : record.commit_phase.votes) {
         if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
-            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_fee) addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_reward) addSortedUnique(validator_reward_distribution_participants_, vote.validator_address);
         }
     }
     for (const auto& vote : record.finalized_by.votes) {
         if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
-            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_fee) addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_reward) addSortedUnique(validator_reward_distribution_participants_, vote.validator_address);
         }
     }
     for (const auto& vote : record.finalized_by.round_changes) {
         if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
-            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_fee) addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_reward) addSortedUnique(validator_reward_distribution_participants_, vote.validator_address);
         }
     }
 }
 
-void SequentialNode::noteValidatorParticipation(const protocol::PrimeRecordV0& record) {
+void SequentialNode::noteValidatorParticipation(
+    const protocol::PrimeRecordV0& record,
+    bool note_fee,
+    bool note_reward) {
     for (const auto& vote : record.finalized_by.votes) {
         if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
-            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_fee) addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_reward) addSortedUnique(validator_reward_distribution_participants_, vote.validator_address);
         }
     }
     for (const auto& vote : record.finalized_by.round_changes) {
         if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
-            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_fee) addSortedUnique(fee_distribution_participants_, vote.validator_address);
+            if (note_reward) addSortedUnique(validator_reward_distribution_participants_, vote.validator_address);
         }
     }
 }
@@ -1072,11 +1120,18 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
             crypto::isProtocolSignatureAddress) ||
         !std::all_of(snapshot.fee_distribution_participants.begin(),
             snapshot.fee_distribution_participants.end(), crypto::isProtocolSignatureAddress) ||
+        !std::all_of(snapshot.validator_reward_distribution_participants.begin(),
+            snapshot.validator_reward_distribution_participants.end(), crypto::isProtocolSignatureAddress) ||
         !std::is_sorted(snapshot.fee_distribution_participants.begin(),
             snapshot.fee_distribution_participants.end()) ||
+        !std::is_sorted(snapshot.validator_reward_distribution_participants.begin(),
+            snapshot.validator_reward_distribution_participants.end()) ||
         std::adjacent_find(snapshot.fee_distribution_participants.begin(),
             snapshot.fee_distribution_participants.end()) !=
                 snapshot.fee_distribution_participants.end() ||
+        std::adjacent_find(snapshot.validator_reward_distribution_participants.begin(),
+            snapshot.validator_reward_distribution_participants.end()) !=
+                snapshot.validator_reward_distribution_participants.end() ||
         !std::all_of(snapshot.account_nonces.begin(), snapshot.account_nonces.end(),
             [](const auto& entry) { return protocol::isProtocolAddress(entry.first); }) ||
         snapshot.transfer_fee_micro_units == 0 ||
@@ -1098,6 +1153,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     transfer_fee_micro_units_ = snapshot.transfer_fee_micro_units;
     validator_min_reserve_micro_units_ = snapshot.validator_min_reserve_micro_units;
     fee_distribution_participants_ = snapshot.fee_distribution_participants;
+    validator_reward_distribution_participants_ = snapshot.validator_reward_distribution_participants;
     return true;
 }
 
@@ -1118,6 +1174,7 @@ void SequentialNode::saveSnapshot(bool force) const {
     snapshot.transfer_fee_micro_units = transfer_fee_micro_units_;
     snapshot.validator_min_reserve_micro_units = validator_min_reserve_micro_units_;
     snapshot.fee_distribution_participants = fee_distribution_participants_;
+    snapshot.validator_reward_distribution_participants = validator_reward_distribution_participants_;
     std::string ignored;
     snapshot_store_.replace(snapshot, ignored);
 }
@@ -1137,6 +1194,10 @@ std::uint64_t SequentialNode::accountNonce(const Address& address) const {
 
 Address SequentialNode::validatorFeePoolAddress() const {
     return protocol::validatorFeePoolAddress(validator_epoch_);
+}
+
+Address SequentialNode::validatorRewardPoolAddress() const {
+    return protocol::validatorRewardPoolAddress(validator_epoch_);
 }
 
 std::uint64_t SequentialNode::totalSupplyMicroUnits(PrimeValue prime) const {
@@ -1185,7 +1246,10 @@ bool SequentialNode::applyTransactions(
     std::map<PrimeValue, std::uint64_t> collected_fees;
     for (const auto& tx : transactions) {
         const auto active_fee_pool_address = validatorFeePoolAddress();
-        if (!validateTransactionSignature(tx, active_fee_pool_address, validator_set_.empty(), error)) {
+        const auto active_reward_pool_address = validatorRewardPoolAddress();
+        if (!validateTransactionSignature(
+                tx, active_fee_pool_address, active_reward_pool_address,
+                validator_set_.empty(), error)) {
             error = "invalid transaction signature: " + error;
             return false;
         }
@@ -1195,10 +1259,19 @@ bool SequentialNode::applyTransactions(
         }
         const bool fee_pool_distribution =
             isFeePoolDistributionV1(tx, active_fee_pool_address);
+        const bool reward_pool_distribution =
+            isValidatorRewardPoolDistributionV1(tx, active_reward_pool_address);
         if (fee_pool_distribution &&
-            !validateFeePoolDistributionShape(
-                tx, active_fee_pool_address, feeDistributionRecipients(),
+            !validateValidatorPoolDistributionShape(
+                tx, "fee pool", feeDistributionRecipients(),
                 balanceMicroUnits(active_fee_pool_address, tx.inputs.front().prime),
+                error)) {
+            return false;
+        }
+        if (reward_pool_distribution &&
+            !validateValidatorPoolDistributionShape(
+                tx, "validator reward pool", validatorRewardDistributionRecipients(),
+                balanceMicroUnits(active_reward_pool_address, tx.inputs.front().prime),
                 error)) {
             return false;
         }
@@ -1208,8 +1281,8 @@ bool SequentialNode::applyTransactions(
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;
         if (expected_nonce == 0 || tx.nonce != expected_nonce) {
-            error = fee_pool_distribution
-                ? "fee pool distribution nonce must be the next pool nonce"
+            error = (fee_pool_distribution || reward_pool_distribution)
+                ? "validator pool distribution nonce must be the next pool nonce"
                 : "transaction nonce must be the next sender nonce";
             return false;
         }
@@ -1292,18 +1365,39 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
         return false;
     }
 
-    if (pending_composite_providers_.empty()) {
-        credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
-    } else {
-        constexpr std::uint64_t prime_reward = kAssetMicroUnits / 2;
-        const std::uint64_t composite_pool = kAssetMicroUnits - prime_reward;
-        const std::uint64_t per_composite = composite_pool / pending_composite_providers_.size();
-        const std::uint64_t remainder = composite_pool % pending_composite_providers_.size();
+    if (validator_set_.empty()) {
+        if (pending_composite_providers_.empty()) {
+            credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
+        } else {
+            constexpr std::uint64_t prime_reward = kAssetMicroUnits / 2;
+            const std::uint64_t composite_pool = kAssetMicroUnits - prime_reward;
+            const std::uint64_t per_composite = composite_pool / pending_composite_providers_.size();
+            const std::uint64_t remainder = composite_pool % pending_composite_providers_.size();
 
-        credit(record.proof.provider_address, record.integer, prime_reward + remainder);
-        for (const auto& provider : pending_composite_providers_) {
-            credit(provider, record.integer, per_composite);
+            credit(record.proof.provider_address, record.integer, prime_reward + remainder);
+            for (const auto& provider : pending_composite_providers_) {
+                credit(provider, record.integer, per_composite);
+            }
         }
+    } else if (record.version >= kValidatorRewardRecordVersion) {
+        credit(validatorRewardPoolAddress(), record.integer, kValidatorPrimeRewardMicroUnits);
+        if (pending_composite_providers_.empty()) {
+            credit(record.proof.provider_address, record.integer,
+                kPrimeDiscoveryRewardMicroUnits + kCompositeDiscoveryRewardMicroUnits);
+        } else {
+            const std::uint64_t per_composite =
+                kCompositeDiscoveryRewardMicroUnits / pending_composite_providers_.size();
+            const std::uint64_t remainder =
+                kCompositeDiscoveryRewardMicroUnits % pending_composite_providers_.size();
+
+            credit(record.proof.provider_address, record.integer,
+                kPrimeDiscoveryRewardMicroUnits + remainder);
+            for (const auto& provider : pending_composite_providers_) {
+                credit(provider, record.integer, per_composite);
+            }
+        }
+    } else {
+        credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
     }
 
     pending_composite_providers_.clear();

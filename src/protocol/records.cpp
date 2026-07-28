@@ -742,6 +742,17 @@ bool isProtocolFeePoolAddress(const Address& address) {
     });
 }
 
+bool isProtocolValidatorRewardPoolAddress(const Address& address) {
+    constexpr std::string_view prefix = "pcpool_validator_rewards_epoch_";
+    if (address.size() <= prefix.size() ||
+        address.compare(0, prefix.size(), prefix.data(), prefix.size()) != 0) {
+        return false;
+    }
+    return std::all_of(address.begin() + static_cast<std::ptrdiff_t>(prefix.size()), address.end(), [](unsigned char ch) {
+        return ch >= '0' && ch <= '9';
+    });
+}
+
 std::optional<Address> validatorAddressFromReserveAddress(const Address& reserve_address) {
     constexpr std::string_view prefix = "pcreserve_validator_";
     if (reserve_address.size() <= prefix.size() ||
@@ -760,12 +771,17 @@ bool isProtocolValidatorReserveAddress(const Address& address) {
 bool isProtocolAddress(const Address& address) {
     return isDevelopmentAddress(address) ||
            isProtocolFeePoolAddress(address) ||
+           isProtocolValidatorRewardPoolAddress(address) ||
            isProtocolValidatorReserveAddress(address) ||
            crypto::isProtocolSignatureAddress(address);
 }
 
 Address validatorFeePoolAddress(std::uint64_t validator_epoch) {
     return "pcpool_validator_fees_epoch_" + std::to_string(validator_epoch);
+}
+
+Address validatorRewardPoolAddress(std::uint64_t validator_epoch) {
+    return "pcpool_validator_rewards_epoch_" + std::to_string(validator_epoch);
 }
 
 Address validatorReserveAddress(const Address& validator_address) {
@@ -1070,7 +1086,7 @@ bool verifyCommitPhaseCertificate(
     std::string& error) {
     if (record.version == 0) return true;
     if (record.version != 1 && record.version != 2 && record.version != 3 &&
-        record.version != 4 && record.version != 5 && record.version != 6) {
+        record.version != 4 && record.version != 5 && record.version != 6 && record.version != 8) {
         error = "unsupported composite record version";
         return false;
     }
@@ -1169,8 +1185,7 @@ bool verifyCommitPhaseCertificate(
 
 bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
     if (record.height != 0) {
-        if ((record.version != 0 && record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6) ||
-            !record.genesis_config.validator_set.empty()) {
+        if (!record.genesis_config.validator_set.empty()) {
             error = "genesis configuration is only valid at height zero";
             return false;
         }

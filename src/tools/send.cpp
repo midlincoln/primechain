@@ -263,15 +263,16 @@ std::optional<primechain::protocol::TransactionV0> makeValidatorReserveLockTrans
     return tx;
 }
 
-std::optional<primechain::protocol::TransactionV0> makeFeePoolDistributionTransaction(
-    std::uint64_t epoch,
+std::optional<primechain::protocol::TransactionV0> makeValidatorPoolDistributionTransaction(
+    std::uint64_t version,
+    const primechain::Address& pool_address,
     primechain::PrimeValue prime,
     std::uint64_t amount,
     std::uint64_t nonce,
     std::vector<primechain::Address> validators,
     std::string& error) {
     if (prime < 2 || amount == 0 || validators.empty()) {
-        error = "invalid fee-pool distribution arguments";
+        error = "invalid validator pool distribution arguments";
         return std::nullopt;
     }
     std::sort(validators.begin(), validators.end());
@@ -287,11 +288,11 @@ std::optional<primechain::protocol::TransactionV0> makeFeePoolDistributionTransa
     }
 
     primechain::protocol::TransactionV0 tx;
-    tx.version = 3;
+    tx.version = version;
     tx.inputs.push_back({prime, {amount, 1}});
     tx.fee = {prime, {0, 1}};
     tx.nonce = nonce;
-    tx.sender_address = primechain::protocol::validatorFeePoolAddress(epoch);
+    tx.sender_address = pool_address;
 
     const auto base_share = amount / validators.size();
     const auto remainder = static_cast<std::size_t>(amount % validators.size());
@@ -345,6 +346,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <nonce>\n"
               << "  " << argv0 << " submit <host> <port> <sender.wallet> <receiver_address> <prime> <amount> <fee> <nonce>\n"
               << "  " << argv0 << " distribute-fee-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
+              << "  " << argv0 << " distribute-validator-reward-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
               << "  " << argv0 << " reserve-lock <host> <port> <reserve.wallet> <validator-address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
@@ -405,10 +407,37 @@ int main(int argc, char** argv) {
         for (int i = 8; i < argc; ++i) validators.push_back(argv[i]);
 
         std::string error;
-        const auto tx = makeFeePoolDistributionTransaction(
-            epoch, prime, amount, nonce, std::move(validators), error);
+        const auto tx = makeValidatorPoolDistributionTransaction(
+            3, primechain::protocol::validatorFeePoolAddress(epoch),
+            prime, amount, nonce, std::move(validators), error);
         if (!tx.has_value()) {
             std::cerr << "could not build fee-pool distribution transaction: " << error << "\n";
+            return 1;
+        }
+        return submitTransaction(host, port, *tx) ? 0 : 1;
+    }
+
+    if (argc > 1 && std::string(argv[1]) == "distribute-validator-reward-pool") {
+        if (argc < 9) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        const std::string host = argv[2];
+        const int port = std::stoi(argv[3]);
+        const auto epoch = static_cast<std::uint64_t>(std::stoull(argv[4]));
+        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[5]));
+        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[6]));
+        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        std::vector<primechain::Address> validators;
+        validators.reserve(static_cast<std::size_t>(argc - 8));
+        for (int i = 8; i < argc; ++i) validators.push_back(argv[i]);
+
+        std::string error;
+        const auto tx = makeValidatorPoolDistributionTransaction(
+            5, primechain::protocol::validatorRewardPoolAddress(epoch),
+            prime, amount, nonce, std::move(validators), error);
+        if (!tx.has_value()) {
+            std::cerr << "could not build validator reward-pool distribution transaction: " << error << "\n";
             return 1;
         }
         return submitTransaction(host, port, *tx) ? 0 : 1;

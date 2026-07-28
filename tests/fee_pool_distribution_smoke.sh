@@ -31,7 +31,7 @@ v3=$3
 $server 19187 "$base/a.dat" \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/a.wallet" \
-    --finalization-timeout-ms 500 \
+    --finalization-timeout-ms 2000 \
     > "$base/a.log" 2>&1 &
 echo $! > "$base/a.pid"
 sleep 0.3
@@ -42,7 +42,7 @@ $server 19188 "$base/b.dat" \
     --peer 127.0.0.1 19189 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/b.wallet" \
-    --finalization-timeout-ms 500 \
+    --finalization-timeout-ms 2000 \
     > "$base/b.log" 2>&1 &
 echo $! > "$base/b.pid"
 sleep 0.4
@@ -52,7 +52,7 @@ $server 19189 "$base/c.dat" \
     --peer 127.0.0.1 19188 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/c.wallet" \
-    --finalization-timeout-ms 500 \
+    --finalization-timeout-ms 2000 \
     > "$base/c.log" 2>&1 &
 echo $! > "$base/c.pid"
 sleep 0.6
@@ -125,6 +125,10 @@ grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/mine-4.out"
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-before.out"
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/pool-before.out"
 
+$client validator-reward-pool "$base/work/data/chain.dat" > "$base/reward-pool-before.out"
+grep -q '^VALIDATOR_REWARD_POOL .* holdings=1 total_micro_units=100000$' "$base/reward-pool-before.out"
+grep -q '^VALIDATOR_REWARD_HOLDING epoch=0 prime=3 micro_units=100000$' "$base/reward-pool-before.out"
+
 $client record "$base/work/data/chain.dat" 4 > "$base/record-4.out"
 grep -E -q '^RECORD integer=4 height=.* kind=COMPOSITE .* confirmations=1 .* txs=2 ' "$base/record-4.out"
 grep -q '^COMPOSITE_PROOF integer=4 divisor=2 cofactor=2$' "$base/record-4.out"
@@ -177,8 +181,15 @@ grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 la
 [ "$(grep -c '^FEE_DISTRIBUTION_RECIPIENT address=' "$base/distribution-status-before.out")" -eq 3 ]
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/distribution-status-before.out"
 
+$client validator-reward-distribution-status "$base/work/data/chain.dat" 1000 > "$base/reward-distribution-status-before.out"
+grep -q '^VALIDATOR_REWARD_DISTRIBUTION_STATUS .* interval_primes=1000 current_prime_records=2 last_distribution_prime_count=0 next_distribution_prime_count=1000 due=0 .* pool_total_micro_units=100000 distributions=0 eligible_recipients=3$' "$base/reward-distribution-status-before.out"
+[ "$(grep -c '^VALIDATOR_REWARD_DISTRIBUTION_RECIPIENT address=' "$base/reward-distribution-status-before.out")" -eq 3 ]
+grep -q '^VALIDATOR_REWARD_HOLDING epoch=0 prime=3 micro_units=100000$' "$base/reward-distribution-status-before.out"
+
 $send distribute-fee-pool 127.0.0.1 19188 0 3 2 1 "$a" "$b" "$c" > "$base/distribute.out"
 grep -q '^TX_ACCEPTED ' "$base/distribute.out"
+$send distribute-validator-reward-pool 127.0.0.1 19188 0 3 100000 1 "$a" "$b" "$c" > "$base/distribute-reward.out"
+grep -q '^TX_ACCEPTED ' "$base/distribute-reward.out"
 
 $client add-mine-job "$base/work" --target 5 > "$base/add-5.out"
 $client run-jobs "$base/work" > "$base/mine-5.out" 2>&1
@@ -187,29 +198,48 @@ grep -q '^JOB_COMPLETE target=5 frontier=5$' "$base/mine-5.out"
 $client fee-pool "$base/work/data/chain.dat" > "$base/pool-after.out"
 grep -q '^VALIDATOR_FEE_POOL .* holdings=0 total_micro_units=0$' "$base/pool-after.out"
 
+$client validator-reward-pool "$base/work/data/chain.dat" > "$base/reward-pool-after.out"
+grep -q '^VALIDATOR_REWARD_POOL .* holdings=1 total_micro_units=100000$' "$base/reward-pool-after.out"
+grep -q '^VALIDATOR_REWARD_HOLDING epoch=0 prime=5 micro_units=100000$' "$base/reward-pool-after.out"
+
 $client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-after.out"
 grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=5 last_distribution_integer=5 next_distribution_integer=1005 due=0 .* pool_total_micro_units=0 distributions=1 eligible_recipients=3$' "$base/distribution-status-after.out"
 [ "$(grep -c '^FEE_DISTRIBUTION_RECIPIENT address=' "$base/distribution-status-after.out")" -eq 3 ]
 grep -q '^LAST_FEE_DISTRIBUTION integer=5 epoch=0 prime=3 micro_units=2$' "$base/distribution-status-after.out"
 grep -q '^FEE_DISTRIBUTION_EVENT integer=5 epoch=0 prime=3 micro_units=2 recipients=2$' "$base/distribution-status-after.out"
 
+$client validator-reward-distribution-status "$base/work/data/chain.dat" 1000 > "$base/reward-distribution-status-after.out"
+grep -q '^VALIDATOR_REWARD_DISTRIBUTION_STATUS .* interval_primes=1000 current_prime_records=3 last_distribution_prime_count=3 next_distribution_prime_count=1003 due=0 .* pool_total_micro_units=100000 distributions=1 eligible_recipients=3$' "$base/reward-distribution-status-after.out"
+grep -q '^LAST_VALIDATOR_REWARD_DISTRIBUTION integer=5 prime_count=3 epoch=0 prime=3 micro_units=100000$' "$base/reward-distribution-status-after.out"
+grep -q '^VALIDATOR_REWARD_DISTRIBUTION_EVENT integer=5 prime_count=3 epoch=0 prime=3 micro_units=100000 recipients=3$' "$base/reward-distribution-status-after.out"
+
+grep_balance() {
+    wallet=$1
+    expected=$2
+    grep -q "^3 $expected$" "$base/$wallet-balance.out"
+}
+
 for wallet in a b c; do
     $client balance "$base/work/data/chain.dat" "$base/$wallet.wallet" > "$base/$wallet-balance.out"
 done
-if [ "$v1" = "$a" ]; then grep -q '^3 1$' "$base/a-balance.out"; fi
-if [ "$v1" = "$b" ]; then grep -q '^3 1$' "$base/b-balance.out"; fi
-if [ "$v1" = "$c" ]; then grep -q '^3 1$' "$base/c-balance.out"; fi
-if [ "$v2" = "$a" ]; then grep -q '^3 1$' "$base/a-balance.out"; fi
-if [ "$v2" = "$b" ]; then grep -q '^3 1$' "$base/b-balance.out"; fi
-if [ "$v2" = "$c" ]; then grep -q '^3 1$' "$base/c-balance.out"; fi
-if [ "$v3" = "$a" ]; then ! grep -q '^3 1$' "$base/a-balance.out"; fi
-if [ "$v3" = "$b" ]; then ! grep -q '^3 1$' "$base/b-balance.out"; fi
-if [ "$v3" = "$c" ]; then ! grep -q '^3 1$' "$base/c-balance.out"; fi
+if [ "$v1" = "$a" ]; then grep_balance a 33335; fi
+if [ "$v1" = "$b" ]; then grep_balance b 33335; fi
+if [ "$v1" = "$c" ]; then grep_balance c 33335; fi
+if [ "$v2" = "$a" ]; then grep_balance a 33334; fi
+if [ "$v2" = "$b" ]; then grep_balance b 33334; fi
+if [ "$v2" = "$c" ]; then grep_balance c 33334; fi
+if [ "$v3" = "$a" ]; then grep_balance a 33333; fi
+if [ "$v3" = "$b" ]; then grep_balance b 33333; fi
+if [ "$v3" = "$c" ]; then grep_balance c 33333; fi
 
 cat "$base/pool-before.out"
+cat "$base/reward-pool-before.out"
 cat "$base/distribution-status-before.out"
+cat "$base/reward-distribution-status-before.out"
 cat "$base/pool-after.out"
+cat "$base/reward-pool-after.out"
 cat "$base/distribution-status-after.out"
+cat "$base/reward-distribution-status-after.out"
 cat "$base/a-balance.out"
 cat "$base/b-balance.out"
 cat "$base/c-balance.out"

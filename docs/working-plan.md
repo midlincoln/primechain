@@ -12,7 +12,7 @@ Primechain has a working controlled launch-testnet with:
 - ML-DSA-65 signed miner, wallet, and validator identities,
 - signed prime submissions and signed composite commit/reveal,
 - transaction submission, mempool sync, wallet history, and address/tx lookup,
-- validator fee pools and participation-aware deterministic fee distribution,
+- validator fee pools, validator reward pools, and participation-aware deterministic distribution,
 - operator checks including `release-check`, `version-network`, `doctor-network`, `mempool-network`, `chain-doctor`, and `launch-summary`,
 - public GitHub source and launch evidence tooling.
 

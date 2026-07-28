@@ -15,7 +15,7 @@ Implemented and tested in the current public repository:
 - transaction submission, mempool sync, contiguous sender nonces, and fee accounting
 - controlled validator quorum with replay-derived active validator epochs
 - on-chain validator endpoint updates and reserve-backed validator admission workflows
-- deterministic validator fee-pool distribution
+- deterministic validator fee-pool and validator reward-pool distribution
 - crash-recoverable append-only chain store, rebuildable indexes, and replay snapshots
 - TCP peer sync, record propagation, mempool propagation, peer health, and peer state tools
 - operator tooling for validator service setup, network doctors, release checks, launch summaries, wallet dashboards, transaction lookup, and address reports
@@ -151,7 +151,7 @@ full proof-of-stake security claim:
 - validator reserve locks and the active minimum reserve are replay-derived
   chain state,
 - validator actions are ML-DSA-signed and replay-verifiable,
-- validator fee-pool distributions are deterministic and reward eligible
+- validator fee-pool and validator reward-pool distributions are deterministic and reward eligible
   participating validators,
 - downtime and missed signatures are reputation/removal evidence, not automatic
   reserve forfeiture.
@@ -483,13 +483,27 @@ synchronization.
 Validator fee-pool balances can be inspected and distributed by a protocol
 transaction. The distribution transaction has no wallet signature; replay
 accepts it only when it spends the full selected fee-pool asset balance and pays
-the active validator set by sorted address order. Validators with a zero share
-are omitted from the transaction outputs.
+eligible validators by sorted address order. Validators with a zero share are
+omitted from the transaction outputs.
+
+Upgraded validator-set records, starting at reward-record version 8, reserve 10%
+of each non-genesis prime asset for the active epoch's deterministic validator
+reward pool. Earlier records replay under their original reward rule, so existing
+chain history is not rebalanced. The remaining 90% stays with mathematical
+discovery: 45% to the prime prover and 45% to composite providers since the
+previous prime. If there were no composite providers, the prime prover receives
+the full 90% discovery allocation. The validator reward pool is spent manually
+with the same deterministic full-pool distribution rule.
 
 ```bash
 ./build/primechain-client fee-pool ./data/send-chain.dat
+./build/primechain-client validator-reward-pool ./data/send-chain.dat
+./build/primechain-client validator-reward-distribution-status ./data/send-chain.dat 1000
 ./build/primechain-send distribute-fee-pool 127.0.0.1 18889 \
   0 401 2 1 \
+  pcpq1_validator_a pcpq1_validator_b pcpq1_validator_c
+./build/primechain-send distribute-validator-reward-pool 127.0.0.1 18889 \
+  0 401 100000 1 \
   pcpq1_validator_a pcpq1_validator_b pcpq1_validator_c
 ```
 
@@ -1078,7 +1092,7 @@ This is controlled-testnet finalization, not permissionless Sybil resistance.
 The timeout is a local trigger and is not trusted consensus time. Existing
 pre-migration quorum stores must be regenerated.
 
-Development reward rule: every mined prime asset has `1,000,000` integer micro-units. If no composite records appeared since the previous prime, the prime miner receives the full asset. Otherwise the prime miner receives half, and composite proof providers split the other half.
+Development reward rule: every mined prime asset has `1,000,000` integer micro-units. Unanchored development chains keep the old discovery-only split: if no composite records appeared since the previous prime, the prime miner receives the full asset; otherwise the prime miner receives half and composite proof providers split the other half. Upgraded validator-set records at version 8 and later use the launch-testnet split for every non-genesis prime: 45% prime prover, 45% composite providers, and 10% credited to `pcpool_validator_rewards_epoch_<epoch>` for later deterministic validator distribution. Earlier validator-set records replay under their original reward rule.
 
 Development wallet/address tools:
 

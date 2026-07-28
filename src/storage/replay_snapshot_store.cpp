@@ -14,7 +14,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3150414e53434350ull; // "PCCSNAP1"
-constexpr std::uint64_t kVersion = 4;
+constexpr std::uint64_t kVersion = 5;
 constexpr std::uint64_t kMaxEntries = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxAddressBytes = 64ull * 1024ull;
 constexpr std::uint64_t kMaxSnapshotBytes = 512ull * 1024ull * 1024ull;
@@ -84,6 +84,8 @@ std::vector<std::uint8_t> encode(const ReplaySnapshot& value) {
     put64(out, value.validator_min_reserve_micro_units);
     put64(out, value.fee_distribution_participants.size());
     for (const auto& address : value.fee_distribution_participants) putAddress(out, address);
+    put64(out, value.validator_reward_distribution_participants.size());
+    for (const auto& address : value.validator_reward_distribution_participants) putAddress(out, address);
     const auto checksum = crypto::sha3_256(out);
     out.insert(out.end(), checksum.begin(), checksum.end());
     return out;
@@ -175,6 +177,16 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
             Address address;
             if (!reader.address(address)) { error = "invalid replay snapshot fee participant"; return false; }
             value.fee_distribution_participants.push_back(std::move(address));
+        }
+    }
+    if (version >= 5) {
+        if (!reader.count(count) || count > 16) {
+            error = "invalid replay snapshot validator reward participant count"; return false;
+        }
+        for (std::uint64_t i = 0; i < count; ++i) {
+            Address address;
+            if (!reader.address(address)) { error = "invalid replay snapshot validator reward participant"; return false; }
+            value.validator_reward_distribution_participants.push_back(std::move(address));
         }
     }
     if (value.transfer_fee_micro_units == 0 ||

@@ -22,6 +22,10 @@ struct SequentialNodeStatus {
 };
 
 constexpr std::uint64_t kAssetMicroUnits = 1000000;
+constexpr std::uint64_t kPrimeDiscoveryRewardMicroUnits = 450000;
+constexpr std::uint64_t kCompositeDiscoveryRewardMicroUnits = 450000;
+constexpr std::uint64_t kValidatorPrimeRewardMicroUnits = 100000;
+constexpr std::uint64_t kValidatorRewardRecordVersion = 8;
 constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 constexpr std::uint64_t kDefaultValidatorMinReserveMicroUnits = 5'000'000;
 
@@ -52,7 +56,9 @@ public:
     std::uint64_t transferFeeMicroUnits() const { return transfer_fee_micro_units_; }
     std::uint64_t validatorMinReserveMicroUnits() const { return validator_min_reserve_micro_units_; }
     Address validatorFeePoolAddress() const;
+    Address validatorRewardPoolAddress() const;
     std::vector<Address> feeDistributionRecipients() const;
+    std::vector<Address> validatorRewardDistributionRecipients() const;
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:
@@ -71,8 +77,8 @@ private:
         const protocol::EconomicPolicyUpdateV1& update,
         PrimeValue record_integer,
         std::string& error);
-    void noteValidatorParticipation(const protocol::CompositeRecordV0& record);
-    void noteValidatorParticipation(const protocol::PrimeRecordV0& record);
+    void noteValidatorParticipation(const protocol::CompositeRecordV0& record, bool note_fee, bool note_reward);
+    void noteValidatorParticipation(const protocol::PrimeRecordV0& record, bool note_fee, bool note_reward);
     bool restoreSnapshot(const storage::ReplaySnapshot& snapshot);
     void saveSnapshot(bool force = false) const;
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
@@ -90,6 +96,7 @@ private:
     std::uint64_t transfer_fee_micro_units_{kDefaultTransferFeeMicroUnits};
     std::uint64_t validator_min_reserve_micro_units_{kDefaultValidatorMinReserveMicroUnits};
     std::vector<Address> fee_distribution_participants_;
+    std::vector<Address> validator_reward_distribution_participants_;
     bool loaded_from_snapshot_{false};
 };
 

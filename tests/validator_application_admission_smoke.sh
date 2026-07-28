@@ -30,31 +30,34 @@ $client init-workdir "$base/work" 127.0.0.1 19191 > "$base/init.out"
 miner=$($client address "$base/work/wallets/prime.wallet")
 candidate=$($client new-miner "$base/candidate.wallet")
 
-$client add-mine-job "$base/work" --target 31 > "$base/add-31.out"
-$client run-jobs "$base/work" > "$base/mine-31.out" 2>&1
-grep -q '^JOB_COMPLETE target=31 frontier=31$' "$base/mine-31.out"
+$client add-mine-job "$base/work" --target 37 > "$base/add-37.out"
+$client run-jobs "$base/work" > "$base/mine-37.out" 2>&1
+grep -q '^JOB_COMPLETE target=37 frontier=37$' "$base/mine-37.out"
 
 nonce=1
 for prime in 3 5 7 11 13 17 19 23 29; do
-    amount=499999
-    if [ "$prime" = "3" ]; then amount=999999; fi
+    amount=449999
+    if [ "$prime" = "3" ]; then amount=899999; fi
     $send reserve-lock 127.0.0.1 19191 "$base/work/wallets/prime.wallet" "$candidate" "$prime" "$amount" 1 "$nonce" > "$base/lock-$prime.out"
     grep -q '^TX_ACCEPTED ' "$base/lock-$prime.out"
     nonce=$((nonce + 1))
 done
 
-$client add-mine-job "$base/work" --target 32 > "$base/add-32.out"
-$client run-jobs "$base/work" > "$base/mine-32.out" 2>&1
-grep -q '^JOB_COMPLETE target=32 frontier=32$' "$base/mine-32.out"
+$client add-mine-job "$base/work" --target 38 > "$base/add-38.out"
+$client run-jobs "$base/work" > "$base/mine-38.out" 2>&1
+grep -q '^JOB_COMPLETE target=38 frontier=38$' "$base/mine-38.out"
 $client validator-reserve "$base/work/data/chain.dat" "$candidate" > "$base/reserve.out"
-grep -q '^VALIDATOR_RESERVE .* total_micro_units=4999991$' "$base/reserve.out"
+grep -q '^VALIDATOR_RESERVE .* total_micro_units=4499991$' "$base/reserve.out"
 
-$send reserve-lock 127.0.0.1 19191 "$base/work/wallets/prime.wallet" "$candidate" 31 9 1 "$nonce" > "$base/lock-31.out"
+$send reserve-lock 127.0.0.1 19191 "$base/work/wallets/prime.wallet" "$candidate" 31 449999 1 "$nonce" > "$base/lock-31.out"
 grep -q '^TX_ACCEPTED ' "$base/lock-31.out"
+nonce=$((nonce + 1))
+$send reserve-lock 127.0.0.1 19191 "$base/work/wallets/prime.wallet" "$candidate" 37 50010 1 "$nonce" > "$base/lock-37.out"
+grep -q '^TX_ACCEPTED ' "$base/lock-37.out"
 
-$client add-mine-job "$base/work" --target 33 > "$base/add-33.out"
-$client run-jobs "$base/work" > "$base/mine-33.out" 2>&1
-grep -q '^JOB_COMPLETE target=33 frontier=33$' "$base/mine-33.out"
+$client add-mine-job "$base/work" --target 39 > "$base/add-39.out"
+$client run-jobs "$base/work" > "$base/mine-39.out" 2>&1
+grep -q '^JOB_COMPLETE target=39 frontier=39$' "$base/mine-39.out"
 $client validator-reserve "$base/work/data/chain.dat" "$candidate" > "$base/reserve-final.out"
 grep -q '^VALIDATOR_RESERVE .* total_micro_units=5000000$' "$base/reserve-final.out"
 $client validator-eligibility "$base/work/data/chain.dat" "$candidate" --reserve auto --observed 100 --total 100 > "$base/eligibility-before-binding.out"

@@ -2056,6 +2056,7 @@ public:
         }
 
         if (!primechain::protocol::isProtocolFeePoolAddress(tx.sender_address) &&
+            !primechain::protocol::isProtocolValidatorRewardPoolAddress(tx.sender_address) &&
             !primechain::protocol::verifyAuthenticatedTransactionSignature(tx, error)) {
             error = "invalid transaction signature: " + error;
             return false;
@@ -2921,6 +2922,7 @@ private:
             return;
         }
         if (!primechain::protocol::isProtocolFeePoolAddress(tx->sender_address) &&
+            !primechain::protocol::isProtocolValidatorRewardPoolAddress(tx->sender_address) &&
             !primechain::protocol::verifyAuthenticatedTransactionSignature(*tx, error)) {
             writeAll(fd, "ERROR invalid transaction signature: " + error + "\n");
             return;
@@ -5830,31 +5832,31 @@ private:
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempool_;
         record.transactions = included_transactions;
         if (quorumEnabled()) {
-            record.version = 1;
+            record.version = primechain::node::kValidatorRewardRecordVersion;
             record.commit_phase = embeddedCommitPhaseCertificate(g);
             auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
             if (validator_epoch.epoch != 0) {
-                record.version = 2;
+                record.version = std::max<std::uint64_t>(record.version, 2);
                 record.validator_epoch = std::move(validator_epoch);
             }
             auto endpoint_updates = embeddedValidatorEndpointsForNextRecord(node);
             if (!endpoint_updates.empty()) {
-                record.version = 3;
+                record.version = std::max<std::uint64_t>(record.version, 3);
                 record.validator_endpoints = std::move(endpoint_updates);
             }
             auto economic_policy = embeddedEconomicPolicyForNextRecord(node);
             if (economic_policy.transfer_fee_micro_units != 0) {
-                record.version = economic_policy.validator_min_reserve_micro_units != 0 ? 7 : 4;
+                record.version = std::max<std::uint64_t>(record.version, economic_policy.validator_min_reserve_micro_units != 0 ? 7 : 4);
                 record.economic_policy = std::move(economic_policy);
             }
             auto validator_applications = embeddedValidatorApplicationsForNextRecord(node);
             if (!validator_applications.empty()) {
-                record.version = 5;
+                record.version = std::max<std::uint64_t>(record.version, 5);
                 record.validator_applications = std::move(validator_applications);
             }
             auto validator_work_bindings = embeddedValidatorWorkBindingsForNextRecord(node);
             if (!validator_work_bindings.empty()) {
-                record.version = 6;
+                record.version = std::max<std::uint64_t>(record.version, 6);
                 record.validator_work_bindings = std::move(validator_work_bindings);
             }
             primechain::protocol::updateTransactionBatch(record);
@@ -6068,7 +6070,7 @@ private:
             node.status(), proof.p, proof, provider_address, authentication);
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempool_;
         record.transactions = included_transactions;
-        if (quorumEnabled()) record.version = 1;
+        if (quorumEnabled()) record.version = primechain::node::kValidatorRewardRecordVersion;
         auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
         if (validator_epoch.epoch != 0) {
             record.version = 2;

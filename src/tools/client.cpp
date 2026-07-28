@@ -628,6 +628,27 @@ int balancesWorkdir(int argc, char** argv) {
     return 0;
 }
 
+std::uint64_t primeMinerRewardMicroUnits(
+    bool validator_rewards_active,
+    bool has_pending_composites,
+    std::uint64_t composite_remainder) {
+    if (!validator_rewards_active) {
+        if (!has_pending_composites) return primechain::node::kAssetMicroUnits;
+        return (primechain::node::kAssetMicroUnits / 2) + composite_remainder;
+    }
+    if (!has_pending_composites) {
+        return primechain::node::kPrimeDiscoveryRewardMicroUnits +
+               primechain::node::kCompositeDiscoveryRewardMicroUnits;
+    }
+    return primechain::node::kPrimeDiscoveryRewardMicroUnits + composite_remainder;
+}
+
+std::uint64_t compositeRewardPoolMicroUnits(bool validator_rewards_active) {
+    return validator_rewards_active
+        ? primechain::node::kCompositeDiscoveryRewardMicroUnits
+        : primechain::node::kAssetMicroUnits - (primechain::node::kAssetMicroUnits / 2);
+}
+
 struct RewardSummary {
     std::uint64_t prime_records{0};
     std::uint64_t composite_records{0};
@@ -1327,17 +1348,20 @@ int rewardsWorkdir(int argc, char** argv) {
         }
         if (record->proof.provider_address == *prime_address) ++summary.prime_records;
 
+        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
         if (pending_composite_providers.empty()) {
             if (record->proof.provider_address == *prime_address) {
-                summary.prime_micro_units += primechain::node::kAssetMicroUnits;
+                summary.prime_micro_units += primeMinerRewardMicroUnits(
+                    validator_rewards_active, false, 0);
             }
         } else {
-            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
-            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t composite_pool =
+                compositeRewardPoolMicroUnits(validator_rewards_active);
             const std::uint64_t per_composite = composite_pool / pending_composite_providers.size();
             const std::uint64_t remainder = composite_pool % pending_composite_providers.size();
             if (record->proof.provider_address == *prime_address) {
-                summary.prime_micro_units += prime_reward + remainder;
+                summary.prime_micro_units += primeMinerRewardMicroUnits(
+                    validator_rewards_active, true, remainder);
             }
             for (const auto& provider : pending_composite_providers) {
                 if (provider == *composite_address) summary.composite_micro_units += per_composite;
@@ -1414,23 +1438,26 @@ int rewardHistoryWorkdir(int argc, char** argv) {
                   << " role=record-provider record_height=" << record->height;
             events.push_back(event.str());
         }
+        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
         if (pending.empty()) {
             if (record->proof.provider_address == *prime_address) {
                 std::ostringstream event;
                 event << "REWARD prime integer=" << record->integer
-                      << " amount=" << primechain::node::kAssetMicroUnits
+                      << " amount=" << primeMinerRewardMicroUnits(
+                             validator_rewards_active, false, 0)
                       << " role=prime-miner record_height=" << record->height;
                 events.push_back(event.str());
             }
         } else {
-            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
-            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t composite_pool =
+                compositeRewardPoolMicroUnits(validator_rewards_active);
             const std::uint64_t per_composite = composite_pool / pending.size();
             const std::uint64_t remainder = composite_pool % pending.size();
             if (record->proof.provider_address == *prime_address) {
                 std::ostringstream event;
                 event << "REWARD prime integer=" << record->integer
-                      << " amount=" << (prime_reward + remainder)
+                      << " amount=" << primeMinerRewardMicroUnits(
+                             validator_rewards_active, true, remainder)
                       << " role=prime-miner record_height=" << record->height;
                 events.push_back(event.str());
             }
@@ -1570,14 +1597,17 @@ bool collectBoardReportStats(
         }
 
         if (count_record) {
+            const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
             if (pending.empty()) {
-                addDiscoveryReward(stats, record->proof.provider_address, primechain::node::kAssetMicroUnits);
+                addDiscoveryReward(stats, record->proof.provider_address,
+                    primeMinerRewardMicroUnits(validator_rewards_active, false, 0));
             } else {
-                constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
-                const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+                const std::uint64_t composite_pool =
+                    compositeRewardPoolMicroUnits(validator_rewards_active);
                 const std::uint64_t per_composite = composite_pool / pending.size();
                 const std::uint64_t remainder = composite_pool % pending.size();
-                addDiscoveryReward(stats, record->proof.provider_address, prime_reward + remainder);
+                addDiscoveryReward(stats, record->proof.provider_address,
+                    primeMinerRewardMicroUnits(validator_rewards_active, true, remainder));
                 for (const auto& provider : pending) {
                     addDiscoveryReward(stats, provider.provider, per_composite);
                 }
@@ -2157,6 +2187,10 @@ int launchReport(int argc, char** argv) {
     const auto fee_pool_holdings = node.holdingsForAddress(fee_pool_address);
     std::uint64_t fee_pool_total = 0;
     for (const auto& holding : fee_pool_holdings) fee_pool_total += holding.second;
+    const auto reward_pool_address = node.validatorRewardPoolAddress();
+    const auto reward_pool_holdings = node.holdingsForAddress(reward_pool_address);
+    std::uint64_t reward_pool_total = 0;
+    for (const auto& holding : reward_pool_holdings) reward_pool_total += holding.second;
     const auto validator_summary = summarizeValidatorEvidence(board.validators, registry.active_validators);
     const auto genesis_validators = genesisValidators(registry);
 
@@ -2228,6 +2262,15 @@ int launchReport(int argc, char** argv) {
               << " total_micro_units=" << fee_pool_total << "\n";
     for (const auto& holding : fee_pool_holdings) {
         std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    std::cout << "VALIDATOR_REWARD_POOL epoch=" << node.validatorEpoch()
+              << " address=" << reward_pool_address
+              << " holdings=" << reward_pool_holdings.size()
+              << " total_micro_units=" << reward_pool_total << "\n";
+    for (const auto& holding : reward_pool_holdings) {
+        std::cout << "VALIDATOR_REWARD_HOLDING epoch=" << node.validatorEpoch()
                   << " prime=" << holding.first
                   << " micro_units=" << holding.second << "\n";
     }
@@ -2471,16 +2514,21 @@ int validatorReputation(int argc, char** argv) {
             if (vote.validator_address == address) ++epoch_votes;
         }
 
+        const bool validator_rewards_active = record->version >= primechain::node::kValidatorRewardRecordVersion;
         if (pending.empty()) {
             if (record->proof.provider_address == address) {
-                discovery_micro_units += primechain::node::kAssetMicroUnits;
+                discovery_micro_units += primeMinerRewardMicroUnits(
+                    validator_rewards_active, false, 0);
             }
         } else {
-            constexpr std::uint64_t prime_reward = primechain::node::kAssetMicroUnits / 2;
-            const std::uint64_t composite_pool = primechain::node::kAssetMicroUnits - prime_reward;
+            const std::uint64_t composite_pool =
+                compositeRewardPoolMicroUnits(validator_rewards_active);
             const std::uint64_t per_composite = composite_pool / pending.size();
             const std::uint64_t remainder = composite_pool % pending.size();
-            if (record->proof.provider_address == address) discovery_micro_units += prime_reward + remainder;
+            if (record->proof.provider_address == address) {
+                discovery_micro_units += primeMinerRewardMicroUnits(
+                    validator_rewards_active, true, remainder);
+            }
             for (const auto& provider : pending) {
                 if (provider.provider == address) discovery_micro_units += per_composite;
             }
@@ -2552,6 +2600,162 @@ int updateIndexes(int argc, char** argv) {
     }
     std::cout << "INDEX_UPDATED " << workdir << " frontier=" << status.frontier
               << " proofs=" << index.size() << " path=" << compositeProofIndexPath(workdir) << "\n";
+    return 0;
+}
+
+
+int validatorRewardPool(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string store_path = argv[2];
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "validator_reward_pool_error: " << error << "\n";
+        return 1;
+    }
+
+    const std::uint64_t epoch = argc == 4 ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+                                         : node.validatorEpoch();
+    const auto pool_address = primechain::protocol::validatorRewardPoolAddress(epoch);
+    const auto holdings = node.holdingsForAddress(pool_address);
+
+    std::uint64_t total_micro_units = 0;
+    for (const auto& holding : holdings) total_micro_units += holding.second;
+
+    std::cout << "VALIDATOR_REWARD_POOL " << store_path
+              << " epoch=" << epoch
+              << " address=" << pool_address
+              << " holdings=" << holdings.size()
+              << " total_micro_units=" << total_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "VALIDATOR_REWARD_HOLDING epoch=" << epoch
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    return 0;
+}
+
+int validatorRewardDistributionStatus(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string store_path = argv[2];
+    const std::uint64_t interval_primes = argc == 4
+        ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+        : 1000;
+    if (interval_primes == 0) {
+        std::cerr << "validator_reward_distribution_status_error: interval must be positive\n";
+        return 1;
+    }
+
+    std::string error;
+    primechain::node::SequentialNode node(store_path);
+    if (!node.load(error)) {
+        std::cerr << "validator_reward_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+    primechain::storage::RecordStore store(store_path);
+    const auto records = store.loadAll(error);
+    if (!error.empty()) {
+        std::cerr << "validator_reward_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+
+    std::uint64_t prime_record_count = 0;
+    std::uint64_t distribution_count = 0;
+    std::uint64_t last_distribution_prime_count = 0;
+    primechain::PrimeValue last_distribution_integer = 0;
+    std::uint64_t last_distribution_epoch = 0;
+    primechain::PrimeValue last_distribution_prime = 0;
+    std::uint64_t last_distribution_micro_units = 0;
+    std::vector<std::string> events;
+
+    for (const auto& stored : records) {
+        std::vector<primechain::protocol::TransactionV0> transactions;
+        if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
+            ++prime_record_count;
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "validator_reward_distribution_status_error: " << error << "\n";
+                return 1;
+            }
+            transactions = record->transactions;
+        } else {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "validator_reward_distribution_status_error: " << error << "\n";
+                return 1;
+            }
+            transactions = record->transactions;
+        }
+        for (const auto& tx : transactions) {
+            if (tx.version != 5 ||
+                tx.sender_address.rfind("pcpool_validator_rewards_epoch_", 0) != 0 ||
+                tx.inputs.empty()) {
+                continue;
+            }
+            const auto epoch_text = tx.sender_address.substr(std::string("pcpool_validator_rewards_epoch_").size());
+            std::uint64_t epoch = 0;
+            try {
+                epoch = static_cast<std::uint64_t>(std::stoull(epoch_text));
+            } catch (...) {
+                continue;
+            }
+            ++distribution_count;
+            last_distribution_prime_count = prime_record_count;
+            last_distribution_integer = stored.integer;
+            last_distribution_epoch = epoch;
+            last_distribution_prime = tx.inputs.front().prime;
+            last_distribution_micro_units = tx.inputs.front().amount.denominator == 1
+                ? tx.inputs.front().amount.numerator
+                : 0;
+
+            std::ostringstream event;
+            event << "VALIDATOR_REWARD_DISTRIBUTION_EVENT integer=" << stored.integer
+                  << " prime_count=" << prime_record_count
+                  << " epoch=" << epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units
+                  << " recipients=" << tx.outputs.size();
+            events.push_back(event.str());
+        }
+    }
+
+    const auto next_distribution_prime_count = last_distribution_prime_count + interval_primes;
+    const bool due = prime_record_count >= next_distribution_prime_count;
+    const auto pool_address = node.validatorRewardPoolAddress();
+    const auto holdings = node.holdingsForAddress(pool_address);
+    const auto eligible_recipients = node.validatorRewardDistributionRecipients();
+    std::uint64_t pool_total = 0;
+    for (const auto& holding : holdings) pool_total += holding.second;
+
+    std::cout << "VALIDATOR_REWARD_DISTRIBUTION_STATUS " << store_path
+              << " interval_primes=" << interval_primes
+              << " current_prime_records=" << prime_record_count
+              << " last_distribution_prime_count=" << last_distribution_prime_count
+              << " next_distribution_prime_count=" << next_distribution_prime_count
+              << " due=" << (due ? 1 : 0)
+              << " current_epoch=" << node.validatorEpoch()
+              << " pool_address=" << pool_address
+              << " pool_holdings=" << holdings.size()
+              << " pool_total_micro_units=" << pool_total
+              << " distributions=" << distribution_count
+              << " eligible_recipients=" << eligible_recipients.size() << "\n";
+    if (last_distribution_integer != 0) {
+        std::cout << "LAST_VALIDATOR_REWARD_DISTRIBUTION integer=" << last_distribution_integer
+                  << " prime_count=" << last_distribution_prime_count
+                  << " epoch=" << last_distribution_epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units << "\n";
+    }
+    for (const auto& recipient : eligible_recipients) {
+        std::cout << "VALIDATOR_REWARD_DISTRIBUTION_RECIPIENT address=" << recipient << "\n";
+    }
+    for (const auto& holding : holdings) {
+        std::cout << "VALIDATOR_REWARD_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    for (const auto& event : events) std::cout << event << "\n";
     return 0;
 }
 
@@ -2962,6 +3166,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " economic-policy <record-store>\n"
               << "  " << argv0 << " fee-pool <record-store> [epoch]\n"
+              << "  " << argv0 << " validator-reward-pool <record-store> [epoch]\n"
+              << "  " << argv0 << " validator-reward-distribution-status <record-store> [interval-primes]\n"
               << "  " << argv0 << " fee-distribution-status <record-store> [interval-records]\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
@@ -3078,6 +3284,14 @@ int main(int argc, char** argv) {
     if (command == "fee-pool") {
         if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
         return feePool(argc, argv);
+    }
+    if (command == "validator-reward-pool") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorRewardPool(argc, argv);
+    }
+    if (command == "validator-reward-distribution-status") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorRewardDistributionStatus(argc, argv);
     }
     if (command == "fee-distribution-status") {
         if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }

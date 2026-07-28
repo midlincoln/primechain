@@ -1,7 +1,8 @@
 # Primechain Validator Economy v0
 
-This document records the emerging validator-economy design. It is a design
-target, not current consensus behavior.
+This document records the emerging validator-economy design. Some parts are
+implemented in the current controlled testnet; slashing, unbonding, and
+permissionless validator admission remain design targets.
 
 Primechain separates arithmetic discovery from settlement finality:
 
@@ -254,30 +255,39 @@ arithmetic discovery -> miners/providers
 settlement finality  -> validator signers
 ```
 
-A first implementation can split each newly minted prime asset:
+The current launch-testnet implementation fixes each non-genesis version-8 prime asset at:
 
 ```text
-discovery pool = miner_reward_bps
-validator pool = validator_reward_bps
-treasury pool = treasury_reward_bps
+prime prover discovery reward       = 450,000 micro-units
+composite provider discovery pool   = 450,000 micro-units
+validator reward pool               = 100,000 micro-units
+total supply per prime asset        = 1,000,000 micro-units
 ```
 
-Discovery pool can reuse the existing prime/composite reward allocation logic.
-Validator pool should initially split equally among validators who signed the
-finalized record. Later versions may add reserve-weighted components, but equal
-payment to active signers is simpler and less cartel-prone.
+If no composite records appeared since the previous prime, the prime prover
+receives the full 900,000 micro-unit discovery allocation. Otherwise the prime
+prover receives 450,000 plus any composite-pool remainder, and composite proof
+providers split 450,000 by record participation. The 100,000 validator share is
+credited to `pcpool_validator_rewards_epoch_<epoch>` and is not immediately paid
+to validator wallets. Earlier validator-set records replay under their original
+reward rule so a software upgrade does not rewrite chain history.
 
-Validators who do not sign should not receive that record's validator reward.
-
-Current launch-testnet fee distribution is narrower than the future reward
-model above. Transaction fees accumulate in the active epoch's validator fee
-pool. A distribution transaction may spend the full selected fee-pool asset
-balance only to validators who have participated since the previous distribution
-or validator-epoch transition. Participation is derived from signed
+Transaction fees accumulate separately in `pcpool_validator_fees_epoch_<epoch>`.
+Both validator fee-pool and validator reward-pool distributions are explicit
+protocol transactions. A distribution transaction may spend the full selected
+pool asset balance only to validators who have participated since the previous
+distribution or validator-epoch transition. Participation is derived from signed
 finalization, commit-phase, and round-change votes embedded in finalized
 records. If no participation has been observed for the interval, replay falls
 back to the full active validator set so old or empty intervals remain
 recoverable.
+
+Current operational cadence: transaction-fee distribution is checked by record
+interval, and validator reward-pool distribution is checked by prime-record
+interval. The initial validator reward-pool status command defaults to every
+1000 prime records. Distribution remains manual but deterministic: anyone can
+submit the correctly shaped full-pool transaction, and replay verifies the exact
+split.
 
 This is reward eligibility, not punishment. A validator that misses signatures
 loses fee-distribution eligibility for that interval, but its reserve is not
@@ -307,7 +317,7 @@ Recommended order:
 1. Document validator economy and governance.
 2. Add encrypted wallets and clean transfer UX.
 3. Add policy/reward state with fixed default parameters.
-4. Split rewards into discovery, validator, and treasury pools.
+4. Split prime rewards into discovery and validator reward pools. Done for version-8 records under the fixed 45/45/10 launch-testnet rule; treasury remains future work.
 5. Add economy and validator reputation report commands.
 6. Add policy epoch event records and validator votes.
 7. Add reserve locking and unbonding records.
