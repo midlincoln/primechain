@@ -4237,7 +4237,23 @@ private:
         }
         if (phaseClosed(integer)) return true;
 
+        const auto commit_round = activeCommitPhaseRound(integer);
+        std::vector<primechain::storage::StoredCommitment> local_commitments;
+        for (const auto& entry : commitments_) {
+            if (std::get<0>(entry.first) == integer &&
+                std::get<1>(entry.first) == commit_round) {
+                local_commitments.push_back(entry.second);
+            }
+        }
+
         for (const auto& peer : activeKnownPeers()) {
+            for (const auto& commitment : local_commitments) {
+                std::string commit_error;
+                if (!submitCommitToPeer(peer, commitment, commit_error)) {
+                    std::cerr << "commitment close warmup warning to " << peer.host << ":"
+                              << peer.port << ": " << commit_error << "\n";
+                }
+            }
             std::string peer_error;
             if (!requestPeerCommitPhaseClose(peer, integer, peer_error)) {
                 std::cerr << "commit phase close warning from " << peer.host << ":"

@@ -95,11 +95,30 @@ grep -q "^JOB_COMPLETE target=$record_integer frontier=$record_integer$" "$base/
 $client query 127.0.0.1 19191 GET_VALIDATORS > "$base/validators.out"
 grep -q "^VALIDATORS 2 " "$base/validators.out"
 
+$client sync 127.0.0.1 19191 2 "$record_integer" "$base/node2.dat" > "$base/sync-node2.out"
+$server 19192 "$base/node2.dat" \
+    --peer 127.0.0.1 19191 \
+    --validator-set "$validator" \
+    --validator-identity "$base/candidate.wallet" \
+    --finalization-timeout-ms 500 \
+    > "$base/node2.log" 2>&1 &
+echo $! > "$base/node2.pid"
+sleep 0.5
+$client query 127.0.0.1 19191 ADD_PEER 127.0.0.1 19192 > "$base/add-peer-node1.out"
+$client query 127.0.0.1 19192 ADD_PEER 127.0.0.1 19191 > "$base/add-peer-node2.out"
+
+# Mine through the first post-admission composite. With two active validators this
+# exercises quorum commit-phase close, commitment propagation, and retry idempotency.
+post_admission_target=$((record_integer + 3))
+$client add-mine-job "$base/work" --target "$post_admission_target" > "$base/add-post-admission.out"
+$client run-jobs "$base/work" > "$base/mine-post-admission.out" 2>&1
+grep -q "^JOB_COMPLETE target=$post_admission_target frontier=$post_admission_target$" "$base/mine-post-admission.out"
+
 $client sync-peer "$base/work" > "$base/sync-final.out"
 $client inspect "$base/work/data/chain.dat" > "$base/inspect-final-work.out"
 $client inspect "$base/node.dat" > "$base/inspect-final-node.out"
-grep -q "frontier_integer: $record_integer" "$base/inspect-final-work.out"
-grep -q "frontier_integer: $record_integer" "$base/inspect-final-node.out"
+grep -q "frontier_integer: $post_admission_target" "$base/inspect-final-work.out"
+grep -q "frontier_integer: $post_admission_target" "$base/inspect-final-node.out"
 $client validator-eligibility "$base/work/data/chain.dat" "$candidate" --reserve auto --observed 100 --total 100 > "$base/eligibility.out"
 grep -q '^VALIDATOR_ELIGIBILITY .* eligible=1$' "$base/eligibility.out"
 grep -q "^WORK_SPONSORS count=1 $miner$" "$base/eligibility.out"

@@ -5,7 +5,6 @@
 #include <iostream>
 #include <map>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -580,10 +579,32 @@ std::optional<Status> getStatus(const std::string& host, int port) {
     return status;
 }
 
-std::uint64_t randomNonce() {
-    std::random_device source;
-    return (static_cast<std::uint64_t>(source()) << 32) ^
-           static_cast<std::uint64_t>(source());
+void appendUint64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+    for (std::size_t i = 0; i < 8; ++i) {
+        out.push_back(static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu));
+    }
+}
+
+void appendString(std::vector<std::uint8_t>& out, const std::string& value) {
+    appendUint64(out, value.size());
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+std::uint64_t stableCompositeNonce(
+    const primechain::CompositeProof& proof,
+    const std::string& provider) {
+    std::vector<std::uint8_t> bytes;
+    appendString(bytes, "primechain-frontier-miner-composite-nonce-v1");
+    appendUint64(bytes, proof.m);
+    appendUint64(bytes, proof.d);
+    appendUint64(bytes, proof.e);
+    appendString(bytes, provider);
+    const auto hash = primechain::crypto::sha3_256(bytes);
+    std::uint64_t nonce = 0;
+    for (std::size_t i = 0; i < 8; ++i) {
+        nonce |= static_cast<std::uint64_t>(hash[i]) << (i * 8);
+    }
+    return nonce == 0 ? 1 : nonce;
 }
 
 std::optional<primechain::Hash256> hashFromHex(const std::string& hex) {
@@ -739,10 +760,8 @@ bool staleOrTransient(const std::string& response) {
 }
 
 bool resetsCompositeCommitState(const std::string& response) {
-    return response.find("awaiting_commitment") != std::string::npos ||
-           response.find("no prior commitment for reveal") != std::string::npos ||
-           response.find("reveal does not match prior commitment") != std::string::npos ||
-           response.find("provider already revealed different composite evidence") != std::string::npos;
+    return response.find("reveal does not match prior commitment") != std::string::npos ||
+           response.find("commitment not selected for reveal") != std::string::npos;
 }
 
 bool commitAcceptedOrDuplicate(const std::string& response) {
@@ -911,11 +930,13 @@ int main(int argc, char** argv) {
                 return 1;
             }
             proofs.add(*proof);
-            std::uint64_t nonce = randomNonce();
+            const auto local_provider = composite_identity.has_value()
+                ? composite_identity->address : composite_miner;
+            std::uint64_t nonce = stableCompositeNonce(*proof, local_provider);
             if (pending_composite_path.has_value()) {
                 const auto pending = loadPendingComposite(*pending_composite_path);
                 if (pending.has_value() && pending->integer == next &&
-                    pending->provider == (composite_identity.has_value() ? composite_identity->address : composite_miner) &&
+                    pending->provider == local_provider &&
                     pending->d == proof->d && pending->e == proof->e) {
                     nonce = pending->nonce;
                     reused_pending_composite = true;
@@ -925,7 +946,7 @@ int main(int argc, char** argv) {
                     replacement.d = proof->d;
                     replacement.e = proof->e;
                     replacement.nonce = nonce;
-                    replacement.provider = composite_identity.has_value() ? composite_identity->address : composite_miner;
+                    replacement.provider = local_provider;
                     if (!writePendingComposite(*pending_composite_path, replacement)) return 1;
                 }
             }
@@ -971,7 +992,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (commit_request.has_value() && !reused_pending_composite) {
+        if (commit_request.has_value()) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
