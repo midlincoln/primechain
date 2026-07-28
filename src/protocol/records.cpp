@@ -925,7 +925,6 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         return std::nullopt;
     }
 
-    const auto metadata_offset = reader.offset();
     const auto read_metadata = [&](bool read_genesis_config) {
         auto candidate_reader = reader;
         record.genesis_config = {};
@@ -958,13 +957,6 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         decoded_metadata = read_metadata(true);
     } else {
         decoded_metadata = read_metadata(false);
-        if (!decoded_metadata) {
-            reader.setOffset(metadata_offset);
-            decoded_metadata = read_metadata(true);
-            if (decoded_metadata) {
-                record.genesis_config = {};
-            }
-        }
     }
     if (!decoded_metadata) {
         error = "truncated prime record payload";
