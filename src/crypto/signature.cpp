@@ -410,6 +410,7 @@ Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::uint64_t transfer_fee_micro_units,
+    std::uint64_t validator_min_reserve_micro_units,
     PrimeValue effective_integer,
     std::uint64_t sequence,
     const Address& validator_address) {
@@ -418,6 +419,7 @@ Bytes economicPolicySigningPayload(
     appendHash(payload, previous_record_hash);
     appendUint64(payload, record_integer);
     appendUint64(payload, transfer_fee_micro_units);
+    appendUint64(payload, validator_min_reserve_micro_units);
     appendUint64(payload, effective_integer);
     appendUint64(payload, sequence);
     appendString(payload, validator_address);

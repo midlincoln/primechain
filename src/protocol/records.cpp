@@ -342,8 +342,10 @@ void appendValidatorWorkBindings(
 
 void appendEconomicPolicyUpdate(
     std::vector<std::uint8_t>& out,
-    const EconomicPolicyUpdateV1& update) {
+    const EconomicPolicyUpdateV1& update,
+    std::uint64_t record_version) {
     appendUint64(out, update.transfer_fee_micro_units);
+    if (record_version >= 7) appendUint64(out, update.validator_min_reserve_micro_units);
     appendUint64(out, update.effective_integer);
     appendUint64(out, update.sequence);
     appendUint64(out, update.votes.size());
@@ -564,11 +566,13 @@ bool readValidatorWorkBindings(
 
 bool readEconomicPolicyUpdate(
     ByteReader& reader,
-    EconomicPolicyUpdateV1& update) {
+    EconomicPolicyUpdateV1& update,
+    std::uint64_t record_version) {
     std::uint64_t vote_count = 0;
     update = {};
-    if (!reader.readUint64(update.transfer_fee_micro_units) ||
-        !reader.readUint64(update.effective_integer) ||
+    if (!reader.readUint64(update.transfer_fee_micro_units)) return false;
+    if (record_version >= 7 && !reader.readUint64(update.validator_min_reserve_micro_units)) return false;
+    if (!reader.readUint64(update.effective_integer) ||
         !reader.readUint64(update.sequence) ||
         !reader.readUint64(vote_count) ||
         vote_count > kMaxDecodedEconomicPolicyVotes) return false;
@@ -633,20 +637,20 @@ bool readOptionalMetadataAndFinalization(
     }
     if (version >= 6) {
         return readValidatorEndpointUpdates(reader, updates) &&
-               readEconomicPolicyUpdate(reader, policy) &&
+               readEconomicPolicyUpdate(reader, policy, version) &&
                readValidatorApplications(reader, applications) &&
                readValidatorWorkBindings(reader, work_bindings) &&
                readFinalizationProof(reader, finalization);
     }
     if (version >= 5) {
         return readValidatorEndpointUpdates(reader, updates) &&
-               readEconomicPolicyUpdate(reader, policy) &&
+               readEconomicPolicyUpdate(reader, policy, version) &&
                readValidatorApplications(reader, applications) &&
                readFinalizationProof(reader, finalization);
     }
     if (version >= 4) {
         return readValidatorEndpointUpdates(reader, updates) &&
-               readEconomicPolicyUpdate(reader, policy) &&
+               readEconomicPolicyUpdate(reader, policy, version) &&
                readFinalizationProof(reader, finalization);
     }
 
@@ -682,7 +686,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
-    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     appendFinalizationProof(out, record.finalized_by, include_votes);
@@ -705,7 +709,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
-    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     appendFinalizationProof(out, record.finalized_by, include_votes);
@@ -998,7 +1002,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
-    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     return out;
@@ -1018,7 +1022,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
-    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy);
+    if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
     return out;
@@ -1523,6 +1527,7 @@ bool verifyEconomicPolicyUpdate(
     PrimeValue record_integer,
     std::string& error) {
     const bool absent = update.transfer_fee_micro_units == 0 &&
+        update.validator_min_reserve_micro_units == 0 &&
         update.effective_integer == 0 && update.sequence == 0 && update.votes.empty();
     if (absent) return true;
     if (!isCanonicalProtocolValidatorSet(current_validator_set)) {
@@ -1531,6 +1536,10 @@ bool verifyEconomicPolicyUpdate(
     }
     if (update.transfer_fee_micro_units == 0) {
         error = "economic policy transfer fee must be nonzero";
+        return false;
+    }
+    if (update.validator_min_reserve_micro_units == 0) {
+        error = "economic policy validator reserve must be nonzero";
         return false;
     }
     if (update.effective_integer != record_integer + 1) {
@@ -1562,7 +1571,8 @@ bool verifyEconomicPolicyUpdate(
                 vote.public_key,
                 crypto::economicPolicySigningPayload(
                     previous_record_hash, record_integer, update.transfer_fee_micro_units,
-                    update.effective_integer, update.sequence, vote.validator_address),
+                    update.validator_min_reserve_micro_units, update.effective_integer,
+                    update.sequence, vote.validator_address),
                 vote.signature, signature_error)) {
             error = "invalid economic policy vote signature";
             return false;

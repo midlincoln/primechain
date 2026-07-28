@@ -99,9 +99,9 @@ Deliverables:
 - address balances,
 - transaction batch Merkle roots.
 
-Before reserve-backed validator governance is implemented, protocol wallets
-need encrypted/passphrase-protected key storage and a clean public transfer UX.
-The validator economy design is tracked in `docs/validator-economy-v0.md`.
+Reserve-backed validator governance depends on encrypted/passphrase-protected
+protocol wallets and a clean public transfer UX. The validator economy design is
+tracked in `docs/validator-economy-v0.md`.
 
 ## Stage 7: Rewards
 

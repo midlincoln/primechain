@@ -131,6 +131,7 @@ Bytes economicPolicySigningPayload(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::uint64_t transfer_fee_micro_units,
+    std::uint64_t validator_min_reserve_micro_units,
     PrimeValue effective_integer,
     std::uint64_t sequence,
     const Address& validator_address);

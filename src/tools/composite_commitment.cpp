@@ -21,7 +21,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " sign-endpoint <validator-identity> previous_hash record_integer host port sequence [effective_integer]\n"
               << "  " << argv0 << " sign-application <candidate-identity> previous_hash record_integer host port sequence observed_successful observed_total\n"
               << "  " << argv0 << " sign-work-binding <miner-identity> previous_hash record_integer candidate_address sequence\n"
-              << "  " << argv0 << " sign-policy <validator-identity> previous_hash record_integer transfer_fee_micro_units sequence [effective_integer]\n";
+              << "  " << argv0 << " sign-policy <validator-identity> previous_hash record_integer transfer_fee_micro_units validator_min_reserve_micro_units sequence [effective_integer]\n";
 }
 
 } // namespace
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if ((argc == 7 || argc == 8) && std::string(argv[1]) == "sign-policy") {
+    if ((argc == 8 || argc == 9) && std::string(argv[1]) == "sign-policy") {
         primechain::wallet::MinerIdentity identity;
         std::string error;
         if (!primechain::wallet::loadMinerIdentity(argv[2], identity, error)) {
@@ -171,15 +171,17 @@ int main(int argc, char** argv) {
         std::copy(previous_bytes.begin(), previous_bytes.end(), previous_hash.begin());
         const auto record_integer = static_cast<primechain::PrimeValue>(std::stoull(argv[4]));
         const auto transfer_fee_micro_units = static_cast<std::uint64_t>(std::stoull(argv[5]));
-        const auto sequence = static_cast<std::uint64_t>(std::stoull(argv[6]));
-        const auto effective_integer = argc == 8
-            ? static_cast<primechain::PrimeValue>(std::stoull(argv[7]))
+        const auto validator_min_reserve_micro_units = static_cast<std::uint64_t>(std::stoull(argv[6]));
+        const auto sequence = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto effective_integer = argc == 9
+            ? static_cast<primechain::PrimeValue>(std::stoull(argv[8]))
             : record_integer + 1;
         const auto signature = primechain::crypto::signProtocolMessage(
             identity.private_key,
             primechain::crypto::economicPolicySigningPayload(
                 previous_hash, record_integer, transfer_fee_micro_units,
-                effective_integer, sequence, identity.address),
+                validator_min_reserve_micro_units, effective_integer,
+                sequence, identity.address),
             error);
         if (!signature.has_value()) {
             std::cerr << error << "\n";
@@ -188,6 +190,7 @@ int main(int argc, char** argv) {
         std::cout << "SUBMIT_POLICY_VOTE "
                   << primechain::crypto::toHex(previous_hash) << " "
                   << record_integer << " " << transfer_fee_micro_units << " "
+                  << validator_min_reserve_micro_units << " "
                   << effective_integer << " " << sequence << " "
                   << identity.address << " "
                   << primechain::wallet::bytesToHex(identity.public_key) << " "

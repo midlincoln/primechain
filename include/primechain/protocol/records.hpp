@@ -169,6 +169,7 @@ struct EconomicPolicyVoteV1 {
 
 struct EconomicPolicyUpdateV1 {
     std::uint64_t transfer_fee_micro_units{0};
+    std::uint64_t validator_min_reserve_micro_units{0};
     PrimeValue effective_integer{0};
     std::uint64_t sequence{0};
     std::vector<EconomicPolicyVoteV1> votes;

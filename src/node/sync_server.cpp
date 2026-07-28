@@ -118,6 +118,7 @@ struct EconomicPolicyVoteRecord {
     primechain::Hash256 previous_record_hash{};
     primechain::PrimeValue record_integer{0};
     std::uint64_t transfer_fee_micro_units{0};
+    std::uint64_t validator_min_reserve_micro_units{0};
     primechain::PrimeValue effective_integer{0};
     std::uint64_t sequence{0};
     primechain::protocol::EconomicPolicyVoteV1 vote;
@@ -2748,6 +2749,7 @@ private:
         }
         std::ostringstream out;
         out << "ECONOMIC_POLICY transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+            << " validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits()
             << " next_integer=" << (node.status().frontier_integer + 1)
             << " previous_hash=" << primechain::crypto::toHex(node.status().latest_record_hash)
             << "\n";
@@ -4692,6 +4694,7 @@ private:
         if (!policyProposalReady()) return update;
         const auto& proposal = policy_votes_.begin()->second;
         update.transfer_fee_micro_units = proposal.transfer_fee_micro_units;
+        update.validator_min_reserve_micro_units = proposal.validator_min_reserve_micro_units;
         update.effective_integer = proposal.effective_integer;
         update.sequence = proposal.sequence;
         for (const auto& entry : policy_votes_) update.votes.push_back(entry.second.vote);
@@ -4722,6 +4725,7 @@ private:
         header << "POLICY_VOTES " << policy_votes_.size() << " "
             << primechain::crypto::toHex(proposal.previous_record_hash) << " "
             << proposal.record_integer << " " << proposal.transfer_fee_micro_units << " "
+            << proposal.validator_min_reserve_micro_units << " "
             << proposal.effective_integer << " " << proposal.sequence << "\n";
         writeCommand(fd, header.str());
         for (const auto& entry : policy_votes_) {
@@ -4741,6 +4745,7 @@ private:
         std::ostringstream command;
         command << "SUBMIT_POLICY_VOTE_PEER " << primechain::crypto::toHex(record.previous_record_hash)
                 << " " << record.record_integer << " " << record.transfer_fee_micro_units
+                << " " << record.validator_min_reserve_micro_units
                 << " " << record.effective_integer << " " << record.sequence
                 << " " << record.vote.validator_address << " "
                 << bytesToHex(record.vote.public_key) << " " << bytesToHex(record.vote.signature) << "\n";
@@ -4769,6 +4774,7 @@ private:
         std::string command, previous_hex, voter, public_hex, signature_hex, extra;
         EconomicPolicyVoteRecord record;
         in >> command >> previous_hex >> record.record_integer >> record.transfer_fee_micro_units
+           >> record.validator_min_reserve_micro_units
            >> record.effective_integer >> record.sequence >> voter >> public_hex >> signature_hex;
         const auto previous = parseHash(previous_hex);
         if (!in || (in >> extra) ||
@@ -4788,7 +4794,8 @@ private:
         if (!quorumEnabled() || record.previous_record_hash != node.status().latest_record_hash ||
             record.record_integer != node.status().frontier_integer + 1 ||
             record.effective_integer != record.record_integer + 1 ||
-            record.transfer_fee_micro_units == 0) {
+            record.transfer_fee_micro_units == 0 ||
+            record.validator_min_reserve_micro_units == 0) {
             writeAll(fd, "ERROR policy proposal does not match current chain state\n");
             return;
         }
@@ -4799,8 +4806,8 @@ private:
                 record.vote.public_key,
                 primechain::crypto::economicPolicySigningPayload(
                     record.previous_record_hash, record.record_integer,
-                    record.transfer_fee_micro_units, record.effective_integer,
-                    record.sequence, voter),
+                    record.transfer_fee_micro_units, record.validator_min_reserve_micro_units,
+                    record.effective_integer, record.sequence, voter),
                 record.vote.signature, error)) {
             writeAll(fd, "ERROR invalid economic policy vote\n");
             return;
@@ -4810,6 +4817,7 @@ private:
             if (record.previous_record_hash != first.previous_record_hash ||
                 record.record_integer != first.record_integer ||
                 record.transfer_fee_micro_units != first.transfer_fee_micro_units ||
+                record.validator_min_reserve_micro_units != first.validator_min_reserve_micro_units ||
                 record.effective_integer != first.effective_integer ||
                 record.sequence != first.sequence) {
                 writeAll(fd, "ERROR conflicting economic policy proposal\n");
@@ -4940,7 +4948,8 @@ private:
             error = "candidate has no validator application";
             return false;
         }
-        const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+        primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+        policy.min_reserve_micro_units = node.validatorMinReserveMicroUnits();
         const ValidatorCandidateStats raw_stats = validatorSponsoredStatsFromChain(candidate);
         const primechain::protocol::ValidatorWorkStatsV0 work_stats{
             raw_stats.prime_records,
@@ -5835,7 +5844,7 @@ private:
             }
             auto economic_policy = embeddedEconomicPolicyForNextRecord(node);
             if (economic_policy.transfer_fee_micro_units != 0) {
-                record.version = 4;
+                record.version = economic_policy.validator_min_reserve_micro_units != 0 ? 7 : 4;
                 record.economic_policy = std::move(economic_policy);
             }
             auto validator_applications = embeddedValidatorApplicationsForNextRecord(node);
@@ -6072,7 +6081,7 @@ private:
         }
         auto economic_policy = embeddedEconomicPolicyForNextRecord(node);
         if (economic_policy.transfer_fee_micro_units != 0) {
-            record.version = 4;
+            record.version = economic_policy.validator_min_reserve_micro_units != 0 ? 7 : 4;
             record.economic_policy = std::move(economic_policy);
         }
         auto validator_applications = embeddedValidatorApplicationsForNextRecord(node);

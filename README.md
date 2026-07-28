@@ -108,9 +108,31 @@ The current validator registry can be inspected from a local record store:
 ./build/primechain-client validator-registry ./data/chain.dat
 ```
 
-This reports the replay-derived genesis/epoch validator history. It is the
-foundation for later on-chain validator admission, reserve locks, and endpoint
-updates.
+This reports the replay-derived genesis/epoch validator history. Validator
+admission, reserve locks, endpoint updates, transfer fees, and the active
+validator minimum reserve are replay-derived chain state.
+
+Economic policy can be inspected from a local store:
+
+```bash
+./build/primechain-client economic-policy ./data/chain.dat
+```
+
+A running validator also reports the current policy proposal target:
+
+```bash
+./build/primechain-sync-query 127.0.0.1 18889 GET_ECONOMIC_POLICY
+# ECONOMIC_POLICY transfer_fee_micro_units=<fee> validator_min_reserve_micro_units=<reserve> next_integer=<n> previous_hash=<hash>
+```
+
+To change the transfer fee or validator minimum reserve, at least two active
+validators sign the same policy vote. The next accepted arithmetic record embeds
+the quorum certificate and activates the policy at the following integer:
+
+```bash
+vote=$(./build/primechain-composite-commitment sign-policy   ./wallets/validator-a.wallet <previous_hash> <record_integer>   <transfer_fee_micro_units> <validator_min_reserve_micro_units> <sequence>)
+./build/primechain-sync-query 127.0.0.1 18889 $vote
+```
 
 The tested one-validator-to-three-validator launch procedure is documented in
 [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). For service setup, use

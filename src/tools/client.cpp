@@ -886,8 +886,9 @@ bool hasValidatorEpochTransition(const primechain::protocol::ValidatorEpochTrans
 }
 
 bool hasEconomicPolicyUpdate(const primechain::protocol::EconomicPolicyUpdateV1& policy) {
-    return policy.transfer_fee_micro_units != 0 || policy.effective_integer != 0 ||
-           policy.sequence != 0 || !policy.votes.empty();
+    return policy.transfer_fee_micro_units != 0 ||
+           policy.validator_min_reserve_micro_units != 0 ||
+           policy.effective_integer != 0 || policy.sequence != 0 || !policy.votes.empty();
 }
 
 void printExplorerTransactions(const std::vector<primechain::protocol::TransactionV0>& transactions) {
@@ -925,6 +926,7 @@ void printExplorerCommonMetadata(
     if (hasEconomicPolicyUpdate(economic_policy)) {
         std::cout << "ECONOMIC_POLICY_UPDATE"
                   << " transfer_fee_micro_units=" << economic_policy.transfer_fee_micro_units
+                  << " validator_min_reserve_micro_units=" << economic_policy.validator_min_reserve_micro_units
                   << " effective_integer=" << economic_policy.effective_integer
                   << " sequence=" << economic_policy.sequence
                   << " votes=" << economic_policy.votes.size() << "\n";
@@ -1807,7 +1809,9 @@ int validatorEligibility(int argc, char** argv) {
         address_stats.fee_micro_units += sponsor_found->second.fee_micro_units;
     }
     const auto work_stats = validatorWorkStatsFromBoardStats(address_stats);
-    const primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+    primechain::protocol::ValidatorEligibilityPolicyV0 policy;
+    primechain::node::SequentialNode policy_node(store_path);
+    if (policy_node.load(error)) policy.min_reserve_micro_units = policy_node.validatorMinReserveMicroUnits();
     const auto work_score = primechain::protocol::validatorWorkScoreV0(work_stats);
     const bool work_ok = primechain::protocol::validatorMeetsWorkMinimumV0(work_stats, policy);
     const bool reserve_ok = primechain::protocol::validatorMeetsReserveMinimumV0(reserve_micro_units, policy);
@@ -2019,14 +2023,16 @@ bool collectEconomicPolicyReport(
         if (stored.kind == primechain::storage::StoredRecordKind::Prime) {
             const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
             if (!record.has_value()) return false;
-            if (record->economic_policy.transfer_fee_micro_units != 0) {
+            if (record->economic_policy.transfer_fee_micro_units != 0 ||
+                record->economic_policy.validator_min_reserve_micro_units != 0) {
                 report.events.push_back({record->integer, record->economic_policy});
             }
             continue;
         }
         const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
         if (!record.has_value()) return false;
-        if (record->economic_policy.transfer_fee_micro_units != 0) {
+        if (record->economic_policy.transfer_fee_micro_units != 0 ||
+            record->economic_policy.validator_min_reserve_micro_units != 0) {
             report.events.push_back({record->integer, record->economic_policy});
         }
     }
@@ -2058,11 +2064,13 @@ int economicPolicy(int argc, char** argv) {
 
     std::cout << "ECONOMIC_POLICY_REGISTRY " << store_path
               << " active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " active_validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits()
               << " events=" << report.events.size() << "\n";
     for (const auto& entry : report.events) {
         const auto& update = entry.second;
         std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
                   << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
+                  << " validator_min_reserve_micro_units=" << update.validator_min_reserve_micro_units
                   << " effective_integer=" << update.effective_integer
                   << " sequence=" << update.sequence
                   << " votes=" << update.votes.size() << "\n";
@@ -2166,7 +2174,8 @@ int launchReport(int argc, char** argv) {
               << " registry_events=" << registry.events.size()
               << " endpoint_events=" << endpoints.event_count
               << " active_endpoints=" << endpoints.latest.size()
-              << " transfer_fee_micro_units=" << node.transferFeeMicroUnits() << "\n";
+              << " transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits() << "\n";
     std::cout << "VALIDATOR_EVIDENCE_SUMMARY active=" << validator_summary.active
               << " historical=" << validator_summary.historical
               << " bootstrap_dev=" << validator_summary.bootstrap_dev << "\n";
@@ -2202,11 +2211,13 @@ int launchReport(int argc, char** argv) {
                   << " total_micro_units=" << node.lockedValidatorReserveMicroUnits(validator) << "\n";
     }
     std::cout << "ECONOMIC_POLICY active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " active_validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits()
               << " events=" << policy.events.size() << "\n";
     for (const auto& entry : policy.events) {
         const auto& update = entry.second;
         std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
                   << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
+                  << " validator_min_reserve_micro_units=" << update.validator_min_reserve_micro_units
                   << " effective_integer=" << update.effective_integer
                   << " sequence=" << update.sequence
                   << " votes=" << update.votes.size() << "\n";

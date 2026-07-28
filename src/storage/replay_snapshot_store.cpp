@@ -14,7 +14,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3150414e53434350ull; // "PCCSNAP1"
-constexpr std::uint64_t kVersion = 2;
+constexpr std::uint64_t kVersion = 3;
 constexpr std::uint64_t kMaxEntries = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxAddressBytes = 64ull * 1024ull;
 constexpr std::uint64_t kMaxSnapshotBytes = 512ull * 1024ull * 1024ull;
@@ -81,6 +81,7 @@ std::vector<std::uint8_t> encode(const ReplaySnapshot& value) {
     for (const auto& address : value.validator_set) putAddress(out, address);
     put64(out, value.validator_epoch);
     put64(out, value.transfer_fee_micro_units);
+    put64(out, value.validator_min_reserve_micro_units);
     const auto checksum = crypto::sha3_256(out);
     out.insert(out.end(), checksum.begin(), checksum.end());
     return out;
@@ -157,7 +158,15 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
     } else {
         value.transfer_fee_micro_units = 1;
     }
-    if (value.transfer_fee_micro_units == 0 || !reader.done()) {
+    if (version >= 3) {
+        if (!reader.u64(value.validator_min_reserve_micro_units)) {
+            error = "invalid replay snapshot validator reserve policy"; return false;
+        }
+    } else {
+        value.validator_min_reserve_micro_units = 5'000'000;
+    }
+    if (value.transfer_fee_micro_units == 0 ||
+        value.validator_min_reserve_micro_units == 0 || !reader.done()) {
         error = "invalid replay snapshot trailing data"; return false;
     }
     result = std::move(value);

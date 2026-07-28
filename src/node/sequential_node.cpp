@@ -15,7 +15,6 @@ namespace primechain::node {
 
 namespace {
 
-constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
 constexpr std::uint64_t kValidatorReserveLockTxVersion = 4;
 
@@ -185,6 +184,7 @@ bool hasValidatorEpochTransition(const protocol::ValidatorEpochTransitionV1& tra
 
 bool hasEconomicPolicyUpdate(const protocol::EconomicPolicyUpdateV1& update) {
     return update.transfer_fee_micro_units != 0 ||
+           update.validator_min_reserve_micro_units != 0 ||
            update.effective_integer != 0 ||
            update.sequence != 0 ||
            !update.votes.empty();
@@ -223,8 +223,16 @@ bool validateRecordMetadataVersion(
         error = "economic policy update requires record version 4 or newer";
         return false;
     }
-    if (!has_policy_update && version == 4) {
-        error = "version 4 record requires an economic policy update";
+    if (!has_policy_update && (version == 4 || version == 7)) {
+        error = "economic policy record version requires an economic policy update";
+        return false;
+    }
+    if (economic_policy.validator_min_reserve_micro_units != 0 && version < 7) {
+        error = "validator reserve policy requires record version 7 or newer";
+        return false;
+    }
+    if (version == 7 && economic_policy.validator_min_reserve_micro_units == 0) {
+        error = "version 7 record requires validator reserve policy";
         return false;
     }
     if (has_validator_applications && version < 5) {
@@ -239,7 +247,7 @@ bool validateRecordMetadataVersion(
         error = "validator work bindings require record version 6 or newer";
         return false;
     }
-    if (!has_validator_work_bindings && version >= 6) {
+    if (!has_validator_work_bindings && version == 6) {
         error = "version 6 record requires validator work bindings";
         return false;
     }
@@ -556,6 +564,7 @@ bool SequentialNode::load(std::string& error) {
     validator_set_.clear();
     validator_epoch_ = 0;
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
+    validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
     loaded_from_snapshot_ = false;
 
     const auto latest = store_.latest(error);
@@ -624,7 +633,7 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6) ||
+                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6 && decoded->version != 7) ||
                   decoded->commit_phase.validator_set != validator_set_))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
@@ -737,6 +746,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     validator_set_ = record.genesis_config.validator_set;
     validator_epoch_ = 0;
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
+    validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -755,7 +765,7 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6) ||
+        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7) ||
          record.commit_phase.validator_set != validator_set_)) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
@@ -927,11 +937,13 @@ bool SequentialNode::applyEconomicPolicy(
     std::string& error) {
     if (!hasEconomicPolicyUpdate(update)) return true;
     if (update.transfer_fee_micro_units == 0 ||
+        update.validator_min_reserve_micro_units == 0 ||
         update.effective_integer != record_integer + 1) {
         error = "economic policy update does not match active frontier";
         return false;
     }
     transfer_fee_micro_units_ = update.transfer_fee_micro_units;
+    validator_min_reserve_micro_units_ = update.validator_min_reserve_micro_units;
     return true;
 }
 
@@ -954,6 +966,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
         !std::all_of(snapshot.account_nonces.begin(), snapshot.account_nonces.end(),
             [](const auto& entry) { return protocol::isProtocolAddress(entry.first); }) ||
         snapshot.transfer_fee_micro_units == 0 ||
+        snapshot.validator_min_reserve_micro_units == 0 ||
         !std::is_sorted(snapshot.validator_set.begin(), snapshot.validator_set.end()) ||
         std::adjacent_find(snapshot.validator_set.begin(), snapshot.validator_set.end()) !=
             snapshot.validator_set.end()) return false;
@@ -969,6 +982,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     validator_set_ = snapshot.validator_set;
     validator_epoch_ = snapshot.validator_epoch;
     transfer_fee_micro_units_ = snapshot.transfer_fee_micro_units;
+    validator_min_reserve_micro_units_ = snapshot.validator_min_reserve_micro_units;
     return true;
 }
 
@@ -987,6 +1001,7 @@ void SequentialNode::saveSnapshot(bool force) const {
     snapshot.validator_set = validator_set_;
     snapshot.validator_epoch = validator_epoch_;
     snapshot.transfer_fee_micro_units = transfer_fee_micro_units_;
+    snapshot.validator_min_reserve_micro_units = validator_min_reserve_micro_units_;
     std::string ignored;
     snapshot_store_.replace(snapshot, ignored);
 }

@@ -22,6 +22,8 @@ struct SequentialNodeStatus {
 };
 
 constexpr std::uint64_t kAssetMicroUnits = 1000000;
+constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
+constexpr std::uint64_t kDefaultValidatorMinReserveMicroUnits = 5'000'000;
 
 class SequentialNode {
 public:
@@ -48,6 +50,7 @@ public:
     const std::vector<Address>& validatorSet() const { return validator_set_; }
     std::uint64_t validatorEpoch() const { return validator_epoch_; }
     std::uint64_t transferFeeMicroUnits() const { return transfer_fee_micro_units_; }
+    std::uint64_t validatorMinReserveMicroUnits() const { return validator_min_reserve_micro_units_; }
     Address validatorFeePoolAddress() const;
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
@@ -81,7 +84,8 @@ private:
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
     std::uint64_t validator_epoch_{0};
-    std::uint64_t transfer_fee_micro_units_{1};
+    std::uint64_t transfer_fee_micro_units_{kDefaultTransferFeeMicroUnits};
+    std::uint64_t validator_min_reserve_micro_units_{kDefaultValidatorMinReserveMicroUnits};
     bool loaded_from_snapshot_{false};
 };
 
