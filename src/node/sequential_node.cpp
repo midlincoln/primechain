@@ -34,6 +34,19 @@ bool isFeePoolDistributionV1(
            tx.sender_address == active_fee_pool_address;
 }
 
+bool hasFeePoolDistributionV1(
+    const std::vector<protocol::TransactionV0>& transactions,
+    const Address& active_fee_pool_address) {
+    return std::any_of(transactions.begin(), transactions.end(), [&](const auto& tx) {
+        return isFeePoolDistributionV1(tx, active_fee_pool_address);
+    });
+}
+
+void addSortedUnique(std::vector<Address>& addresses, const Address& address) {
+    const auto pos = std::lower_bound(addresses.begin(), addresses.end(), address);
+    if (pos == addresses.end() || *pos != address) addresses.insert(pos, address);
+}
+
 bool validateAuthenticatedTransferShape(
     const protocol::TransactionV0& tx,
     std::uint64_t transfer_fee_micro_units,
@@ -102,12 +115,12 @@ bool validateValidatorReserveLockShape(
 bool validateFeePoolDistributionShape(
     const protocol::TransactionV0& tx,
     const Address& active_fee_pool_address,
-    const std::vector<Address>& validator_set,
+    const std::vector<Address>& distribution_recipients,
     std::uint64_t pool_balance_micro_units,
     std::string& error) {
     if (!isFeePoolDistributionV1(tx, active_fee_pool_address)) return true;
-    if (validator_set.empty()) {
-        error = "fee pool distribution requires an active validator set";
+    if (distribution_recipients.empty()) {
+        error = "fee pool distribution requires eligible validator recipients";
         return false;
     }
     if (!tx.sender_public_key.empty() || !tx.signature.empty()) {
@@ -134,10 +147,10 @@ bool validateFeePoolDistributionShape(
         return false;
     }
 
-    const auto base_share = *distributed / validator_set.size();
-    const auto remainder = static_cast<std::size_t>(*distributed % validator_set.size());
+    const auto base_share = *distributed / distribution_recipients.size();
+    const auto remainder = static_cast<std::size_t>(*distributed % distribution_recipients.size());
     std::size_t output_index = 0;
-    for (std::size_t i = 0; i < validator_set.size(); ++i) {
+    for (std::size_t i = 0; i < distribution_recipients.size(); ++i) {
         const auto expected_share = base_share + (i < remainder ? 1 : 0);
         if (expected_share == 0) continue;
         if (output_index >= tx.outputs.size()) {
@@ -145,7 +158,7 @@ bool validateFeePoolDistributionShape(
             return false;
         }
         const auto& output = tx.outputs[output_index++];
-        if (output.receiver_address != validator_set[i] ||
+        if (output.receiver_address != distribution_recipients[i] ||
             output.prime != tx.inputs.front().prime ||
             output.amount.denominator != 1 ||
             output.amount.numerator != expected_share) {
@@ -565,6 +578,7 @@ bool SequentialNode::load(std::string& error) {
     validator_epoch_ = 0;
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
+    fee_distribution_participants_.clear();
     loaded_from_snapshot_ = false;
 
     const auto latest = store_.latest(error);
@@ -662,6 +676,14 @@ bool SequentialNode::load(std::string& error) {
                 !applyCompositeLedger(*decoded, error)) {
                 return false;
             }
+            const bool reset_fee_participants =
+                hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
+                hasValidatorEpochTransition(decoded->validator_epoch);
+            if (reset_fee_participants) {
+                fee_distribution_participants_.clear();
+            } else {
+                noteValidatorParticipation(*decoded);
+            }
             if (hasValidatorEpochTransition(decoded->validator_epoch)) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
                 validator_epoch_ = decoded->validator_epoch.epoch;
@@ -701,6 +723,14 @@ bool SequentialNode::load(std::string& error) {
                 !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
                 !applyPrimeLedger(*decoded, error)) {
                 return false;
+            }
+            const bool reset_fee_participants =
+                hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
+                hasValidatorEpochTransition(decoded->validator_epoch);
+            if (reset_fee_participants) {
+                fee_distribution_participants_.clear();
+            } else {
+                noteValidatorParticipation(*decoded);
             }
             if (hasValidatorEpochTransition(decoded->validator_epoch)) {
                 validator_set_ = decoded->validator_epoch.next_validator_set;
@@ -747,6 +777,7 @@ bool SequentialNode::initializeGenesis(const std::vector<Address>& validator_set
     validator_epoch_ = 0;
     transfer_fee_micro_units_ = kDefaultTransferFeeMicroUnits;
     validator_min_reserve_micro_units_ = kDefaultValidatorMinReserveMicroUnits;
+    fee_distribution_participants_.clear();
     if (!applyPrimeLedger(record, error)) {
         return false;
     }
@@ -856,6 +887,11 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
     const auto fee_before = transfer_fee_micro_units_;
+    const auto reserve_before = validator_min_reserve_micro_units_;
+    const auto fee_participants_before = fee_distribution_participants_;
+    const bool reset_fee_participants =
+        hasFeePoolDistributionV1(record.transactions, validatorFeePoolAddress()) ||
+        hasValidatorEpochTransition(record.validator_epoch);
     if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
@@ -863,6 +899,8 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         transfer_fee_micro_units_ = fee_before;
+        validator_min_reserve_micro_units_ = reserve_before;
+        fee_distribution_participants_ = fee_participants_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -872,11 +910,18 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         transfer_fee_micro_units_ = fee_before;
+        validator_min_reserve_micro_units_ = reserve_before;
+        fee_distribution_participants_ = fee_participants_before;
         return false;
     }
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
+    if (reset_fee_participants) {
+        fee_distribution_participants_.clear();
+    } else {
+        noteValidatorParticipation(record);
+    }
     if (hasValidatorEpochTransition(record.validator_epoch)) {
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
@@ -899,6 +944,11 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
     const auto fee_before = transfer_fee_micro_units_;
+    const auto reserve_before = validator_min_reserve_micro_units_;
+    const auto fee_participants_before = fee_distribution_participants_;
+    const bool reset_fee_participants =
+        hasFeePoolDistributionV1(record.transactions, validatorFeePoolAddress()) ||
+        hasValidatorEpochTransition(record.validator_epoch);
     if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
         !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
@@ -906,6 +956,8 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         transfer_fee_micro_units_ = fee_before;
+        validator_min_reserve_micro_units_ = reserve_before;
+        fee_distribution_participants_ = fee_participants_before;
         return false;
     }
     const auto stored = storage::makeStoredRecord(record);
@@ -915,11 +967,18 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
         account_nonces_ = nonces_before;
         pending_composite_providers_ = pending_before;
         transfer_fee_micro_units_ = fee_before;
+        validator_min_reserve_micro_units_ = reserve_before;
+        fee_distribution_participants_ = fee_participants_before;
         return false;
     }
     status_.height = record.height;
     status_.frontier_integer = record.integer;
     status_.latest_record_hash = stored.record_hash;
+    if (reset_fee_participants) {
+        fee_distribution_participants_.clear();
+    } else {
+        noteValidatorParticipation(record);
+    }
     if (hasValidatorEpochTransition(record.validator_epoch)) {
         validator_set_ = record.validator_epoch.next_validator_set;
         validator_epoch_ = record.validator_epoch.epoch;
@@ -947,6 +1006,54 @@ bool SequentialNode::applyEconomicPolicy(
     return true;
 }
 
+std::vector<Address> SequentialNode::feeDistributionRecipients() const {
+    if (validator_set_.empty()) return {};
+    if (fee_distribution_participants_.empty()) return validator_set_;
+
+    std::vector<Address> recipients;
+    recipients.reserve(validator_set_.size());
+    for (const auto& validator : validator_set_) {
+        if (std::binary_search(
+                fee_distribution_participants_.begin(),
+                fee_distribution_participants_.end(),
+                validator)) {
+            recipients.push_back(validator);
+        }
+    }
+    return recipients.empty() ? validator_set_ : recipients;
+}
+
+void SequentialNode::noteValidatorParticipation(const protocol::CompositeRecordV0& record) {
+    for (const auto& vote : record.commit_phase.votes) {
+        if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
+            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+        }
+    }
+    for (const auto& vote : record.finalized_by.votes) {
+        if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
+            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+        }
+    }
+    for (const auto& vote : record.finalized_by.round_changes) {
+        if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
+            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+        }
+    }
+}
+
+void SequentialNode::noteValidatorParticipation(const protocol::PrimeRecordV0& record) {
+    for (const auto& vote : record.finalized_by.votes) {
+        if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
+            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+        }
+    }
+    for (const auto& vote : record.finalized_by.round_changes) {
+        if (crypto::isProtocolSignatureAddress(vote.validator_address)) {
+            addSortedUnique(fee_distribution_participants_, vote.validator_address);
+        }
+    }
+}
+
 bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     std::map<PrimeValue, std::uint64_t> reconstructed_supply;
     for (const auto& entry : snapshot.balances) {
@@ -963,6 +1070,13 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
             snapshot.pending_composite_providers.end(), protocol::isProtocolAddress) ||
         !std::all_of(snapshot.validator_set.begin(), snapshot.validator_set.end(),
             crypto::isProtocolSignatureAddress) ||
+        !std::all_of(snapshot.fee_distribution_participants.begin(),
+            snapshot.fee_distribution_participants.end(), crypto::isProtocolSignatureAddress) ||
+        !std::is_sorted(snapshot.fee_distribution_participants.begin(),
+            snapshot.fee_distribution_participants.end()) ||
+        std::adjacent_find(snapshot.fee_distribution_participants.begin(),
+            snapshot.fee_distribution_participants.end()) !=
+                snapshot.fee_distribution_participants.end() ||
         !std::all_of(snapshot.account_nonces.begin(), snapshot.account_nonces.end(),
             [](const auto& entry) { return protocol::isProtocolAddress(entry.first); }) ||
         snapshot.transfer_fee_micro_units == 0 ||
@@ -983,6 +1097,7 @@ bool SequentialNode::restoreSnapshot(const storage::ReplaySnapshot& snapshot) {
     validator_epoch_ = snapshot.validator_epoch;
     transfer_fee_micro_units_ = snapshot.transfer_fee_micro_units;
     validator_min_reserve_micro_units_ = snapshot.validator_min_reserve_micro_units;
+    fee_distribution_participants_ = snapshot.fee_distribution_participants;
     return true;
 }
 
@@ -1002,6 +1117,7 @@ void SequentialNode::saveSnapshot(bool force) const {
     snapshot.validator_epoch = validator_epoch_;
     snapshot.transfer_fee_micro_units = transfer_fee_micro_units_;
     snapshot.validator_min_reserve_micro_units = validator_min_reserve_micro_units_;
+    snapshot.fee_distribution_participants = fee_distribution_participants_;
     std::string ignored;
     snapshot_store_.replace(snapshot, ignored);
 }
@@ -1081,7 +1197,7 @@ bool SequentialNode::applyTransactions(
             isFeePoolDistributionV1(tx, active_fee_pool_address);
         if (fee_pool_distribution &&
             !validateFeePoolDistributionShape(
-                tx, active_fee_pool_address, validator_set_,
+                tx, active_fee_pool_address, feeDistributionRecipients(),
                 balanceMicroUnits(active_fee_pool_address, tx.inputs.front().prime),
                 error)) {
             return false;

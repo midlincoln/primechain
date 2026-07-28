@@ -269,6 +269,22 @@ payment to active signers is simpler and less cartel-prone.
 
 Validators who do not sign should not receive that record's validator reward.
 
+Current launch-testnet fee distribution is narrower than the future reward
+model above. Transaction fees accumulate in the active epoch's validator fee
+pool. A distribution transaction may spend the full selected fee-pool asset
+balance only to validators who have participated since the previous distribution
+or validator-epoch transition. Participation is derived from signed
+finalization, commit-phase, and round-change votes embedded in finalized
+records. If no participation has been observed for the interval, replay falls
+back to the full active validator set so old or empty intervals remain
+recoverable.
+
+This is reward eligibility, not punishment. A validator that misses signatures
+loses fee-distribution eligibility for that interval, but its reserve is not
+forfeited by current consensus rules. Reserve forfeiture should be added only
+after explicit evidence records exist for behavior such as double-signing,
+invalid epoch/policy votes, or other objectively replayable misbehavior.
+
 ## Transfer And Wallet Prerequisite
 
 Reserve governance should not be built on plaintext operational wallets.

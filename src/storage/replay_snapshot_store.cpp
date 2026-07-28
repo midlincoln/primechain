@@ -14,7 +14,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3150414e53434350ull; // "PCCSNAP1"
-constexpr std::uint64_t kVersion = 3;
+constexpr std::uint64_t kVersion = 4;
 constexpr std::uint64_t kMaxEntries = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxAddressBytes = 64ull * 1024ull;
 constexpr std::uint64_t kMaxSnapshotBytes = 512ull * 1024ull * 1024ull;
@@ -82,6 +82,8 @@ std::vector<std::uint8_t> encode(const ReplaySnapshot& value) {
     put64(out, value.validator_epoch);
     put64(out, value.transfer_fee_micro_units);
     put64(out, value.validator_min_reserve_micro_units);
+    put64(out, value.fee_distribution_participants.size());
+    for (const auto& address : value.fee_distribution_participants) putAddress(out, address);
     const auto checksum = crypto::sha3_256(out);
     out.insert(out.end(), checksum.begin(), checksum.end());
     return out;
@@ -109,7 +111,7 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
     Reader reader(bytes, payload_size);
     ReplaySnapshot value;
     std::uint64_t magic = 0, version = 0, count = 0;
-    if (!reader.u64(magic) || magic != kMagic || !reader.u64(version) || (version != 1 && version != kVersion) ||
+    if (!reader.u64(magic) || magic != kMagic || !reader.u64(version) || version < 1 || version > kVersion ||
         !reader.u64(value.height) || !reader.u64(value.frontier_integer) || !reader.hash(value.record_hash)) {
         error = "invalid replay snapshot header"; return false;
     }
@@ -164,6 +166,16 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
         }
     } else {
         value.validator_min_reserve_micro_units = 5'000'000;
+    }
+    if (version >= 4) {
+        if (!reader.count(count) || count > 16) {
+            error = "invalid replay snapshot fee participant count"; return false;
+        }
+        for (std::uint64_t i = 0; i < count; ++i) {
+            Address address;
+            if (!reader.address(address)) { error = "invalid replay snapshot fee participant"; return false; }
+            value.fee_distribution_participants.push_back(std::move(address));
+        }
     }
     if (value.transfer_fee_micro_units == 0 ||
         value.validator_min_reserve_micro_units == 0 || !reader.done()) {

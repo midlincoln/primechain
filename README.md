@@ -140,6 +140,28 @@ The tested one-validator-to-three-validator launch procedure is documented in
 systemd unit files. Use `./scripts/primechain-ops doctor-network` from a desktop
 or operator host to verify all validators agree on frontier, hash, peers, and endpoints.
 
+## Validator Incentives And Threat Model
+
+Validators lock reserves before admission. The reserve creates economic
+commitment, and validator fee distributions create continuing upside for honest
+participation. Current launch-testnet behavior is deliberately narrower than a
+full proof-of-stake security claim:
+
+- validator admission is controlled by active-validator governance,
+- validator reserve locks and the active minimum reserve are replay-derived
+  chain state,
+- validator actions are ML-DSA-signed and replay-verifiable,
+- validator fee-pool distributions are deterministic and reward eligible
+  participating validators,
+- downtime and missed signatures are reputation/removal evidence, not automatic
+  reserve forfeiture.
+
+Planned production work includes explicit double-sign evidence, validator
+removal/disable records, unbonding delays, and reserve forfeiture for
+cryptographically provable misbehavior. Until those rules are implemented and
+tested, Primechain should be described as a controlled reserve-backed validator
+network, not permissionless or fully Byzantine-secure mainnet consensus.
+
 `add-mine-job` records the target frontier, `run-jobs` syncs before mining,
 runs the authenticated frontier miner only when the target is still ahead, then
 syncs again and records pending/complete/failed state. `mine-job` remains a

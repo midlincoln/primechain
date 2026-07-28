@@ -22,6 +22,7 @@ struct ReplaySnapshot {
     std::uint64_t validator_epoch{0};
     std::uint64_t transfer_fee_micro_units{1};
     std::uint64_t validator_min_reserve_micro_units{5'000'000};
+    std::vector<Address> fee_distribution_participants;
 };
 
 class ReplaySnapshotStore {

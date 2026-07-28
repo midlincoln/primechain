@@ -12,7 +12,7 @@ Primechain has a working controlled launch-testnet with:
 - ML-DSA-65 signed miner, wallet, and validator identities,
 - signed prime submissions and signed composite commit/reveal,
 - transaction submission, mempool sync, wallet history, and address/tx lookup,
-- validator fee pools and deterministic fee distribution,
+- validator fee pools and participation-aware deterministic fee distribution,
 - operator checks including `release-check`, `version-network`, `doctor-network`, `mempool-network`, `chain-doctor`, and `launch-summary`,
 - public GitHub source and launch evidence tooling.
 
@@ -126,6 +126,8 @@ Deliverables:
   - `mainnet-candidate-1`,
   - `genesis-candidate-1`.
 - Decide high validator reserve/admission requirement.
+- Document the reserve-backed incentive model and be explicit that reserve
+  forfeiture/slashing is future work, not current consensus behavior.
 - Decide genesis ceremony and exact genesis validator set.
 - Decide bootstrap IPs or DNS seed names.
 - Freeze protocol/network version for the candidate.

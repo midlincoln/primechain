@@ -52,6 +52,7 @@ public:
     std::uint64_t transferFeeMicroUnits() const { return transfer_fee_micro_units_; }
     std::uint64_t validatorMinReserveMicroUnits() const { return validator_min_reserve_micro_units_; }
     Address validatorFeePoolAddress() const;
+    std::vector<Address> feeDistributionRecipients() const;
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:
@@ -70,6 +71,8 @@ private:
         const protocol::EconomicPolicyUpdateV1& update,
         PrimeValue record_integer,
         std::string& error);
+    void noteValidatorParticipation(const protocol::CompositeRecordV0& record);
+    void noteValidatorParticipation(const protocol::PrimeRecordV0& record);
     bool restoreSnapshot(const storage::ReplaySnapshot& snapshot);
     void saveSnapshot(bool force = false) const;
     void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
@@ -86,6 +89,7 @@ private:
     std::uint64_t validator_epoch_{0};
     std::uint64_t transfer_fee_micro_units_{kDefaultTransferFeeMicroUnits};
     std::uint64_t validator_min_reserve_micro_units_{kDefaultValidatorMinReserveMicroUnits};
+    std::vector<Address> fee_distribution_participants_;
     bool loaded_from_snapshot_{false};
 };
 

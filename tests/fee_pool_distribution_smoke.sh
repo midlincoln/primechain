@@ -173,7 +173,8 @@ fi
 grep -q '^TX_NOT_FOUND 0000000000000000000000000000000000000000000000000000000000000000 ' "$base/tx-missing.out"
 
 $client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-before.out"
-grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 last_distribution_integer=0 next_distribution_integer=1002 due=0 .* pool_total_micro_units=2 distributions=0$' "$base/distribution-status-before.out"
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=4 last_distribution_integer=0 next_distribution_integer=1002 due=0 .* pool_total_micro_units=2 distributions=0 eligible_recipients=3$' "$base/distribution-status-before.out"
+[ "$(grep -c '^FEE_DISTRIBUTION_RECIPIENT address=' "$base/distribution-status-before.out")" -eq 3 ]
 grep -q '^FEE_POOL_HOLDING epoch=0 prime=3 micro_units=2$' "$base/distribution-status-before.out"
 
 $send distribute-fee-pool 127.0.0.1 19188 0 3 2 1 "$a" "$b" "$c" > "$base/distribute.out"
@@ -187,7 +188,8 @@ $client fee-pool "$base/work/data/chain.dat" > "$base/pool-after.out"
 grep -q '^VALIDATOR_FEE_POOL .* holdings=0 total_micro_units=0$' "$base/pool-after.out"
 
 $client fee-distribution-status "$base/work/data/chain.dat" 1000 > "$base/distribution-status-after.out"
-grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=5 last_distribution_integer=5 next_distribution_integer=1005 due=0 .* pool_total_micro_units=0 distributions=1$' "$base/distribution-status-after.out"
+grep -q '^FEE_DISTRIBUTION_STATUS .* interval_records=1000 current_frontier=5 last_distribution_integer=5 next_distribution_integer=1005 due=0 .* pool_total_micro_units=0 distributions=1 eligible_recipients=3$' "$base/distribution-status-after.out"
+[ "$(grep -c '^FEE_DISTRIBUTION_RECIPIENT address=' "$base/distribution-status-after.out")" -eq 3 ]
 grep -q '^LAST_FEE_DISTRIBUTION integer=5 epoch=0 prime=3 micro_units=2$' "$base/distribution-status-after.out"
 grep -q '^FEE_DISTRIBUTION_EVENT integer=5 epoch=0 prime=3 micro_units=2 recipients=2$' "$base/distribution-status-after.out"
 

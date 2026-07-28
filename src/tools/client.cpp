@@ -2337,6 +2337,7 @@ int feeDistributionStatus(int argc, char** argv) {
 
     const auto pool_address = node.validatorFeePoolAddress();
     const auto holdings = node.holdingsForAddress(pool_address);
+    const auto eligible_recipients = node.feeDistributionRecipients();
     std::uint64_t pool_total = 0;
     for (const auto& holding : holdings) pool_total += holding.second;
 
@@ -2350,12 +2351,16 @@ int feeDistributionStatus(int argc, char** argv) {
               << " pool_address=" << pool_address
               << " pool_holdings=" << holdings.size()
               << " pool_total_micro_units=" << pool_total
-              << " distributions=" << distribution_count << "\n";
+              << " distributions=" << distribution_count
+              << " eligible_recipients=" << eligible_recipients.size() << "\n";
     if (last_distribution_integer != 0) {
         std::cout << "LAST_FEE_DISTRIBUTION integer=" << last_distribution_integer
                   << " epoch=" << last_distribution_epoch
                   << " prime=" << last_distribution_prime
                   << " micro_units=" << last_distribution_micro_units << "\n";
+    }
+    for (const auto& recipient : eligible_recipients) {
+        std::cout << "FEE_DISTRIBUTION_RECIPIENT address=" << recipient << "\n";
     }
     for (const auto& holding : holdings) {
         std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
