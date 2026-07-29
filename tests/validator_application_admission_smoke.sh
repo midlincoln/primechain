@@ -88,12 +88,26 @@ next_set=$(printf '%s
 epoch_vote=$($commitment sign-epoch "$base/validator.wallet" "$previous" "$record_integer" 1 $next_set)
 $client query 127.0.0.1 19191 $epoch_vote > "$base/epoch.out"
 grep -q '^EPOCH_VOTE_ACCEPTED 1 votes=1$' "$base/epoch.out"
+cp "$base/node.dat.epochs" "$base/stale-epochs"
 
 $client add-mine-job "$base/work" --target "$record_integer" > "$base/add-admission.out"
 $client run-jobs "$base/work" > "$base/mine-admission.out" 2>&1
 grep -q "^JOB_COMPLETE target=$record_integer frontier=$record_integer$" "$base/mine-admission.out"
 $client query 127.0.0.1 19191 GET_VALIDATORS > "$base/validators.out"
 grep -q "^VALIDATORS 2 " "$base/validators.out"
+
+kill "$(cat "$base/node.pid")" 2>/dev/null || true
+wait "$(cat "$base/node.pid")" 2>/dev/null || true
+cp "$base/stale-epochs" "$base/node.dat.epochs"
+$server 19191 "$base/node.dat" \
+    --validator-set "$validator" \
+    --validator-identity "$base/validator.wallet" \
+    --finalization-timeout-ms 500 \
+    > "$base/node-stale-epoch-restart.log" 2>&1 &
+echo $! > "$base/node.pid"
+sleep 0.5
+$client status 127.0.0.1 19191 > "$base/status-stale-epoch-restart.out"
+grep -q " $record_integer " "$base/status-stale-epoch-restart.out"
 
 $client sync 127.0.0.1 19191 2 "$record_integer" "$base/node2.dat" > "$base/sync-node2.out"
 $server 19192 "$base/node2.dat" \
@@ -118,6 +132,7 @@ $client query 127.0.0.1 19191 $commit_42 > "$base/commit-42.out"
 grep -q "^COMMIT_ACCEPTED $first_post_admission_composite " "$base/commit-42.out"
 $client query 127.0.0.1 19191 CLOSE_COMMIT_PHASE "$first_post_admission_composite" > "$base/close-42-a.out"
 grep -q "^PHASE_VOTE_ACCEPTED $first_post_admission_composite " "$base/close-42-a.out"
+cp "$base/node.dat.phases" "$base/stale-phases"
 $client query 127.0.0.1 19191 $commit_42 > "$base/commit-42-duplicate-closing.out"
 grep -q "^COMMIT_DUPLICATE $first_post_admission_composite " "$base/commit-42-duplicate-closing.out"
 
@@ -127,6 +142,19 @@ post_admission_target=$first_post_admission_composite
 $client add-mine-job "$base/work" --target "$post_admission_target" > "$base/add-post-admission.out"
 $client run-jobs "$base/work" > "$base/mine-post-admission.out" 2>&1
 grep -q "^JOB_COMPLETE target=$post_admission_target frontier=$post_admission_target$" "$base/mine-post-admission.out"
+
+kill "$(cat "$base/node.pid")" 2>/dev/null || true
+wait "$(cat "$base/node.pid")" 2>/dev/null || true
+cp "$base/stale-phases" "$base/node.dat.phases"
+$server 19191 "$base/node.dat" \
+    --validator-set "$validator" \
+    --validator-identity "$base/validator.wallet" \
+    --finalization-timeout-ms 500 \
+    > "$base/node-stale-phase-restart.log" 2>&1 &
+echo $! > "$base/node.pid"
+sleep 0.5
+$client status 127.0.0.1 19191 > "$base/status-stale-phase-restart.out"
+grep -q " $post_admission_target " "$base/status-stale-phase-restart.out"
 
 $client sync-peer "$base/work" > "$base/sync-final.out"
 $client inspect "$base/work/data/chain.dat" > "$base/inspect-final-work.out"

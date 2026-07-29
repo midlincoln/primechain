@@ -4026,7 +4026,12 @@ private:
         if (!node.load(error)) return false;
         const primechain::PrimeValue target =
             (node.status().has_genesis ? node.status().frontier_integer : 2) + 1;
+        bool pruned = false;
         for (const auto& vote : stored) {
+            if (vote.integer < target) {
+                pruned = true;
+                continue;
+            }
             const auto expected_snapshot = commitmentSnapshotHash(target, vote.commit_round);
             if (vote.integer != target || vote.snapshot_hash != expected_snapshot ||
                 std::find(validator_set_.begin(), validator_set_.end(), vote.validator_address) ==
@@ -4052,6 +4057,7 @@ private:
                 return false;
             }
         }
+        if (pruned && !persistPhaseVotes(error)) return false;
         return true;
     }
 
@@ -4510,7 +4516,12 @@ private:
         if (stored.empty()) return true;
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) return false;
+        bool pruned = false;
         for (const auto& record : stored) {
+            if (record.record_integer < node.status().frontier_integer + 1) {
+                pruned = true;
+                continue;
+            }
             if (record.previous_record_hash != node.status().latest_record_hash ||
                 record.record_integer != node.status().frontier_integer + 1 ||
                 record.epoch != node.validatorEpoch() + 1 ||
@@ -4549,6 +4560,7 @@ private:
                 return false;
             }
         }
+        if (pruned && !persistEpochVotes(error)) return false;
         return true;
     }
 
