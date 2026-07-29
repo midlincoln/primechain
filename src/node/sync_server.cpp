@@ -398,6 +398,8 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("CLOSE_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE_BUNDLE ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE_BUNDLE_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE ", 0) == 0 ||
            line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_VALIDATOR_ENDPOINT ", 0) == 0 ||
@@ -883,6 +885,20 @@ std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port, std
 }
 
 
+std::string commitmentWireLine(const primechain::storage::StoredCommitment& commitment);
+
+std::string commitmentWireLine(
+    primechain::PrimeValue integer,
+    const primechain::protocol::CommitCertificateEntryV1& commitment);
+
+bool parseCommitmentWireLine(
+    const std::string& line,
+    primechain::PrimeValue integer,
+    std::uint64_t commit_round,
+    primechain::storage::StoredCommitment& commitment,
+    std::string& error);
+
+
 std::vector<primechain::storage::StoredCommitment> requestCommitments(
     const std::string& host,
     int port,
@@ -920,40 +936,9 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
         if (*line == "END_COMMITMENTS") {
             break;
         }
-        std::istringstream in(*line);
-        std::string entry_tag;
-        std::string hash_hex;
-        std::string public_key_hex;
-        std::string signature_hex;
         primechain::storage::StoredCommitment commitment;
-        in >> entry_tag >> commitment.integer >> hash_hex >> commitment.provider_address
-           >> public_key_hex >> signature_hex;
-        const auto hash = parseHash(hash_hex);
-        if (!in || entry_tag != "COMMITMENT" || commitment.integer != integer ||
-            !hash.has_value()) {
-            error = "invalid peer commitment entry";
-            return {};
-        }
-        commitment.commitment_hash = *hash;
-        if (public_key_hex != "-" || signature_hex != "-") {
-            commitment.public_key = hexToBytes(public_key_hex);
-            commitment.signature = hexToBytes(signature_hex);
-            std::string verification_error;
-            if (commitment.provider_address !=
-                    primechain::crypto::addressFromProtocolPublicKey(commitment.public_key) ||
-                !primechain::crypto::verifyProtocolMessageSignature(
-                    commitment.public_key,
-                    primechain::crypto::compositeCommitSigningPayload(
-                        commitment.integer,
-                        commitment.commitment_hash,
-                        commitment.provider_address),
-                    commitment.signature,
-                    verification_error)) {
-                error = "invalid signed peer commitment";
-                return {};
-            }
-        } else if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
-            error = "invalid legacy peer commitment address";
+        if (!parseCommitmentWireLine(*line, integer, 1, commitment, error)) {
+            error = "invalid peer commitment entry: " + error;
             return {};
         }
         commitments.push_back(std::move(commitment));
@@ -967,6 +952,70 @@ std::vector<primechain::storage::StoredCommitment> requestCommitments(
         return {};
     }
     return commitments;
+}
+
+std::string commitmentWireLine(const primechain::storage::StoredCommitment& commitment) {
+    return "COMMITMENT " + std::to_string(commitment.integer) + " "
+        + primechain::crypto::toHex(commitment.commitment_hash) + " "
+        + commitment.provider_address + " "
+        + (commitment.public_key.empty() ? "-" : bytesToHex(commitment.public_key)) + " "
+        + (commitment.signature.empty() ? "-" : bytesToHex(commitment.signature));
+}
+
+std::string commitmentWireLine(
+    primechain::PrimeValue integer,
+    const primechain::protocol::CommitCertificateEntryV1& commitment) {
+    return "COMMITMENT " + std::to_string(integer) + " "
+        + primechain::crypto::toHex(commitment.commitment_hash) + " "
+        + commitment.provider_address + " "
+        + (commitment.public_key.empty() ? "-" : bytesToHex(commitment.public_key)) + " "
+        + (commitment.signature.empty() ? "-" : bytesToHex(commitment.signature));
+}
+
+bool parseCommitmentWireLine(
+    const std::string& line,
+    primechain::PrimeValue integer,
+    std::uint64_t commit_round,
+    primechain::storage::StoredCommitment& commitment,
+    std::string& error) {
+    std::istringstream in(line);
+    std::string entry_tag;
+    std::string hash_hex;
+    std::string public_key_hex;
+    std::string signature_hex;
+    std::string extra;
+    in >> entry_tag >> commitment.integer >> hash_hex >> commitment.provider_address
+       >> public_key_hex >> signature_hex;
+    const auto hash = parseHash(hash_hex);
+    if (!in || entry_tag != "COMMITMENT" || commitment.integer != integer ||
+        !hash.has_value() || (in >> extra)) {
+        error = "invalid commitment entry";
+        return false;
+    }
+    commitment.commit_round = commit_round;
+    commitment.commitment_hash = *hash;
+    if (public_key_hex != "-" || signature_hex != "-") {
+        commitment.public_key = hexToBytes(public_key_hex);
+        commitment.signature = hexToBytes(signature_hex);
+        std::string verification_error;
+        if (commitment.provider_address !=
+                primechain::crypto::addressFromProtocolPublicKey(commitment.public_key) ||
+            !primechain::crypto::verifyProtocolMessageSignature(
+                commitment.public_key,
+                primechain::crypto::compositeCommitSigningPayload(
+                    commitment.integer,
+                    commitment.commitment_hash,
+                    commitment.provider_address),
+                commitment.signature,
+                verification_error)) {
+            error = "invalid signed commitment entry";
+            return false;
+        }
+    } else if (!primechain::protocol::isDevelopmentAddress(commitment.provider_address)) {
+        error = "invalid legacy commitment address";
+        return false;
+    }
+    return true;
 }
 
 std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
@@ -996,7 +1045,7 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
     std::uint64_t expected_count = 0;
     header_in >> tag >> response_integer >> expected_count;
     if (!header_in || tag != "PHASE_VOTES" || response_integer != integer ||
-        expected_count > 3) {
+        expected_count > kMaxKnownPeers) {
         error = "invalid peer phase vote header";
         return {};
     }
@@ -1758,11 +1807,13 @@ public:
                 closeCommitPhase(fd, *line);
                 continue;
             }
-            if (line->rfind("SUBMIT_PHASE_VOTE ", 0) == 0) {
+            if (line->rfind("SUBMIT_PHASE_VOTE ", 0) == 0 ||
+                line->rfind("SUBMIT_PHASE_VOTE_BUNDLE ", 0) == 0) {
                 submitPhaseVote(fd, *line, true);
                 continue;
             }
-            if (line->rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0) {
+            if (line->rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0 ||
+                line->rfind("SUBMIT_PHASE_VOTE_BUNDLE_PEER ", 0) == 0) {
                 submitPhaseVote(fd, *line, false);
                 continue;
             }
@@ -4088,19 +4139,30 @@ private:
     bool submitPhaseVoteToPeer(
         const PeerEndpoint& peer,
         const primechain::storage::CommitPhaseVote& vote,
+        const std::vector<primechain::protocol::CommitCertificateEntryV1>& commitments,
         std::string& error) const {
         auto socket = connectToServer(peer.host, peer.port);
         if (!socket.has_value()) {
             error = "could not connect to peer";
             return false;
         }
-        std::ostringstream command;
-        command << "SUBMIT_PHASE_VOTE_PEER " << vote.integer << " " << vote.commit_round << " "
-                << primechain::crypto::toHex(vote.snapshot_hash) << " "
-                << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
-                << bytesToHex(vote.signature) << "\n";
-        if (!writeCommand(socket->fd(), command.str())) {
+        std::ostringstream header;
+        header << "SUBMIT_PHASE_VOTE_BUNDLE_PEER " << vote.integer << " " << vote.commit_round << " "
+               << primechain::crypto::toHex(vote.snapshot_hash) << " "
+               << vote.validator_address << " " << bytesToHex(vote.public_key) << " "
+               << bytesToHex(vote.signature) << " " << commitments.size() << "\n";
+        if (!writeCommand(socket->fd(), header.str())) {
             error = "could not submit phase vote";
+            return false;
+        }
+        for (const auto& commitment : commitments) {
+            if (!writeCommand(socket->fd(), commitmentWireLine(vote.integer, commitment) + "\n")) {
+                error = "could not submit phase vote commitment bundle";
+                return false;
+            }
+        }
+        if (!writeCommand(socket->fd(), "END_PHASE_VOTE_BUNDLE\n")) {
+            error = "could not submit phase vote commitment bundle terminator";
             return false;
         }
         shutdown(socket->fd(), SHUT_WR);
@@ -4137,13 +4199,54 @@ private:
     }
 
     void propagatePhaseVote(const primechain::storage::CommitPhaseVote& vote) const {
+        const auto bundled_commitments = certificateCommitments(vote.integer, vote.commit_round);
         for (const auto& peer : activeKnownPeers()) {
             std::string error;
-            if (!submitPhaseVoteToPeer(peer, vote, error)) {
+            if (!submitPhaseVoteToPeer(peer, vote, bundled_commitments, error)) {
                 std::cerr << "phase vote propagation warning to " << peer.host << ":"
                           << peer.port << ": " << error << "\n";
             }
         }
+    }
+
+    bool importBundledCommitmentsForPhaseVote(
+        const primechain::storage::CommitPhaseVote& vote,
+        const std::vector<primechain::storage::StoredCommitment>& bundled_commitments,
+        std::string& error) {
+        if (bundled_commitments.empty() || phaseFrozen(vote.integer, vote.commit_round)) {
+            return true;
+        }
+        bool changed = false;
+        std::vector<std::tuple<primechain::PrimeValue, std::uint64_t, std::string>> inserted_keys;
+        for (const auto& commitment : bundled_commitments) {
+            if (commitment.integer != vote.integer || commitment.commit_round != vote.commit_round) {
+                error = "phase vote commitment bundle target mismatch";
+                return false;
+            }
+            const auto key = std::make_tuple(
+                commitment.integer, commitment.commit_round, commitment.provider_address);
+            const auto existing = commitments_.find(key);
+            if (existing != commitments_.end()) {
+                if (existing->second.commitment_hash != commitment.commitment_hash ||
+                    existing->second.public_key != commitment.public_key) {
+                    error = "phase vote commitment bundle conflicts with local commitment";
+                    return false;
+                }
+                continue;
+            }
+            if (commitments_.size() >= kMaxCompositeCommitments) {
+                error = "commitment pool full during phase vote bundle import";
+                return false;
+            }
+            commitments_[key] = commitment;
+            changed = true;
+            inserted_keys.push_back(key);
+        }
+        if (changed && !persistCommitments(error)) {
+            for (const auto& key : inserted_keys) commitments_.erase(key);
+            return false;
+        }
+        return true;
     }
 
     bool acceptPhaseVote(
@@ -4326,6 +4429,7 @@ private:
         std::istringstream in(line);
         std::string command, maybe_round_or_snapshot, snapshot_hex, address, public_key_hex, signature_hex, extra;
         primechain::PrimeValue integer = 0;
+        std::uint64_t bundled_commitment_count = 0;
         in >> command >> integer >> maybe_round_or_snapshot;
         auto snapshot = parseHash(maybe_round_or_snapshot);
         std::uint64_t commit_round = activeCommitPhaseRound(integer);
@@ -4337,8 +4441,15 @@ private:
             in >> snapshot_hex >> address >> public_key_hex >> signature_hex;
             snapshot = parseHash(snapshot_hex);
         }
-        if (!in || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER") ||
-            !snapshot.has_value() || (in >> extra)) {
+        const bool bundled_command = command == "SUBMIT_PHASE_VOTE_BUNDLE" ||
+            command == "SUBMIT_PHASE_VOTE_BUNDLE_PEER";
+        if (bundled_command) {
+            in >> bundled_commitment_count;
+        }
+        if (!in || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER" &&
+                !bundled_command) ||
+            !snapshot.has_value() || bundled_commitment_count > kMaxCompositeCommitments ||
+            (in >> extra)) {
             writeAll(fd, "ERROR invalid SUBMIT_PHASE_VOTE\n");
             return;
         }
@@ -4349,8 +4460,35 @@ private:
         vote.validator_address = address;
         vote.public_key = hexToBytes(public_key_hex);
         vote.signature = hexToBytes(signature_hex);
-        const bool duplicate = phase_votes_.find(std::make_tuple(integer, vote.commit_round, address)) != phase_votes_.end();
+        std::vector<primechain::storage::StoredCommitment> bundled_commitments;
         std::string error;
+        if (bundled_command) {
+            bundled_commitments.reserve(static_cast<std::size_t>(bundled_commitment_count));
+            for (std::uint64_t i = 0; i < bundled_commitment_count; ++i) {
+                const auto commitment_line = readLine(fd);
+                if (!commitment_line.has_value()) {
+                    writeAll(fd, "ERROR truncated phase vote commitment bundle\n");
+                    return;
+                }
+                primechain::storage::StoredCommitment commitment;
+                if (!parseCommitmentWireLine(*commitment_line, vote.integer, vote.commit_round,
+                        commitment, error)) {
+                    writeAll(fd, "ERROR invalid phase vote commitment bundle: " + error + "\n");
+                    return;
+                }
+                bundled_commitments.push_back(std::move(commitment));
+            }
+            const auto end_line = readLine(fd);
+            if (!end_line.has_value() || *end_line != "END_PHASE_VOTE_BUNDLE") {
+                writeAll(fd, "ERROR invalid phase vote commitment bundle terminator\n");
+                return;
+            }
+            if (!importBundledCommitmentsForPhaseVote(vote, bundled_commitments, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+        }
+        const bool duplicate = phase_votes_.find(std::make_tuple(integer, vote.commit_round, address)) != phase_votes_.end();
         if (!acceptPhaseVote(vote, error, propagate)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
@@ -5519,11 +5657,7 @@ private:
                 continue;
             }
             const auto& commitment = entry.second;
-            writeCommand(fd, "COMMITMENT " + std::to_string(integer) + " "
-                + primechain::crypto::toHex(commitment.commitment_hash) + " "
-                + commitment.provider_address + " "
-                + (commitment.public_key.empty() ? "-" : bytesToHex(commitment.public_key)) + " "
-                + (commitment.signature.empty() ? "-" : bytesToHex(commitment.signature)) + "\n");
+            writeCommand(fd, commitmentWireLine(commitment) + "\n");
         }
         writeAll(fd, "END_COMMITMENTS\n");
     }
