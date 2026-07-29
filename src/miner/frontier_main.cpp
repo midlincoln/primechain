@@ -895,6 +895,7 @@ int main(int argc, char** argv) {
         std::string request;
         std::optional<std::string> commit_request;
         bool reused_pending_composite = false;
+        bool skip_commit_request = false;
         if (primechain::math::isPrime(next)) {
             const auto proof = primechain::math::makePrattProof(next, proofs);
             if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
@@ -924,23 +925,29 @@ int main(int argc, char** argv) {
                 request = primeSubmission(*proof, prime_miner);
             }
         } else {
-            const auto proof = primechain::math::makeCompositeProof(next, composite_miner);
+            auto proof = primechain::math::makeCompositeProof(next, composite_miner);
             if (!proof.has_value() || !primechain::math::verifyCompositeProof(*proof)) {
                 std::cerr << "could not construct composite proof for " << next << "\n";
                 return 1;
             }
-            proofs.add(*proof);
             const auto local_provider = composite_identity.has_value()
                 ? composite_identity->address : composite_miner;
             std::uint64_t nonce = stableCompositeNonce(*proof, local_provider);
             if (pending_composite_path.has_value()) {
                 const auto pending = loadPendingComposite(*pending_composite_path);
                 if (pending.has_value() && pending->integer == next &&
-                    pending->provider == local_provider &&
-                    pending->d == proof->d && pending->e == proof->e) {
-                    nonce = pending->nonce;
-                    reused_pending_composite = true;
-                } else {
+                    pending->provider == local_provider) {
+                    primechain::CompositeProof pending_proof;
+                    pending_proof.m = pending->integer;
+                    pending_proof.d = pending->d;
+                    pending_proof.e = pending->e;
+                    if (primechain::math::verifyCompositeProof(pending_proof)) {
+                        proof = pending_proof;
+                        nonce = pending->nonce;
+                        reused_pending_composite = true;
+                    }
+                }
+                if (!reused_pending_composite) {
                     PendingComposite replacement;
                     replacement.integer = next;
                     replacement.d = proof->d;
@@ -950,6 +957,7 @@ int main(int argc, char** argv) {
                     if (!writePendingComposite(*pending_composite_path, replacement)) return 1;
                 }
             }
+            proofs.add(*proof);
             if (composite_identity.has_value()) {
                 std::string error;
                 commit_request = signedCompositeCommitSubmission(
@@ -980,6 +988,7 @@ int main(int argc, char** argv) {
                         if (retryCurrentInteger("commit phase already won by " + view->winner)) continue;
                         return 1;
                     }
+                    skip_commit_request = true;
                     break;
                 case CommitPhaseState::Closing:
                     if (retryCurrentInteger("commit phase is closing on " + host + ":" +
@@ -992,7 +1001,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (commit_request.has_value()) {
+        if (commit_request.has_value() && !skip_commit_request) {
             const auto commit_response = requestLine(host, port, *commit_request);
             if (!commit_response.has_value()) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;

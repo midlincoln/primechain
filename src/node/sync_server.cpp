@@ -5355,8 +5355,7 @@ private:
         const auto existing = commitments_.find(key);
         if (existing != commitments_.end()) {
             if (existing->second.commitment_hash == *commitment_hash &&
-                existing->second.public_key == public_key &&
-                existing->second.signature == signature) {
+                existing->second.public_key == public_key) {
                 writeAll(fd, "COMMIT_DUPLICATE " + std::to_string(g) + " " + commitment_hex + "\n");
             } else {
                 writeAll(fd, "ERROR provider already committed a different hash for integer "
@@ -5639,16 +5638,6 @@ private:
             return;
         }
 
-        if (!rememberPendingReveal(reveal, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-        if (!propagate) {
-            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " cached\n");
-            return;
-        }
-        propagateReveal(reveal);
-
         const auto key = std::make_tuple(reveal.g, activeCommitPhaseRound(reveal.g), reveal.provider_address);
         auto existing = commitments_.find(key);
         if (existing == commitments_.end()) {
@@ -5656,6 +5645,11 @@ private:
             existing = commitments_.find(key);
         }
         if (existing == commitments_.end()) {
+            if (!rememberPendingReveal(reveal, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+            if (propagate) propagateReveal(reveal);
             writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " awaiting_commitment\n");
             return;
         }
@@ -5669,6 +5663,13 @@ private:
             writeAll(fd, "ERROR reveal does not match prior commitment\n");
             return;
         }
+
+        pending_reveals_[key] = reveal;
+        if (!propagate) {
+            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " cached\n");
+            return;
+        }
+        propagateReveal(reveal);
 
         if (quorumEnabled() && !phaseClosed(reveal.g)) {
             if (!closeCommitPhaseQuorum(reveal.g, error)) {
