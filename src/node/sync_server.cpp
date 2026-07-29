@@ -69,6 +69,8 @@ constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
+std::mutex g_peer_sync_mutex;
+std::uint64_t g_peer_sync_counter = 0;
 
 void handleSignal(int) {
     g_running = 0;
@@ -1911,6 +1913,7 @@ public:
     }
 
     bool syncFromPeer(const std::string& host, int port, std::string& error) {
+        std::lock_guard<std::mutex> sync_lock(g_peer_sync_mutex);
         primechain::node::SequentialNode local(store_path_);
         if (!local.load(error)) {
             return false;
@@ -1932,7 +1935,9 @@ public:
 
         const primechain::PrimeValue start =
             local.status().has_genesis ? local.status().frontier_integer + 1 : 2;
-        const std::string temp_path = store_path_ + ".sync." + std::to_string(getpid());
+        const std::uint64_t sync_id = ++g_peer_sync_counter;
+        const std::string temp_path = store_path_ + ".sync." + std::to_string(getpid()) +
+            "." + std::to_string(sync_id);
         std::remove(temp_path.c_str());
         if (!copyFileOrCreateEmpty(store_path_, temp_path, error)) {
             return false;
@@ -1965,6 +1970,25 @@ public:
             }
         }
 
+        primechain::node::SequentialNode current(store_path_);
+        if (!current.load(error)) {
+            std::remove(temp_path.c_str());
+            return false;
+        }
+        if (current.status().has_genesis != local.status().has_genesis ||
+            current.status().frontier_integer != local.status().frontier_integer ||
+            current.status().latest_record_hash != local.status().latest_record_hash) {
+            if (current.status().has_genesis &&
+                current.status().frontier_integer >= peer_status->frontier_integer) {
+                std::remove(temp_path.c_str());
+                std::remove((temp_path + ".idx").c_str());
+                return true;
+            }
+            error = "local store changed during peer sync";
+            std::remove(temp_path.c_str());
+            std::remove((temp_path + ".idx").c_str());
+            return false;
+        }
 
         if (!store_.installValidatedStore(temp_path, error)) {
             std::remove(temp_path.c_str());
