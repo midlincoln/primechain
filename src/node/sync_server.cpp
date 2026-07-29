@@ -898,6 +898,14 @@ bool parseCommitmentWireLine(
     primechain::storage::StoredCommitment& commitment,
     std::string& error);
 
+std::string phaseVoteWireSuffix(const primechain::storage::CommitPhaseVote& vote);
+
+bool parsePhaseVoteWireSuffix(
+    const std::string& response,
+    const std::string& response_prefix,
+    primechain::PrimeValue integer,
+    primechain::storage::CommitPhaseVote& vote);
+
 
 std::vector<primechain::storage::StoredCommitment> requestCommitments(
     const std::string& host,
@@ -1015,6 +1023,38 @@ bool parseCommitmentWireLine(
         error = "invalid legacy commitment address";
         return false;
     }
+    return true;
+}
+
+std::string phaseVoteWireSuffix(const primechain::storage::CommitPhaseVote& vote) {
+    return std::to_string(vote.integer) + " " + std::to_string(vote.commit_round) + " "
+        + primechain::crypto::toHex(vote.snapshot_hash) + " "
+        + vote.validator_address + " " + bytesToHex(vote.public_key) + " "
+        + bytesToHex(vote.signature);
+}
+
+bool parsePhaseVoteWireSuffix(
+    const std::string& response,
+    const std::string& response_prefix,
+    primechain::PrimeValue integer,
+    primechain::storage::CommitPhaseVote& vote) {
+    if (response.rfind(response_prefix, 0) != 0) return false;
+    std::istringstream in(response.substr(response_prefix.size()));
+    std::string snapshot_hex;
+    std::string public_key_hex;
+    std::string signature_hex;
+    std::string votes_token;
+    std::string extra;
+    in >> vote.integer >> vote.commit_round >> snapshot_hex >> vote.validator_address
+       >> public_key_hex >> signature_hex >> votes_token;
+    const auto snapshot = parseHash(snapshot_hex);
+    if (!in || vote.integer != integer || !snapshot.has_value() ||
+        votes_token.rfind("votes=", 0) != 0 || (in >> extra)) {
+        return false;
+    }
+    vote.snapshot_hash = *snapshot;
+    vote.public_key = hexToBytes(public_key_hex);
+    vote.signature = hexToBytes(signature_hex);
     return true;
 }
 
@@ -4177,7 +4217,10 @@ private:
     bool requestPeerCommitPhaseClose(
         const PeerEndpoint& peer,
         primechain::PrimeValue integer,
+        primechain::storage::CommitPhaseVote& peer_vote,
+        bool& has_peer_vote,
         std::string& error) const {
+        has_peer_vote = false;
         auto socket = connectToServer(peer.host, peer.port);
         if (!socket.has_value()) {
             error = "could not connect to peer";
@@ -4191,9 +4234,16 @@ private:
         }
         shutdown(socket->fd(), SHUT_WR);
         const auto response = readLine(socket->fd());
-        if (response.has_value() &&
-            (response->rfind("PHASE_VOTE_ACCEPTED ", 0) == 0 ||
-             response->rfind("PHASE_VOTE_DUPLICATE ", 0) == 0)) return true;
+        if (response.has_value() && response->rfind("PHASE_VOTE_ACCEPTED ", 0) == 0) {
+            has_peer_vote = parsePhaseVoteWireSuffix(
+                *response, "PHASE_VOTE_ACCEPTED ", integer, peer_vote);
+            return true;
+        }
+        if (response.has_value() && response->rfind("PHASE_VOTE_DUPLICATE ", 0) == 0) {
+            has_peer_vote = parsePhaseVoteWireSuffix(
+                *response, "PHASE_VOTE_DUPLICATE ", integer, peer_vote);
+            return true;
+        }
         error = response.has_value() ? *response : "peer did not return commit-phase close response";
         return false;
     }
@@ -4388,8 +4438,13 @@ private:
                 }
             }
             std::string peer_error;
-            if (!requestPeerCommitPhaseClose(peer, integer, peer_error)) {
+            primechain::storage::CommitPhaseVote peer_vote;
+            bool has_peer_vote = false;
+            if (!requestPeerCommitPhaseClose(peer, integer, peer_vote, has_peer_vote, peer_error)) {
                 std::cerr << "commit phase close warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+            } else if (has_peer_vote && !acceptPhaseVote(peer_vote, peer_error, false)) {
+                std::cerr << "commit phase close vote warning from " << peer.host << ":"
                           << peer.port << ": " << peer_error << "\n";
             }
             peer_error.clear();
@@ -4420,8 +4475,8 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        writeAll(fd, std::string(duplicate ? "PHASE_VOTE_DUPLICATE " : "PHASE_VOTE_ACCEPTED ")
-            + std::to_string(integer) + " " + primechain::crypto::toHex(vote.snapshot_hash)
+        writeCommand(fd, std::string(duplicate ? "PHASE_VOTE_DUPLICATE " : "PHASE_VOTE_ACCEPTED ")
+            + phaseVoteWireSuffix(vote)
             + " votes=" + std::to_string(phaseVoteCount(integer)) + "\n");
     }
 
