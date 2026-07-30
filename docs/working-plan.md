@@ -126,7 +126,7 @@ Deliverables:
   - `mainnet-candidate-1`,
   - `genesis-candidate-1`.
 - Decide high validator reserve/admission requirement.
-- Document the reserve-backed incentive model and be explicit that reserve
+- Document the reserve-backed incentive model in [`validator-economics.md`](validator-economics.md) and be explicit that reserve
   forfeiture/slashing is future work, not current consensus behavior.
 - Decide genesis ceremony and exact genesis validator set.
 - Decide bootstrap IPs or DNS seed names.
