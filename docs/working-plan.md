@@ -130,6 +130,7 @@ Deliverables:
   forfeiture/slashing is future work, not current consensus behavior.
 - Decide genesis ceremony and exact genesis validator set.
 - Decide bootstrap IPs or DNS seed names.
+- Maintain [`mainnet-validator-onboarding.md`](mainnet-validator-onboarding.md) as the operator handoff runbook for validator owners.
 - Freeze protocol/network version for the candidate.
 - Tag a GitHub release, for example `v0.1.0-mainnet-candidate`.
 - Publish checksums and release notes.
