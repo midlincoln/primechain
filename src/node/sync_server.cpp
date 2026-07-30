@@ -88,6 +88,13 @@ std::string versionLine() {
     return out.str();
 }
 
+bool removeIfPresent(const std::string& path, std::string& error) {
+    if (std::remove(path.c_str()) == 0) return true;
+    if (errno == ENOENT) return true;
+    error = std::string("could not remove ") + path + ": " + std::strerror(errno);
+    return false;
+}
+
 struct PeerEndpoint {
     std::string host;
     int port{0};
@@ -6974,24 +6981,52 @@ int main(int argc, char** argv) {
             std::cerr << "validator genesis anchor failed: " << error << "\n";
             return 1;
         }
-        error.clear();
-        if (!sync_server.loadCommitments(error)) {
-            std::cerr << "commitment store load failed: " << error << "\n";
+
+        auto load_recoverable_sidecar = [&](const std::string& name,
+                                            const std::vector<std::string>& paths,
+                                            auto&& loader) {
+            error.clear();
+            if (loader(error)) return true;
+
+            std::cerr << name << " load warning: " << error
+                      << "; discarding volatile consensus cache and retrying\n";
+            for (const auto& path : paths) {
+                std::string cleanup_error;
+                if (!removeIfPresent(path, cleanup_error) ||
+                    !removeIfPresent(path + ".tmp", cleanup_error)) {
+                    std::cerr << name << " cache cleanup failed: " << cleanup_error << "\n";
+                    return false;
+                }
+            }
+
+            error.clear();
+            if (loader(error)) return true;
+            std::cerr << name << " load failed after cache reset: " << error << "\n";
+            return false;
+        };
+
+        if (!load_recoverable_sidecar(
+                "commitment store",
+                std::vector<std::string>{options.store_path + ".commitments"},
+                [&](std::string& load_error) { return sync_server.loadCommitments(load_error); })) {
             return 1;
         }
-        error.clear();
-        if (!sync_server.loadPhaseVotes(error)) {
-            std::cerr << "phase store load failed: " << error << "\n";
+        if (!load_recoverable_sidecar(
+                "phase store",
+                std::vector<std::string>{options.store_path + ".phases"},
+                [&](std::string& load_error) { return sync_server.loadPhaseVotes(load_error); })) {
             return 1;
         }
-        error.clear();
-        if (!sync_server.loadEpochVotes(error)) {
-            std::cerr << "validator epoch store load failed: " << error << "\n";
+        if (!load_recoverable_sidecar(
+                "validator epoch store",
+                std::vector<std::string>{options.store_path + ".epochs"},
+                [&](std::string& load_error) { return sync_server.loadEpochVotes(load_error); })) {
             return 1;
         }
-        error.clear();
-        if (!sync_server.loadFinalizationVotes(error)) {
-            std::cerr << "finalization store load failed: " << error << "\n";
+        if (!load_recoverable_sidecar(
+                "finalization store",
+                std::vector<std::string>{options.store_path + ".finalization", options.store_path + ".rounds"},
+                [&](std::string& load_error) { return sync_server.loadFinalizationVotes(load_error); })) {
             return 1;
         }
     }
