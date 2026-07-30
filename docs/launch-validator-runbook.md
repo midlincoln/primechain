@@ -130,7 +130,7 @@ cd ~/primechain
 
 The status prints the current frontier, last distribution integer, next distribution integer, due flag, current epoch fee-pool balance, and any historical distribution events found on chain.
 
-Generate the live JSON used by the MidLincoln launch-proof page:
+Generate the live JSON used by the MidLincoln launch-proof page. This file is an exported runtime artifact; regenerate it after mining or validator changes instead of editing it by hand:
 
 ```bash
 cd ~/primechain

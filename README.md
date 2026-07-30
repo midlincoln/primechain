@@ -64,6 +64,12 @@ After configuring a launch workdir and validators, the compact readiness check i
 
 It runs build-version agreement, network agreement, mempool agreement, local chain storage checks, fee-distribution status, and a launch summary. A healthy run ends with `RELEASE_CHECK_OK`.
 
+The live status JSON for the MidLincoln launch-proof page is generated with
+`./scripts/primechain-ops launch-status-json --output <file>`. The exact
+operator command and `rsync` publish path are documented in
+[`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). Treat
+`status.json` as an exported runtime artifact, not source code.
+
 ## Primechain Client
 
 `primechain-client` is the operator-facing entry point for the common node,
