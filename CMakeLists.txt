@@ -575,7 +575,7 @@ add_test(
 )
 
 add_test(
-    NAME quorum_pending_reveal_waits_for_commitment
+    NAME quorum_direct_reveal_accepts_without_commitment
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/quorum_pending_reveal.sh
         $<TARGET_FILE:primechain-client>

@@ -669,8 +669,8 @@ bool SequentialNode::load(std::string& error) {
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
                 (validator_set_.empty() ? decoded->version != 0 :
-                 ((decoded->version != 1 && decoded->version != 2 && decoded->version != 3 && decoded->version != 4 && decoded->version != 5 && decoded->version != 6 && decoded->version != 7 && decoded->version != 8) ||
-                  decoded->commit_phase.validator_set != validator_set_))) {
+                 (decoded->version < 1 ||
+                  (decoded->version <= kValidatorRewardRecordVersion && decoded->commit_phase.validator_set != validator_set_)))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
                 return false;
             }
@@ -821,8 +821,8 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
-        ((record.version != 1 && record.version != 2 && record.version != 3 && record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7 && record.version != 8) ||
-         record.commit_phase.validator_set != validator_set_)) {
+        (record.version < 1 ||
+         (record.version <= kValidatorRewardRecordVersion && record.commit_phase.validator_set != validator_set_))) {
         error = "composite certificate validator set is not authorized by genesis";
         return false;
     }

@@ -46,6 +46,9 @@ rm -f "$base/work/jobs/pending-composite.state"
     exit 1
 }
 cat "$base/run-4.out"
-grep -q 'provider already committed a different hash for integer 4' "$base/run-4.out"
+if grep -q 'provider already committed a different hash for integer 4' "$base/run-4.out"; then
+    echo "direct composite mining should ignore stale legacy commitments" >&2
+    exit 1
+fi
 grep -q '^JOB_COMPLETE target=4 frontier=4$' "$base/run-4.out"
 "$client" status 127.0.0.1 19143 | grep -q '^STATUS 3 2 1 1 2 4 '

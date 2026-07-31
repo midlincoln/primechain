@@ -960,11 +960,9 @@ int main(int argc, char** argv) {
             proofs.add(*proof);
             if (composite_identity.has_value()) {
                 std::string error;
-                commit_request = signedCompositeCommitSubmission(
-                    *proof, nonce, *composite_identity, error);
                 const auto signed_reveal = signedCompositeRevealSubmission(
                     *proof, nonce, *composite_identity, error);
-                if (!commit_request.has_value() || !signed_reveal.has_value()) {
+                if (!signed_reveal.has_value()) {
                     std::cerr << "could not sign composite submission: " << error << "\n";
                     return 1;
                 }

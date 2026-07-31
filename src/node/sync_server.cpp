@@ -3110,11 +3110,12 @@ private:
         const auto record = primechain::protocol::deserializeCompositeRecord(
             submitted.payload, error);
         if (!record.has_value()) return false;
-        if (record->version < 1 || record->version > primechain::node::kValidatorRewardRecordVersion) {
+        if (record->version < 1) {
             error = "quorum mode requires a supported composite record version";
             return false;
         }
-        if (record->commit_phase.validator_set != validator_set_) {
+        if (record->version <= primechain::node::kValidatorRewardRecordVersion &&
+            record->commit_phase.validator_set != validator_set_) {
             error = "embedded validator set differs from configured validator set";
             return false;
         }
@@ -5858,60 +5859,7 @@ private:
             return;
         }
 
-        const auto key = std::make_tuple(reveal.g, activeCommitPhaseRound(reveal.g), reveal.provider_address);
-        auto existing = commitments_.find(key);
-        if (existing == commitments_.end()) {
-            syncCommitmentsFromPeersFor(reveal.g);
-            existing = commitments_.find(key);
-        }
-        if (existing == commitments_.end()) {
-            if (!rememberPendingReveal(reveal, error)) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
-            if (propagate) propagateReveal(reveal);
-            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " awaiting_commitment\n");
-            return;
-        }
-        if (existing->second.public_key != reveal.public_key) {
-            writeAll(fd, "ERROR signed reveal key differs from commitment key\n");
-            return;
-        }
-        const auto revealed = primechain::crypto::compositeCommitment(
-            reveal.g, reveal.d, reveal.e, reveal.nonce, reveal.provider_address);
-        if (revealed != existing->second.commitment_hash) {
-            writeAll(fd, "ERROR reveal does not match prior commitment\n");
-            return;
-        }
-
-        pending_reveals_[key] = reveal;
-        if (!propagate) {
-            writeAll(fd, "REVEAL_PENDING " + std::to_string(reveal.g) + " cached\n");
-            return;
-        }
-        propagateReveal(reveal);
-
-        if (quorumEnabled() && !phaseClosed(reveal.g)) {
-            if (!closeCommitPhaseQuorum(reveal.g, error)) {
-                std::string sync_error;
-                if (syncFromPeersPastInteger(reveal.g, sync_error)) {
-                    writeAll(fd, "RECORD_DUPLICATE " + std::to_string(reveal.g) + " synced\n");
-                    pending_reveals_.erase(key);
-                    return;
-                }
-                writeAll(fd, "ERROR commit phase is not closed by validator quorum: " + error + "\n");
-                return;
-            }
-        }
-
-        const auto selected = selectedCommitment(reveal.g);
-        if (!selected.has_value() ||
-            selected->provider_address != reveal.provider_address ||
-            selected->commitment_hash != existing->second.commitment_hash) {
-            writeAll(fd, "ERROR commitment not selected for reveal; winner="
-                + (selected.has_value() ? selected->provider_address : std::string("none")) + "\n");
-            return;
-        }
+        if (propagate) propagateReveal(reveal);
 
         const auto packed_proof = primechain::crypto::packCompositeRevealProof(
             reveal.public_key, reveal.nonce, reveal.signature);
@@ -5919,7 +5867,6 @@ private:
         submission << "SUBMIT_COMPOSITE " << reveal.g << " " << reveal.d << " " << reveal.e << " "
                    << reveal.provider_address << " " << bytesToHex(packed_proof);
         submitComposite(fd, submission.str(), true);
-        pending_reveals_.erase(key);
     }
 
     void submitCompositeReveal(int fd, const std::string& line) {
@@ -6081,8 +6028,7 @@ private:
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempool_;
         record.transactions = included_transactions;
         if (quorumEnabled()) {
-            record.version = primechain::node::kValidatorRewardRecordVersion;
-            record.commit_phase = embeddedCommitPhaseCertificate(g);
+            record.version = primechain::node::kDirectCompositeRecordVersion;
             auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
             if (validator_epoch.epoch != 0) {
                 record.version = std::max<std::uint64_t>(record.version, 2);

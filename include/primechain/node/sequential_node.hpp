@@ -26,6 +26,7 @@ constexpr std::uint64_t kPrimeDiscoveryRewardMicroUnits = 450000;
 constexpr std::uint64_t kCompositeDiscoveryRewardMicroUnits = 450000;
 constexpr std::uint64_t kValidatorPrimeRewardMicroUnits = 100000;
 constexpr std::uint64_t kValidatorRewardRecordVersion = 8;
+constexpr std::uint64_t kDirectCompositeRecordVersion = 9;
 constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 constexpr std::uint64_t kDefaultValidatorMinReserveMicroUnits = 5'000'000;
 

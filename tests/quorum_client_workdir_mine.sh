@@ -74,4 +74,9 @@ cat "$base/launch-report.out"
 grep -q '^VALIDATOR_EVIDENCE_SUMMARY active=3 historical=0 bootstrap_dev=2$' "$base/launch-report.out"
 active_evidence_count=$(grep -c '^VALIDATOR_EVIDENCE pcpq1_.* class=active ' "$base/launch-report.out")
 [ "$active_evidence_count" -eq 3 ]
-awk '/^VALIDATOR_EVIDENCE pcpq1_.* class=active / { split($5, a, "="); if (a[2] == 0) exit 1 }' "$base/launch-report.out"
+awk '/^VALIDATOR_EVIDENCE pcpq1_.* class=active / {
+    split($4, finalization, "=");
+    split($5, commit_phase, "=");
+    if (finalization[2] == 0) exit 1;
+    if (commit_phase[2] != 0) exit 1;
+}' "$base/launch-report.out"

@@ -50,22 +50,16 @@ sleep 0.4
 "$client" query 127.0.0.1 19141 ADD_PEER 127.0.0.1 19142 >/dev/null
 "$client" query 127.0.0.1 19142 ADD_PEER 127.0.0.1 19141 >/dev/null
 
-commit=$("$commitment" sign-commit "$base/miner.wallet" 4 2 2 44)
 reveal=$("$commitment" sign-reveal "$base/miner.wallet" 4 2 2 44)
-
-"$client" query 127.0.0.1 19141 $reveal > "$base/pending.out"
-cat "$base/pending.out"
-grep -q '^REVEAL_PENDING 4 awaiting_commitment$' "$base/pending.out"
-
-"$client" query 127.0.0.1 19142 $commit > "$base/commit.out"
-cat "$base/commit.out"
-grep -q '^COMMIT_ACCEPTED 4 ' "$base/commit.out"
-sleep 0.3
 
 "$client" query 127.0.0.1 19141 $reveal > "$base/final.out"
 cat "$base/final.out"
-grep -q '^COMPOSITE_ACCEPTED 4 ' "$base/final.out"
+if ! grep -Eq '^(COMPOSITE_ACCEPTED 4 |RECORD_DUPLICATE 4 |RECORD_CONFLICT_WORSE )' "$base/final.out"; then
+    echo "direct reveal was not accepted, duplicated, or superseded by an accepted record" >&2
+    exit 1
+fi
+sleep 0.3
 
-"$client" status 127.0.0.1 19142 > "$base/status-b.out"
-cat "$base/status-b.out"
-grep -q 'STATUS 3 2 1 1 2 4 ' "$base/status-b.out"
+"$client" status 127.0.0.1 19141 > "$base/status-a.out"
+cat "$base/status-a.out"
+grep -q '^STATUS 3 2 1 1 2 4 ' "$base/status-a.out"

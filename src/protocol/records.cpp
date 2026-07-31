@@ -683,7 +683,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
-    if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
+    if (record.version >= 1 && record.version < 9) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
@@ -890,7 +890,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !readTransactionBatch(reader, record.tx_batch) ||
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
-        (record.version >= 1 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
+        (record.version >= 1 && record.version < 9 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
         (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
         !readOptionalMetadataAndFinalization(
             reader, record.version, record.validator_endpoints, record.economic_policy,
@@ -1007,7 +1007,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
-    if (record.version >= 1) appendCommitPhaseCertificate(out, record.commit_phase);
+    if (record.version >= 1 && record.version < 9) appendCommitPhaseCertificate(out, record.commit_phase);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
@@ -1076,7 +1076,7 @@ Hash256 commitPhaseSnapshotHash(
 bool verifyCommitPhaseCertificate(
     const CompositeRecordV0& record,
     std::string& error) {
-    if (record.version == 0) return true;
+    if (record.version == 0 || record.version >= 9) return true;
     if (record.version != 1 && record.version != 2 && record.version != 3 &&
         record.version != 4 && record.version != 5 && record.version != 6 && record.version != 7 && record.version != 8) {
         error = "unsupported composite record version";
