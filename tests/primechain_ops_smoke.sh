@@ -35,6 +35,7 @@ echo "$unit" | grep -q -- '--bind 0.0.0.0 --bootstrap-peer 192.0.2.10 8339'
 echo "$unit" | grep -q -- '--genesis-validator-set pcpq1_genesis'
 echo "$unit" | grep -q -- "--validator-identity $tmp/validator.wallet"
 echo "$unit" | grep -q -- '--use-chain-endpoints'
+echo "$unit" | grep -q -- '--sync-interval 5'
 echo "$unit" | grep -q -- '--finalization-timeout-ms 5000'
 
 if echo "$unit" | grep -q -- '--use-chain- endpoints'; then

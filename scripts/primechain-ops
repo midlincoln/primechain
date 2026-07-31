@@ -46,6 +46,7 @@ install-validator-service options:
   --unit <name>                         default: primechain-launch-node
   --user <user>                         default: primechain
   --finalization-timeout-ms <ms>        default: 5000
+  --sync-interval <seconds>              default: 5; set 0 to disable continuous sync
   --client <primechain-client>          default: <repo>/build/primechain-client
   --ready-timeout-sec <seconds>         default: 20
   --no-chain-endpoints                  disable on-chain endpoint peer discovery
@@ -256,6 +257,7 @@ default_unit=primechain-launch-node
 default_user=primechain
 default_bind=0.0.0.0
 default_timeout=5000
+default_sync_interval=5
 
 render_unit() {
   local unit_user="$1"
@@ -269,7 +271,8 @@ render_unit() {
   local genesis_validator="$9"
   local identity="${10}"
   local finalization_timeout_ms="${11}"
-  local use_chain_endpoints="${12}"
+  local sync_interval_seconds="${12}"
+  local use_chain_endpoints="${13}"
 
   local exec_start=("$binary" "$port" "$data" --bind "$bind_addr")
   if [ -n "$bootstrap" ]; then
@@ -284,6 +287,9 @@ render_unit() {
   exec_start+=(--validator-identity "$identity")
   if [ "$use_chain_endpoints" = "1" ]; then
     exec_start+=(--use-chain-endpoints)
+  fi
+  if [ "$sync_interval_seconds" -gt 0 ]; then
+    exec_start+=(--sync-interval "$sync_interval_seconds")
   fi
   exec_start+=(--finalization-timeout-ms "$finalization_timeout_ms")
 
@@ -363,6 +369,7 @@ cmd_install_or_print() {
   local unit="$default_unit"
   local unit_user="$default_user"
   local finalization_timeout_ms="$default_timeout"
+  local sync_interval_seconds="$default_sync_interval"
   local use_chain_endpoints=1
   local dry_run=0
   local no_restart=0
@@ -383,6 +390,7 @@ cmd_install_or_print() {
       --unit) require_value "$1" "${2:-}"; unit="$2"; shift 2 ;;
       --user) require_value "$1" "${2:-}"; unit_user="$2"; shift 2 ;;
       --finalization-timeout-ms) require_value "$1" "${2:-}"; finalization_timeout_ms="$2"; shift 2 ;;
+      --sync-interval) require_value "$1" "${2:-}"; sync_interval_seconds="$2"; shift 2 ;;
       --ready-timeout-sec) require_value "$1" "${2:-}"; ready_timeout_sec="$2"; shift 2 ;;
       --no-chain-endpoints) use_chain_endpoints=0; shift ;;
       --dry-run) dry_run=1; shift ;;
@@ -400,7 +408,7 @@ cmd_install_or_print() {
   check_binary_flags "$binary"
 
   local unit_text
-  unit_text="$(render_unit "$unit_user" "$working_dir" "$env_file" "$binary" "$port" "$data" "$bind_addr" "$bootstrap" "$genesis_validator" "$identity" "$finalization_timeout_ms" "$use_chain_endpoints")"
+  unit_text="$(render_unit "$unit_user" "$working_dir" "$env_file" "$binary" "$port" "$data" "$bind_addr" "$bootstrap" "$genesis_validator" "$identity" "$finalization_timeout_ms" "$sync_interval_seconds" "$use_chain_endpoints")"
 
   if [ "$mode" = "print" ] || [ "$dry_run" -eq 1 ]; then
     printf '%s\n' "$unit_text"
