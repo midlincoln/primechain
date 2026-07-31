@@ -2302,11 +2302,58 @@ public:
         return false;
     }
 
+    std::vector<PeerEndpoint> peersByDescendingFrontier(
+        const std::vector<PeerEndpoint>& peers,
+        std::string& error) {
+        struct Candidate {
+            PeerEndpoint peer;
+            PeerStatus status;
+            std::size_t order{0};
+        };
+
+        std::vector<Candidate> candidates;
+        std::size_t order = 0;
+        for (const auto& peer : peers) {
+            if (peerQuarantined(peer)) {
+                ++order;
+                continue;
+            }
+            std::string status_error;
+            const auto status = requestPeerStatus(peer.host, peer.port, status_error);
+            if (!status.has_value()) {
+                markPeerFailure(peer, status_error);
+                std::cerr << "peer status warning from " << peer.host << ":" << peer.port
+                          << ": " << status_error << "\n";
+                ++order;
+                continue;
+            }
+            markPeerSuccess(peer);
+            candidates.push_back({peer, *status, order++});
+        }
+
+        std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& left, const Candidate& right) {
+            if (left.status.has_genesis != right.status.has_genesis) {
+                return left.status.has_genesis && !right.status.has_genesis;
+            }
+            if (left.status.frontier_integer != right.status.frontier_integer) {
+                return left.status.frontier_integer > right.status.frontier_integer;
+            }
+            return left.order < right.order;
+        });
+
+        std::vector<PeerEndpoint> ordered;
+        ordered.reserve(candidates.size());
+        for (const auto& candidate : candidates) ordered.push_back(candidate.peer);
+        if (ordered.empty()) error = "no reachable sync peers";
+        else error.clear();
+        return ordered;
+    }
+
     bool syncFromPeers(const std::vector<PeerEndpoint>& peers, std::string& error) {
+        auto ordered_peers = peersByDescendingFrontier(peers, error);
         bool synced_any = false;
         std::size_t attempted = 0;
-        for (const auto& peer : peers) {
-            if (peerQuarantined(peer)) continue;
+        for (const auto& peer : ordered_peers) {
             ++attempted;
             error.clear();
             if (syncFromPeer(peer.host, peer.port, error)) {
