@@ -4009,14 +4009,6 @@ private:
             if (!retry_error.empty()) error = retry_error;
         }
 
-        if (kind == primechain::storage::StoredRecordKind::Composite &&
-            record.version >= primechain::node::kDirectCompositeRecordVersion) {
-            if (error.empty()) {
-                error = "could not collect validator-quorum finalization signatures in round "
-                    + std::to_string(round);
-            }
-            return false;
-        }
 
         std::cerr << "finalization round " << round << " stalled for integer "
                   << record.integer << "; requesting round change after "

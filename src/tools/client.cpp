@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -556,12 +557,12 @@ std::optional<StatusLine> parseStatus(const std::string& text) {
 std::optional<StatusLine> queryPeerStatus(const std::string& argv0, const PeerConfig& peer) {
     std::string output;
     if (!captureTool(argv0, "primechain-sync-query", {peer.host, std::to_string(peer.port), "GET_STATUS"}, output)) {
-        std::cerr << "could not query peer status\n";
+        std::cerr << "could not query peer status " << peer.host << ":" << peer.port << "\n";
         return std::nullopt;
     }
     auto status = parseStatus(output);
     if (!status.has_value()) {
-        std::cerr << "unexpected peer status: " << output;
+        std::cerr << "unexpected peer status from " << peer.host << ":" << peer.port << ": " << output;
         return std::nullopt;
     }
     return status;
@@ -2835,25 +2836,57 @@ int initWorkdir(const char* argv0, int argc, char** argv) {
     return 0;
 }
 
+std::optional<std::pair<PeerConfig, StatusLine>> chooseFreshestSyncPeer(
+    const char* argv0,
+    const std::string& workdir,
+    const PeerConfig& configured_peer) {
+    std::vector<PeerConfig> peers{configured_peer};
+    auto known = loadValidatorEndpointsFromStore(chainPath(workdir));
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::shuffle(known.begin(), known.end(), rng);
+    auto already_added = [&peers](const PeerConfig& candidate) {
+        return std::any_of(peers.begin(), peers.end(), [&candidate](const PeerConfig& peer) {
+            return peer.host == candidate.host && peer.port == candidate.port;
+        });
+    };
+    for (const auto& endpoint : known) {
+        if (peers.size() >= 5) break;
+        if (!already_added(endpoint)) peers.push_back(endpoint);
+    }
+
+    std::optional<std::pair<PeerConfig, StatusLine>> best;
+    for (const auto& candidate : peers) {
+        auto status = queryPeerStatus(argv0, candidate);
+        if (!status.has_value()) continue;
+        if (!best.has_value() || status->frontier > best->second.frontier) {
+            best = std::make_pair(candidate, *status);
+        }
+    }
+    return best;
+}
+
 int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig& peer) {
     if (!ensureWorkdirLayout(workdir)) return 1;
-    const auto remote = queryPeerStatus(argv0, peer);
-    if (!remote.has_value()) return 1;
     const auto local = loadLocalStatus(chainPath(workdir));
+    const auto remote_peer = chooseFreshestSyncPeer(argv0, workdir, peer);
+    if (!remote_peer.has_value()) return 1;
+    const auto& sync_peer = remote_peer->first;
+    const auto& remote = remote_peer->second;
     const primechain::PrimeValue start = local.has_genesis ? local.frontier + 1 : 2;
-    if (remote->frontier < start) {
+    if (remote.frontier < start) {
         std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
         return 0;
     }
     const int rc = runTool(argv0, "primechain-sync-download", {
-        peer.host,
-        std::to_string(peer.port),
+        sync_peer.host,
+        std::to_string(sync_peer.port),
         std::to_string(start),
-        std::to_string(remote->frontier),
+        std::to_string(remote.frontier),
         chainPath(workdir),
     });
     if (rc != 0) return rc;
-    std::cout << "SYNCED " << start << " " << remote->frontier << "\n";
+    std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
     return 0;
 }
 
@@ -3034,32 +3067,9 @@ int runJobs(const char* argv0, int argc, char** argv) {
             auto advanced = waitForFrontierAdvance(
                 argv0, workdir, *peer, before_mine.frontier, *target);
             if (!advanced.has_value()) {
-                const auto timeout_target = before_mine.frontier + 1;
-                state["last_result"] = "requesting-commit-phase-timeout";
+                state["last_result"] = "retrying-after-stalled-finalization";
                 state["updated_at"] = nowSeconds();
                 if (!writeMineState(workdir, state)) return 1;
-                const int timeout_rc = runTool(argv0, "primechain-sync-query", {
-                    peer->host,
-                    std::to_string(peer->port),
-                    "TIMEOUT_COMMIT_PHASE",
-                    std::to_string(timeout_target),
-                });
-                if (timeout_rc == 0) {
-                    local = loadLocalStatus(chainPath(workdir));
-                    state["last_synced_frontier"] = std::to_string(local.frontier);
-                    state["status"] = "running";
-                    state["updated_at"] = nowSeconds();
-                    state["last_result"] = "retrying-after-commit-phase-timeout";
-                    stagnant_attempts = 0;
-                    if (!writeMineState(workdir, state)) return 1;
-                    continue;
-                } else {
-                    state["last_result"] = "waiting-for-commit-phase-timeout";
-                    state["updated_at"] = nowSeconds();
-                    if (!writeMineState(workdir, state)) return 1;
-                }
-                advanced = waitForFrontierAdvance(
-                    argv0, workdir, *peer, before_mine.frontier, *target);
             }
             if (advanced.has_value()) {
                 local = *advanced;
