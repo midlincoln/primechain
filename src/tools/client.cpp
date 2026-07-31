@@ -35,10 +35,6 @@ struct PeerConfig {
     int port{0};
 };
 
-bool isLoopbackPeer(const PeerConfig& peer) {
-    return peer.host == "127.0.0.1" || peer.host == "localhost" || peer.host == "::1";
-}
-
 struct StatusLine {
     std::uint64_t records{0};
     std::uint64_t prime_records{0};
@@ -3042,25 +3038,23 @@ int runJobs(const char* argv0, int argc, char** argv) {
                 state["last_result"] = "requesting-commit-phase-timeout";
                 state["updated_at"] = nowSeconds();
                 if (!writeMineState(workdir, state)) return 1;
-                if (isLoopbackPeer(*peer)) {
-                    const int timeout_rc = runTool(argv0, "primechain-sync-query", {
-                        peer->host,
-                        std::to_string(peer->port),
-                        "TIMEOUT_COMMIT_PHASE",
-                        std::to_string(timeout_target),
-                    });
-                    if (timeout_rc == 0) {
-                        local = loadLocalStatus(chainPath(workdir));
-                        state["last_synced_frontier"] = std::to_string(local.frontier);
-                        state["status"] = "running";
-                        state["updated_at"] = nowSeconds();
-                        state["last_result"] = "retrying-after-commit-phase-timeout";
-                        stagnant_attempts = 0;
-                        if (!writeMineState(workdir, state)) return 1;
-                        continue;
-                    }
+                const int timeout_rc = runTool(argv0, "primechain-sync-query", {
+                    peer->host,
+                    std::to_string(peer->port),
+                    "TIMEOUT_COMMIT_PHASE",
+                    std::to_string(timeout_target),
+                });
+                if (timeout_rc == 0) {
+                    local = loadLocalStatus(chainPath(workdir));
+                    state["last_synced_frontier"] = std::to_string(local.frontier);
+                    state["status"] = "running";
+                    state["updated_at"] = nowSeconds();
+                    state["last_result"] = "retrying-after-commit-phase-timeout";
+                    stagnant_attempts = 0;
+                    if (!writeMineState(workdir, state)) return 1;
+                    continue;
                 } else {
-                    state["last_result"] = "waiting-for-remote-commit-phase-timeout";
+                    state["last_result"] = "waiting-for-commit-phase-timeout";
                     state["updated_at"] = nowSeconds();
                     if (!writeMineState(workdir, state)) return 1;
                 }

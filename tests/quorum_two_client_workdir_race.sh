@@ -4,6 +4,13 @@ set -eu
 client=$1
 server=$2
 base=$3
+host=${PRIMECHAIN_TEST_HOST:-127.0.0.1}
+
+bind_args() {
+    if [ "$host" != "127.0.0.1" ]; then
+        printf '%s\n' "--bind 0.0.0.0"
+    fi
+}
 
 rm -rf "$base"
 mkdir -p "$base"
@@ -27,6 +34,7 @@ b=$(new_miner "$base/b.wallet")
 c=$(new_miner "$base/c.wallet")
 
 "$server" 19130 "$base/a.dat" \
+    $(bind_args) \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/a.wallet" \
     --finalization-timeout-ms 500 \
@@ -35,8 +43,9 @@ echo $! > "$base/a.pid"
 sleep 0.3
 
 "$server" 19131 "$base/b.dat" \
-    --peer 127.0.0.1 19130 \
-    --peer 127.0.0.1 19132 \
+    $(bind_args) \
+    --peer "$host" 19130 \
+    --peer "$host" 19132 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/b.wallet" \
     --finalization-timeout-ms 500 \
@@ -45,8 +54,9 @@ echo $! > "$base/b.pid"
 sleep 0.4
 
 "$server" 19132 "$base/c.dat" \
-    --peer 127.0.0.1 19130 \
-    --peer 127.0.0.1 19131 \
+    $(bind_args) \
+    --peer "$host" 19130 \
+    --peer "$host" 19131 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/c.wallet" \
     --finalization-timeout-ms 500 \
@@ -54,8 +64,8 @@ sleep 0.4
 echo $! > "$base/c.pid"
 sleep 0.6
 
-"$client" init-workdir "$base/work-a" 127.0.0.1 19131 > "$base/init-a.out"
-"$client" init-workdir "$base/work-b" 127.0.0.1 19132 > "$base/init-b.out"
+"$client" init-workdir "$base/work-a" "$host" 19131 > "$base/init-a.out"
+"$client" init-workdir "$base/work-b" "$host" 19132 > "$base/init-b.out"
 "$client" add-mine-job "$base/work-a" --target 14 > "$base/add-a.out"
 "$client" add-mine-job "$base/work-b" --target 14 > "$base/add-b.out"
 
@@ -85,7 +95,7 @@ grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-a.out"
 grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-b.out"
 
 for port in 19130 19131 19132; do
-    "$client" status 127.0.0.1 "$port" > "$base/status-$port.out"
+    "$client" status "$host" "$port" > "$base/status-$port.out"
     cat "$base/status-$port.out"
     grep -q '^STATUS 13 6 7 1 12 14 ' "$base/status-$port.out"
 done
