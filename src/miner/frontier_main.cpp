@@ -567,6 +567,10 @@ std::optional<CommitPhaseStatus> closedCommitPhase(
     return std::nullopt;
 }
 
+std::string withPeerPrefix(const PeerEndpoint& peer, const std::string& line) {
+    return "VALIDATOR " + peer.host + ":" + std::to_string(peer.port) + " " + line;
+}
+
 std::optional<PeerEndpoint> closeCommitPhaseQuorum(
     const std::vector<PeerEndpoint>& peers,
     primechain::PrimeValue integer,
@@ -581,7 +585,7 @@ std::optional<PeerEndpoint> closeCommitPhaseQuorum(
                       << peer.port << ": no response\n";
             continue;
         }
-        std::cout << *response << "\n";
+        std::cout << withPeerPrefix(peer, *response) << "\n";
         if (phaseVoteCount(*response) >= required_votes) {
             quorum_peer = peer;
         }
@@ -1086,7 +1090,7 @@ int main(int argc, char** argv) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
                 return 1;
             }
-            std::cout << *commit_response << "\n";
+            std::cout << withPeerPrefix(active_peer, *commit_response) << "\n";
             if (!commitAcceptedOrDuplicate(*commit_response)) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
@@ -1102,11 +1106,11 @@ int main(int argc, char** argv) {
             return 1;
         }
         got_response = true;
-        std::cout << *response << "\n";
+        std::cout << withPeerPrefix(active_peer, *response) << "\n";
         if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
              response->rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
             !proof_summary.empty()) {
-            std::cout << proof_summary << "\n";
+            std::cout << withPeerPrefix(active_peer, proof_summary) << "\n";
         }
         if (accepted(*response)) {
             submitted_ok = true;
