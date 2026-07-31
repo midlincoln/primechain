@@ -7166,9 +7166,14 @@ int main(int argc, char** argv) {
         }
     };
 
-    while (g_running) {
-        runPeriodicSync();
+    std::thread periodic_sync_thread([&]() {
+        while (g_running) {
+            runPeriodicSync();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    });
 
+    while (g_running) {
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(server->fd(), &read_fds);
@@ -7206,7 +7211,6 @@ int main(int argc, char** argv) {
         if (sync_server.clientBanned(client_ip, client_loopback)) {
             writeAll(client_fd, "ERROR client temporarily banned for repeated invalid commands\n");
             close(client_fd);
-            runPeriodicSync();
             continue;
         }
         if (!client_loopback) {
@@ -7215,7 +7219,6 @@ int main(int argc, char** argv) {
             if (active >= kMaxActiveRemoteConnectionsPerIp) {
                 writeAll(client_fd, "ERROR connection limit exceeded for client IP\n");
                 close(client_fd);
-                runPeriodicSync();
                 continue;
             }
             ++active;
@@ -7236,8 +7239,10 @@ int main(int argc, char** argv) {
                 }
             }
         }).detach();
-        runPeriodicSync();
     }
+
+    g_running = 0;
+    if (periodic_sync_thread.joinable()) periodic_sync_thread.join();
 
     std::cout << "sync server stopped\n";
     return 0;
