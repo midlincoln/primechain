@@ -54,7 +54,7 @@ reveal=$("$commitment" sign-reveal "$base/miner.wallet" 4 2 2 44)
 
 "$client" query 127.0.0.1 19141 $reveal > "$base/final.out"
 cat "$base/final.out"
-if ! grep -Eq '^(COMPOSITE_ACCEPTED 4 |RECORD_DUPLICATE 4 |RECORD_CONFLICT_WORSE )' "$base/final.out"; then
+if ! grep -Eq '^(COMPOSITE_ACCEPTED 4 |RECORD_DUPLICATE |RECORD_CONFLICT_WORSE )' "$base/final.out"; then
     echo "direct reveal was not accepted, duplicated, or superseded by an accepted record" >&2
     exit 1
 fi

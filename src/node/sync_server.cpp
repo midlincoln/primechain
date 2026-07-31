@@ -5990,6 +5990,23 @@ private:
                 writeAll(fd, "ERROR current frontier record not found\n");
                 return;
             }
+            if (existing->kind == primechain::storage::StoredRecordKind::Composite) {
+                error.clear();
+                const auto existing_record = primechain::protocol::deserializeCompositeRecord(
+                    existing->payload, error);
+                if (!existing_record.has_value()) {
+                    writeAll(fd, "ERROR " + error + "\n");
+                    return;
+                }
+                if (existing_record->proof.g == proof.m &&
+                    existing_record->proof.d == proof.d &&
+                    existing_record->proof.e == proof.e &&
+                    existing_record->proof.provider_address == provider_address) {
+                    writeAll(fd, "RECORD_DUPLICATE "
+                        + primechain::crypto::toHex(existing->record_hash) + "\n");
+                    return;
+                }
+            }
             error.clear();
             const auto previous_hash = previousRecordHash(*existing, error);
             if (!previous_hash.has_value()) {
