@@ -3168,7 +3168,7 @@ private:
     }
 
     void propagateTransaction(const primechain::protocol::TransactionV0& tx) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitTransactionToPeer(peer, tx, error)) {
                 std::cerr << "mempool propagation warning to " << peer.host << ":" << peer.port
@@ -3837,7 +3837,7 @@ private:
         auto local = makeLocalCommitPhaseTimeoutVote(
             previous_hash, integer, current_round, next_round, error);
         if (local.signature.empty() || !acceptCommitPhaseTimeoutVote(local, error)) return false;
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             if (commitPhaseTimeoutCertified(integer, current_round, next_round)) break;
             std::string peer_error;
             const auto vote = requestCommitPhaseTimeoutVote(peer, local, peer_error);
@@ -4010,7 +4010,7 @@ private:
         if (!makeLocalFinalizationVote(kind, payload, nullptr, local_vote, error) ||
             !acceptFinalizationVote(local_vote, candidate_hash, round,
                 record.finalized_by.votes, error)) return false;
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string peer_error;
             const auto vote = requestRecordFinalizationVote(peer, kind, payload, local_vote, peer_error);
             if (!vote.has_value()) {
@@ -4048,7 +4048,7 @@ private:
         std::string& error) {
         auto local = makeLocalRoundChangeVote(previous_hash, integer, new_round, error);
         if (local.signature.empty() || !acceptRoundChangeVote(local, error)) return false;
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             if (certifiedRoundChanges(integer, new_round).size() >= validatorQuorumRequired()) break;
             std::string peer_error;
             const auto vote = requestRoundChangeVote(peer, local, peer_error);
@@ -4347,7 +4347,7 @@ private:
 
     void propagatePhaseVote(const primechain::storage::CommitPhaseVote& vote) const {
         const auto bundled_commitments = certificateCommitments(vote.integer, vote.commit_round);
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitPhaseVoteToPeer(peer, vote, bundled_commitments, error)) {
                 std::cerr << "phase vote propagation warning to " << peer.host << ":"
@@ -4526,7 +4526,7 @@ private:
             }
         }
 
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             for (const auto& commitment : local_commitments) {
                 std::string commit_error;
                 if (!submitCommitToPeer(peer, commitment, commit_error)) {
@@ -4748,7 +4748,7 @@ private:
     }
 
     void propagateCommit(const primechain::storage::StoredCommitment& commitment) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitCommitToPeer(peer, commitment, error)) {
                 std::cerr << "commitment propagation warning to " << peer.host << ":" << peer.port
@@ -4924,7 +4924,7 @@ private:
     }
 
     void propagateEpochVote(const primechain::storage::ValidatorEpochVoteRecord& record) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitEpochVoteToPeer(peer, record, error)) {
                 std::cerr << "epoch vote propagation warning to " << peer.host << ":"
@@ -5104,7 +5104,7 @@ private:
     }
 
     void propagatePolicyVote(const EconomicPolicyVoteRecord& record) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitPolicyVoteToPeer(peer, record, error)) {
                 std::cerr << "policy vote propagation warning to " << peer.host << ":"
@@ -5425,7 +5425,7 @@ private:
         }
         pending_validator_work_bindings_[key] = binding;
         if (propagate) {
-            for (const auto& peer : activeKnownPeers()) {
+            for (const auto& peer : peers_) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_WORK_BINDING_PEER " << previous_hex << " "
                             << binding.record_integer << " " << binding.candidate_address << " "
@@ -5496,7 +5496,7 @@ private:
         }
         pending_validator_applications_[application.candidate_address] = application;
         if (propagate) {
-            for (const auto& peer : activeKnownPeers()) {
+            for (const auto& peer : peers_) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_APPLICATION_PEER " << previous_hex << " "
                             << application.record_integer << " " << application.candidate_address << " "
@@ -5565,7 +5565,7 @@ private:
         }
         pending_endpoint_updates_[update.validator_address] = update;
         if (propagate) {
-            for (const auto& peer : activeKnownPeers()) {
+            for (const auto& peer : peers_) {
                 std::ostringstream command_out;
                 command_out << "SUBMIT_VALIDATOR_ENDPOINT_PEER " << previous_hex << " " << record_integer
                             << " " << update.validator_address << " " << update.host << " "
@@ -5908,7 +5908,7 @@ private:
     }
 
     void propagateReveal(const SignedCompositeReveal& reveal) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitRevealToPeer(peer, reveal, error)) {
                 std::cerr << "reveal propagation warning to " << peer.host << ":"
@@ -5918,7 +5918,7 @@ private:
     }
 
     void syncCommitmentsFromPeersFor(primechain::PrimeValue) {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!syncCommitmentsFromPeer(peer.host, peer.port, error)) {
                 std::cerr << "commitment sync warning from " << peer.host << ":" << peer.port
@@ -6218,7 +6218,7 @@ private:
     }
 
     void propagateSignedPrime(const std::string& line) const {
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitSignedPrimeToPeer(peer, line, error)) {
                 std::cerr << "prime evidence propagation warning to " << peer.host << ":"
@@ -6457,7 +6457,7 @@ private:
 
     void propagateRecord(const primechain::storage::StoredRecord& record) {
         pruneFinalizedCommitments(record.integer);
-        for (const auto& peer : activeKnownPeers()) {
+        for (const auto& peer : peers_) {
             std::string error;
             if (!submitRecordToPeer(peer, record, error)) {
                 std::cerr << "record propagation warning to " << peer.host << ":" << peer.port
