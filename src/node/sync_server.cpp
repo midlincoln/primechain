@@ -2199,7 +2199,7 @@ public:
     }
 
     bool syncFromKnownPeers(std::string& error) {
-        return syncFromPeers(activeKnownPeers(), error);
+        return syncFromPeers(peers_, error);
     }
 
     bool acceptPeerMempoolTransaction(
@@ -2291,7 +2291,7 @@ public:
     }
 
     bool syncFromPeersPastInteger(primechain::PrimeValue integer, std::string& error) {
-        if (!syncFromPeers(activeKnownPeers(), error)) return false;
+        if (!syncFromPeers(peers_, error)) return false;
         primechain::node::SequentialNode refreshed(store_path_);
         if (!refreshed.load(error)) return false;
         if (refreshed.status().has_genesis && refreshed.status().frontier_integer >= integer) {
@@ -2314,10 +2314,6 @@ public:
         std::vector<Candidate> candidates;
         std::size_t order = 0;
         for (const auto& peer : peers) {
-            if (peerQuarantined(peer)) {
-                ++order;
-                continue;
-            }
             std::string status_error;
             const auto status = requestPeerStatus(peer.host, peer.port, status_error);
             if (!status.has_value()) {
