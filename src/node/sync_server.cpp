@@ -2686,10 +2686,10 @@ private:
             const auto peer_hash = primechain::crypto::toHex(status->latest_record_hash);
             const auto hash_match = peer_hash == local_hash;
             const auto peer_list_ok = list_error.empty();
-            if (hash_match && peer_list_ok) {
+            if (peer_list_ok) {
                 markPeerSuccess(peer);
             } else {
-                markPeerFailure(peer, hash_match ? list_error : "hash mismatch");
+                markPeerFailure(peer, list_error);
             }
             const auto& state = peerRuntime(peer);
             const auto frontier_delta = static_cast<std::int64_t>(status->frontier_integer) -
