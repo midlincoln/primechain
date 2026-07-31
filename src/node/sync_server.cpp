@@ -582,6 +582,40 @@ std::optional<primechain::Hash256> previousRecordHash(
     return decoded->previous_record_hash;
 }
 
+std::optional<primechain::Address> recordProviderAddress(
+    const primechain::storage::StoredRecord& stored,
+    std::string& error) {
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) return std::nullopt;
+        return decoded->proof.provider_address;
+    }
+
+    const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!decoded.has_value()) return std::nullopt;
+    return decoded->proof.provider_address;
+}
+
+bool providerCooldownSatisfied(
+    const primechain::storage::RecordStore& store,
+    const primechain::node::SequentialNode& node,
+    const primechain::Address& provider,
+    std::string& error) {
+    if (!node.status().has_genesis || node.status().height == 0) return true;
+    const auto previous = store.findByInteger(node.status().frontier_integer, error);
+    if (!previous.has_value()) {
+        if (error.empty()) error = "current frontier record not found";
+        return false;
+    }
+    const auto previous_provider = recordProviderAddress(*previous, error);
+    if (!previous_provider.has_value()) return false;
+    if (*previous_provider == provider) {
+        error = "provider is in winner cooldown for next record";
+        return false;
+    }
+    return true;
+}
+
 bool appendStoredRecord(
     primechain::node::SequentialNode& node,
     const primechain::storage::StoredRecord& stored,
@@ -3155,6 +3189,17 @@ private:
         error.clear();
         if (!validateQuorumCompositeRecord(*submitted, error)) {
             writeAll(fd, "ERROR invalid quorum record: " + error + "\n");
+            return;
+        }
+        error.clear();
+        const auto submitted_provider = recordProviderAddress(*submitted, error);
+        if (!submitted_provider.has_value()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        error.clear();
+        if (!providerCooldownSatisfied(store_, node, *submitted_provider, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
             return;
         }
 
@@ -6072,6 +6117,11 @@ private:
                 record.validator_work_bindings = std::move(validator_work_bindings);
             }
             primechain::protocol::updateTransactionBatch(record);
+            error.clear();
+            if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
                 std::string sync_error;
@@ -6094,6 +6144,11 @@ private:
             primechain::protocol::applyDevelopmentFinalization(record);
         } else {
             primechain::protocol::updateTransactionBatch(record);
+        }
+        error.clear();
+        if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
         }
         error.clear();
         if (!node.appendComposite(record, error)) {
@@ -6310,6 +6365,11 @@ private:
         }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
+            error.clear();
+            if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Prime, error)) {
                 std::string sync_error;
@@ -6325,6 +6385,11 @@ private:
             primechain::protocol::applyDevelopmentFinalization(record);
         } else {
             primechain::protocol::updateTransactionBatch(record);
+        }
+        error.clear();
+        if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
         }
         error.clear();
         if (!node.appendPrime(record, error)) {

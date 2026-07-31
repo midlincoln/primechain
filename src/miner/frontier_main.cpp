@@ -840,6 +840,7 @@ bool staleOrTransient(const std::string& response) {
            response.find("could not close commit phase with validator quorum") != std::string::npos ||
            response.find("could not finalize composite record") != std::string::npos ||
            response.find("could not collect validator-quorum round-change signatures") != std::string::npos ||
+           response.find("provider is in winner cooldown") != std::string::npos ||
            response.find("no prior commitment for reveal") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos ||
            response.find("provider already committed a different hash") != std::string::npos ||
