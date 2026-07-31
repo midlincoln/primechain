@@ -195,6 +195,36 @@ void clearPendingComposite(const std::optional<std::string>& path) {
     if (path.has_value()) unlink(path->c_str());
 }
 
+std::string factorizationString(const primechain::math::Factorization& factorization) {
+    std::ostringstream out;
+    if (factorization.factors.empty()) {
+        out << "none";
+        return out.str();
+    }
+    for (std::size_t i = 0; i < factorization.factors.size(); ++i) {
+        if (i != 0) out << ",";
+        const auto& factor = factorization.factors[i];
+        out << factor.prime << "^" << factor.exponent;
+    }
+    return out.str();
+}
+
+std::string prattProofSummary(const primechain::math::PrattProof& proof) {
+    std::ostringstream out;
+    out << "PROOF_PRATT prime=" << proof.p
+        << " witness=" << proof.witness
+        << " factors_p_minus_1=" << factorizationString(proof.factors_of_p_minus_1);
+    return out.str();
+}
+
+std::string compositeProofSummary(const primechain::CompositeProof& proof) {
+    std::ostringstream out;
+    out << "PROOF_COMPOSITE integer=" << proof.m
+        << " divisor=" << proof.d
+        << " cofactor=" << proof.e;
+    return out.str();
+}
+
 std::optional<Socket> connectToNode(const std::string& host, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -893,6 +923,7 @@ int main(int argc, char** argv) {
             return true;
         };
         std::string request;
+        std::string proof_summary;
         std::optional<std::string> commit_request;
         bool reused_pending_composite = false;
         bool skip_commit_request = false;
@@ -924,6 +955,7 @@ int main(int argc, char** argv) {
             } else {
                 request = primeSubmission(*proof, prime_miner);
             }
+            proof_summary = prattProofSummary(*proof);
         } else {
             auto proof = primechain::math::makeCompositeProof(next, composite_miner);
             if (!proof.has_value() || !primechain::math::verifyCompositeProof(*proof)) {
@@ -971,6 +1003,7 @@ int main(int argc, char** argv) {
                 commit_request = compositeCommitSubmission(*proof, nonce, composite_miner);
                 request = compositeRevealSubmission(*proof, nonce, composite_miner);
             }
+            proof_summary = compositeProofSummary(*proof);
         }
 
         const auto local_provider = composite_identity.has_value()
@@ -1022,6 +1055,11 @@ int main(int argc, char** argv) {
         }
         got_response = true;
         std::cout << *response << "\n";
+        if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
+             response->rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
+            !proof_summary.empty()) {
+            std::cout << proof_summary << "\n";
+        }
         if (accepted(*response)) {
             submitted_ok = true;
         } else {
