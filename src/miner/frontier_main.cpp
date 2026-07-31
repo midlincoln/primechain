@@ -103,6 +103,14 @@ bool loadProofStore(const std::string& path, MapProofIndex& proofs, std::string&
     return true;
 }
 
+primechain::PrimeValue loadProofStoreFrontier(const std::string& path) {
+    primechain::node::SequentialNode node(path);
+    std::string error;
+    if (!node.load(error)) return 0;
+    const auto& status = node.status();
+    return status.has_genesis ? status.frontier_integer : 0;
+}
+
 struct Status {
     std::uint64_t record_count{0};
     std::uint64_t prime_records{0};
@@ -819,8 +827,7 @@ bool accepted(const std::string& response) {
     return response.rfind("PRIME_ACCEPTED ", 0) == 0 ||
            response.rfind("COMPOSITE_ACCEPTED ", 0) == 0 ||
            response.rfind("RECORD_DUPLICATE ", 0) == 0 ||
-           response.rfind("RECORD_REPLACED ", 0) == 0 ||
-           response.rfind("RECORD_CONFLICT_WORSE ", 0) == 0;
+           response.rfind("RECORD_REPLACED ", 0) == 0;
 }
 
 bool staleOrTransient(const std::string& response) {
@@ -831,6 +838,8 @@ bool staleOrTransient(const std::string& response) {
            response.find("commit phase is closing or closed") != std::string::npos ||
            response.find("commit phase is not closed by validator quorum") != std::string::npos ||
            response.find("could not close commit phase with validator quorum") != std::string::npos ||
+           response.find("could not finalize composite record") != std::string::npos ||
+           response.find("could not collect validator-quorum round-change signatures") != std::string::npos ||
            response.find("no prior commitment for reveal") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos ||
            response.find("provider already committed a different hash") != std::string::npos ||
@@ -935,12 +944,14 @@ int main(int argc, char** argv) {
     }
 
     MapProofIndex proofs;
+    std::optional<primechain::PrimeValue> proof_store_frontier;
     if (proof_store_path.has_value()) {
         std::string error;
         if (!loadProofStore(*proof_store_path, proofs, error)) {
             std::cerr << "could not load proof store: " << error << "\n";
             return 1;
         }
+        proof_store_frontier = loadProofStoreFrontier(*proof_store_path);
     }
     std::size_t submitted = 0;
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
@@ -959,6 +970,14 @@ int main(int argc, char** argv) {
             std::cout << "frontier miner complete frontier=" << effective_frontier
                       << " submitted=" << submitted << "\n";
             return 0;
+        }
+
+        if (proof_store_frontier.has_value() && effective_frontier > *proof_store_frontier) {
+            std::cerr << "local proof store behind validator frontier; sync required"
+                      << " local_frontier=" << *proof_store_frontier
+                      << " validator=" << active_peer.host << ":" << active_peer.port
+                      << " validator_frontier=" << effective_frontier << "\n";
+            return 1;
         }
 
         const primechain::PrimeValue next = effective_frontier + 1;
@@ -1131,6 +1150,9 @@ int main(int argc, char** argv) {
         retry_counts.erase(next);
         if (commit_request.has_value()) {
             clearPendingComposite(pending_composite_path);
+        }
+        if (proof_store_frontier.has_value() && next > *proof_store_frontier) {
+            *proof_store_frontier = next;
         }
         ++submitted;
     }
