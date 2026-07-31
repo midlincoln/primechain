@@ -154,6 +154,11 @@ struct PendingComposite {
     std::string provider;
 };
 
+struct PeerStatus {
+    PeerEndpoint peer;
+    Status status;
+};
+
 std::optional<PendingComposite> loadPendingComposite(const std::string& path) {
     std::ifstream in(path);
     if (!in) return std::nullopt;
@@ -432,17 +437,15 @@ std::vector<PeerEndpoint> quorumEndpoints(
     int port,
     const std::vector<PeerEndpoint>& configured_validator_endpoints) {
     std::vector<PeerEndpoint> peers;
+    addUniquePeer(peers, {host, port});
     for (const auto& peer : configured_validator_endpoints) {
         addUniquePeer(peers, peer);
     }
     for (const auto& peer : requestValidatorEndpointList(host, port)) {
         addUniquePeer(peers, peer);
     }
-    if (peers.empty()) {
-        addUniquePeer(peers, {host, port});
-        for (const auto& peer : requestPeerList(host, port)) {
-            addUniquePeer(peers, peer);
-        }
+    for (const auto& peer : requestPeerList(host, port)) {
+        addUniquePeer(peers, peer);
     }
     return peers;
 }
@@ -607,6 +610,21 @@ std::optional<Status> getStatus(const std::string& host, int port) {
     }
     status.has_genesis = has_genesis != 0;
     return status;
+}
+
+std::optional<PeerStatus> freshestPeerStatus(
+    const std::string& host,
+    int port,
+    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
+    std::optional<PeerStatus> best;
+    for (const auto& peer : quorumEndpoints(host, port, configured_validator_endpoints)) {
+        const auto status = getStatus(peer.host, peer.port);
+        if (!status.has_value()) continue;
+        if (!best.has_value() || status->frontier > best->status.frontier) {
+            best = PeerStatus{peer, *status};
+        }
+    }
+    return best;
 }
 
 void appendUint64(std::vector<std::uint8_t>& out, std::uint64_t value) {
@@ -896,13 +914,15 @@ int main(int argc, char** argv) {
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
 
     while (true) {
-        const auto status = getStatus(host, port);
-        if (!status.has_value()) {
-            std::cerr << "could not query node status\n";
+        const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints);
+        if (!peer_status.has_value()) {
+            std::cerr << "could not query any validator status\n";
             return 1;
         }
+        const auto active_peer = peer_status->peer;
+        const auto status = peer_status->status;
         const primechain::PrimeValue effective_frontier =
-            status->has_genesis ? status->frontier : 2;
+            status.has_genesis ? status.frontier : 2;
         if (effective_frontier >= limit) {
             std::cout << "frontier miner complete frontier=" << effective_frontier
                       << " submitted=" << submitted << "\n";
@@ -935,9 +955,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             if (prime_identity.has_value()) {
-                auto previous_hash = hashFromHex(status->latest_hash);
+                auto previous_hash = hashFromHex(status.latest_hash);
                 std::string error;
-                if (!status->has_genesis) {
+                if (!status.has_genesis) {
                     previous_hash = primechain::storage::makeStoredRecord(
                         primechain::node::makeGenesisPrimeRecordV0()).record_hash;
                 }
@@ -1010,7 +1030,7 @@ int main(int argc, char** argv) {
             ? composite_identity->address : composite_miner;
 
         if (commit_request.has_value()) {
-            const auto view = requestMiningView({host, port}, next);
+            const auto view = requestMiningView(active_peer, next);
             if (view.has_value()) {
                 switch (viewPhaseState(*view)) {
                 case CommitPhaseState::Closed:
@@ -1022,8 +1042,8 @@ int main(int argc, char** argv) {
                     skip_commit_request = true;
                     break;
                 case CommitPhaseState::Closing:
-                    if (retryCurrentInteger("commit phase is closing on " + host + ":" +
-                                            std::to_string(port))) continue;
+                    if (retryCurrentInteger("commit phase is closing on " + active_peer.host + ":" +
+                                            std::to_string(active_peer.port))) continue;
                     return 1;
                 case CommitPhaseState::Open:
                 case CommitPhaseState::Unknown:
@@ -1033,7 +1053,7 @@ int main(int argc, char** argv) {
         }
 
         if (commit_request.has_value() && !skip_commit_request) {
-            const auto commit_response = requestLine(host, port, *commit_request);
+            const auto commit_response = requestLine(active_peer.host, active_peer.port, *commit_request);
             if (!commit_response.has_value()) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
                 return 1;
@@ -1048,7 +1068,7 @@ int main(int argc, char** argv) {
         bool submitted_ok = false;
         bool got_response = false;
         std::string last_rejection;
-        const auto response = requestLine(host, port, request);
+        const auto response = requestLine(active_peer.host, active_peer.port, request);
         if (!response.has_value()) {
             if (retryCurrentInteger("node closed connection while submitting")) continue;
             return 1;
