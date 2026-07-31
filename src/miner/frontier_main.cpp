@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -5,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -29,6 +31,7 @@ namespace {
 constexpr const char* kDefaultHost = "127.0.0.1";
 constexpr int kDefaultPort = 18889;
 constexpr primechain::PrimeValue kDefaultLimit = 20;
+constexpr std::size_t kMaxStatusProbeValidators = 5;
 constexpr const char* kDefaultPrimeMiner = "pcdev1_prime_miner";
 constexpr const char* kDefaultCompositeMiner = "pcdev1_composite_miner";
 
@@ -612,12 +615,37 @@ std::optional<Status> getStatus(const std::string& host, int port) {
     return status;
 }
 
+std::vector<PeerEndpoint> sampledStatusProbePeers(
+    const std::string& host,
+    int port,
+    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
+    auto peers = quorumEndpoints(host, port, configured_validator_endpoints);
+    if (peers.size() <= kMaxStatusProbeValidators) return peers;
+
+    std::vector<PeerEndpoint> sample;
+    addUniquePeer(sample, {host, port});
+
+    std::vector<PeerEndpoint> candidates;
+    for (const auto& peer : peers) {
+        if (peer.host == host && peer.port == port) continue;
+        candidates.push_back(peer);
+    }
+
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::shuffle(candidates.begin(), candidates.end(), rng);
+    for (const auto& peer : candidates) {
+        if (sample.size() >= kMaxStatusProbeValidators) break;
+        addUniquePeer(sample, peer);
+    }
+    return sample;
+}
+
 std::optional<PeerStatus> freshestPeerStatus(
     const std::string& host,
     int port,
     const std::vector<PeerEndpoint>& configured_validator_endpoints) {
     std::optional<PeerStatus> best;
-    for (const auto& peer : quorumEndpoints(host, port, configured_validator_endpoints)) {
+    for (const auto& peer : sampledStatusProbePeers(host, port, configured_validator_endpoints)) {
         const auto status = getStatus(peer.host, peer.port);
         if (!status.has_value()) continue;
         if (!best.has_value() || status->frontier > best->status.frontier) {
