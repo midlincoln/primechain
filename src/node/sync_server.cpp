@@ -5859,7 +5859,6 @@ private:
             return;
         }
 
-        if (propagate) propagateReveal(reveal);
 
         const auto packed_proof = primechain::crypto::packCompositeRevealProof(
             reveal.public_key, reveal.nonce, reveal.signature);
