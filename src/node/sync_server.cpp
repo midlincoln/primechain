@@ -7157,7 +7157,9 @@ int main(int argc, char** argv) {
             if (sync_server.peerDiscoveryEnabled()) {
                 sync_server.discoverPeersFromKnown();
             }
-            sync_server.syncFromKnownPeers(error);
+            if (!sync_server.syncFromKnownPeers(error) && !error.empty()) {
+                std::cerr << "periodic peer sync warning: " << error << "\n";
+            }
             next_sync = now + std::chrono::seconds(options.sync_interval_seconds);
         }
         if (sync_server.hasKnownPeers() && now >= next_mempool_rebroadcast) {
@@ -7169,6 +7171,8 @@ int main(int argc, char** argv) {
     };
 
     while (g_running) {
+        runPeriodicSync();
+
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(server->fd(), &read_fds);
