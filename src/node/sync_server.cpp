@@ -7186,7 +7186,6 @@ int main(int argc, char** argv) {
             break;
         }
         if (ready == 0) {
-            runPeriodicSync();
             continue;
         }
 
