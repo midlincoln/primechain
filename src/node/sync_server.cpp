@@ -4686,11 +4686,6 @@ private:
             in.clear();
         }
 
-        if (hasKnownPeers()) {
-            std::string sync_error;
-            syncFromKnownPeers(sync_error);
-        }
-
         std::string error;
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) {
