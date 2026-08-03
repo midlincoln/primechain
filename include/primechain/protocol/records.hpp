@@ -113,6 +113,15 @@ struct FinalizationProofV0 {
     std::vector<ValidatorVoteV0> votes;
 };
 
+struct CompositeLotteryProofV1 {
+    std::uint64_t round{0};
+    std::uint64_t win_bps{0};
+    Hash256 subject_hash{};
+    Address assigned_validator;
+    Bytes public_key;
+    Bytes signature;
+};
+
 struct GenesisConfigV1 {
     std::vector<Address> validator_set;
 };
@@ -190,6 +199,7 @@ struct CompositeRecordV0 {
     EconomicPolicyUpdateV1 economic_policy;
     std::vector<ValidatorApplicationV1> validator_applications;
     std::vector<ValidatorWorkBindingV1> validator_work_bindings;
+    CompositeLotteryProofV1 composite_lottery;
     FinalizationProofV0 finalized_by;
 };
 
@@ -233,6 +243,15 @@ Hash256 transactionHash(const TransactionV0& tx);
 Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions);
 void updateTransactionBatch(CompositeRecordV0& record);
 void updateTransactionBatch(PrimeRecordV0& record);
+Hash256 compositeLotterySubjectHash(const CompositeRecordV0& record);
+std::optional<Address> assignedCompositeLotteryValidator(
+    const CompositeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error);
+bool verifyCompositeLotteryProof(
+    const CompositeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error);
 Hash256 candidateRecordHash(const CompositeRecordV0& record);
 Hash256 candidateRecordHash(const PrimeRecordV0& record);
 Hash256 legacyCandidateRecordHashWithoutFinalization(const CompositeRecordV0& record);

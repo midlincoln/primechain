@@ -223,6 +223,15 @@ void appendRoundChangeVote(
     appendBytes(out, vote.signature);
 }
 
+void appendCompositeLotteryProof(std::vector<std::uint8_t>& out, const CompositeLotteryProofV1& proof) {
+    appendUint64(out, proof.round);
+    appendUint64(out, proof.win_bps);
+    appendHash(out, proof.subject_hash);
+    appendAddress(out, proof.assigned_validator);
+    appendBytes(out, proof.public_key);
+    appendBytes(out, proof.signature);
+}
+
 void appendFinalizationProof(
     std::vector<std::uint8_t>& out,
     const FinalizationProofV0& proof,
@@ -427,6 +436,15 @@ bool readValidatorVote(ByteReader& reader, ValidatorVoteV0& vote) {
            reader.readHash(vote.record_hash) &&
            reader.readUint64(vote.round) &&
            reader.readBytes(vote.signature);
+}
+
+bool readCompositeLotteryProof(ByteReader& reader, CompositeLotteryProofV1& proof) {
+    return reader.readUint64(proof.round) &&
+           reader.readUint64(proof.win_bps) &&
+           reader.readHash(proof.subject_hash) &&
+           reader.readString(proof.assigned_validator) &&
+           reader.readBytes(proof.public_key) &&
+           reader.readBytes(proof.signature);
 }
 
 bool readCommitPhaseCertificate(ByteReader& reader, CommitPhaseCertificateV1& certificate) {
@@ -689,6 +707,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
+    if (record.version >= 10) appendCompositeLotteryProof(out, record.composite_lottery);
     appendFinalizationProof(out, record.finalized_by, include_votes);
     return out;
 }
@@ -891,10 +910,34 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && record.version < 9 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
-        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch)) ||
-        !readOptionalMetadataAndFinalization(
-            reader, record.version, record.validator_endpoints, record.economic_policy,
-            record.validator_applications, record.validator_work_bindings, record.finalized_by)) {
+        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch))) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    record.economic_policy = {};
+    record.validator_applications.clear();
+    record.validator_work_bindings.clear();
+    if (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    if (record.version >= 4 && !readEconomicPolicyUpdate(reader, record.economic_policy, record.version)) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    if (record.version >= 5 && !readValidatorApplications(reader, record.validator_applications)) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    if (record.version >= 6 && !readValidatorWorkBindings(reader, record.validator_work_bindings)) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    if (record.version >= 10 && !readCompositeLotteryProof(reader, record.composite_lottery)) {
+        error = "truncated composite record payload";
+        return std::nullopt;
+    }
+    if (!readFinalizationProof(reader, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -1013,6 +1056,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
     if (record.version >= 6) appendValidatorWorkBindings(out, record.validator_work_bindings);
+    if (record.version >= 10) appendCompositeLotteryProof(out, record.composite_lottery);
     return out;
 }
 
@@ -1042,6 +1086,81 @@ Hash256 legacyCandidateRecordHashWithoutFinalization(const CompositeRecordV0& re
 
 Hash256 legacyCandidateRecordHashWithoutFinalization(const PrimeRecordV0& record) {
     return crypto::sha3_256(serializePrimeRecordWithoutFinalization(record));
+}
+
+Hash256 compositeLotterySubjectHash(const CompositeRecordV0& record) {
+    CompositeRecordV0 subject = record;
+    subject.composite_lottery = {};
+    subject.finalized_by = {};
+    return crypto::sha3_256(serializeCompositeRecordInternal(subject, false));
+}
+
+std::optional<Address> assignedCompositeLotteryValidator(
+    const CompositeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    if (!isCanonicalProtocolValidatorSet(validator_set)) {
+        error = "composite lottery requires canonical validator set";
+        return std::nullopt;
+    }
+    const auto subject_hash = compositeLotterySubjectHash(record);
+    Bytes payload;
+    appendString(payload, "primechain-composite-lottery-assignment-v1");
+    appendHash(payload, record.previous_record_hash);
+    appendUint64(payload, record.integer);
+    appendHash(payload, subject_hash);
+    appendUint64(payload, validator_set.size());
+    for (const auto& validator : validator_set) appendString(payload, validator);
+    const auto assignment_hash = crypto::sha3_256(payload);
+    std::uint64_t number = 0;
+    for (std::size_t i = 0; i < 8; ++i) {
+        number = (number << 8) | assignment_hash[i];
+    }
+    return validator_set[number % validator_set.size()];
+}
+
+bool verifyCompositeLotteryProof(
+    const CompositeRecordV0& record,
+    const std::vector<Address>& validator_set,
+    std::string& error) {
+    if (record.version < 10) return true;
+    if (record.composite_lottery.round == 0) {
+        error = "composite lottery round must be positive";
+        return false;
+    }
+    if (record.composite_lottery.win_bps > 10000) {
+        error = "composite lottery win rate is invalid";
+        return false;
+    }
+    const auto subject_hash = compositeLotterySubjectHash(record);
+    if (record.composite_lottery.subject_hash != subject_hash) {
+        error = "composite lottery subject hash mismatch";
+        return false;
+    }
+    const auto assigned = assignedCompositeLotteryValidator(record, validator_set, error);
+    if (!assigned.has_value()) return false;
+    if (record.composite_lottery.assigned_validator != *assigned) {
+        error = "composite lottery assigned validator mismatch";
+        return false;
+    }
+    if (record.composite_lottery.assigned_validator !=
+        crypto::addressFromProtocolPublicKey(record.composite_lottery.public_key)) {
+        error = "composite lottery public key address mismatch";
+        return false;
+    }
+    std::string signature_error;
+    if (!crypto::verifyProtocolMessageSignature(
+            record.composite_lottery.public_key,
+            crypto::compositeLotteryWinSigningPayload(
+                record.previous_record_hash, record.integer, subject_hash,
+                record.composite_lottery.round, record.composite_lottery.win_bps,
+                record.composite_lottery.assigned_validator),
+            record.composite_lottery.signature,
+            signature_error)) {
+        error = "invalid composite lottery win signature";
+        return false;
+    }
+    return true;
 }
 
 Hash256 candidateRecordHash(const CompositeRecordV0& record) {

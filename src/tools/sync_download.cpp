@@ -333,6 +333,11 @@ int main(int argc, char** argv) {
         std::cerr << "downloaded store did not replay: " << error << "\n";
         return 1;
     }
+    if (!node.status().has_genesis || node.status().frontier_integer != end) {
+        std::cerr << "downloaded store did not reach requested end: expected "
+                  << end << " got " << node.status().frontier_integer << "\n";
+        return 1;
+    }
 
     std::cout << "sync download complete\n";
     std::cout << "output_store: " << output_store << "\n";

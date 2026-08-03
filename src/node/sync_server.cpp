@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -66,6 +67,8 @@ constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
 constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 8;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
+constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
+constexpr std::size_t kMaxCompositeLotteryCandidates = 64;
 volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
@@ -1167,6 +1170,41 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
     return votes;
 }
 
+std::optional<primechain::protocol::CompositeLotteryProofV1> requestCompositeLotteryWin(
+    const PeerEndpoint& peer,
+    const primechain::protocol::CompositeRecordV0& candidate,
+    std::string& error) {
+    auto socket = connectToServer(peer.host, peer.port);
+    if (!socket.has_value()) { error = "could not connect to validator peer"; return std::nullopt; }
+    std::ostringstream command;
+    command << "SIGN_COMPOSITE_LOTTERY "
+            << bytesToHex(primechain::protocol::serializeCompositeRecord(candidate)) << "\n";
+    if (!writeCommand(socket->fd(), command.str())) {
+        error = "could not submit composite lottery candidate to validator";
+        return std::nullopt;
+    }
+    shutdown(socket->fd(), SHUT_WR);
+    const auto response = readLine(socket->fd());
+    if (!response.has_value()) {
+        error = "validator did not return composite lottery response";
+        return std::nullopt;
+    }
+    std::istringstream in(*response);
+    std::string tag, subject_hex, assigned, public_hex, signature_hex, extra;
+    primechain::protocol::CompositeLotteryProofV1 proof;
+    in >> tag >> proof.round >> proof.win_bps >> subject_hex >> assigned >> public_hex >> signature_hex;
+    const auto subject = parseHash(subject_hex);
+    if (!in || tag != "COMPOSITE_LOTTERY_WIN" || !subject.has_value() || (in >> extra)) {
+        error = *response;
+        return std::nullopt;
+    }
+    proof.subject_hash = *subject;
+    proof.assigned_validator = assigned;
+    proof.public_key = hexToBytes(public_hex);
+    proof.signature = hexToBytes(signature_hex);
+    return proof;
+}
+
 std::optional<primechain::protocol::ValidatorVoteV0> requestRecordFinalizationVote(
     const PeerEndpoint& peer,
     primechain::storage::StoredRecordKind kind,
@@ -1598,6 +1636,8 @@ public:
         bool ack_mempool_enabled,
         bool factorization_helper_enabled,
         int finalization_timeout_ms,
+        int composite_lottery_window_ms,
+        std::uint32_t composite_lottery_win_bps,
         std::vector<primechain::Address> validator_set,
         std::optional<primechain::wallet::MinerIdentity> validator_identity,
         bool use_chain_endpoints,
@@ -1609,6 +1649,8 @@ public:
           ack_mempool_enabled_(ack_mempool_enabled),
           factorization_helper_enabled_(factorization_helper_enabled),
           finalization_timeout_ms_(finalization_timeout_ms),
+          composite_lottery_window_ms_(composite_lottery_window_ms),
+          composite_lottery_win_bps_(composite_lottery_win_bps),
           store_(store_path_),
           commitment_store_(store_path_ + ".commitments"),
           phase_store_(store_path_ + ".phases"),
@@ -1968,6 +2010,10 @@ public:
             }
             if (line->rfind("SIGN_RECORD_CANDIDATE ", 0) == 0) {
                 signRecordCandidate(fd, *line);
+                continue;
+            }
+            if (line->rfind("SIGN_COMPOSITE_LOTTERY ", 0) == 0) {
+                signCompositeLottery(fd, *line);
                 continue;
             }
             if (line->rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0) {
@@ -3040,6 +3086,17 @@ private:
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
+        const auto expected_count = end - start + 1;
+        if (records.size() != expected_count) {
+            writeAll(fd, "ERROR requested record range is incomplete\n");
+            return;
+        }
+        for (std::size_t i = 0; i < records.size(); ++i) {
+            if (records[i].integer != start + i) {
+                writeAll(fd, "ERROR requested record range is non-contiguous\n");
+                return;
+            }
+        }
 
         std::ostringstream header;
         header << "RECORD_RANGE " << start << " " << end << " " << records.size() << "\n";
@@ -3922,6 +3979,46 @@ private:
             + std::to_string(local.integer) + " " + std::to_string(local.new_round) + " "
             + local.validator_address + " " + bytesToHex(local.public_key) + " "
             + bytesToHex(local.signature) + "\n");
+    }
+
+    void signCompositeLottery(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command, payload_hex, extra;
+        in >> command >> payload_hex;
+        const auto payload = hexToBytes(payload_hex);
+        if (!in || command != "SIGN_COMPOSITE_LOTTERY" || payload.empty() || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SIGN_COMPOSITE_LOTTERY\n");
+            return;
+        }
+        std::string error;
+        auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
+        if (!record.has_value()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        auto validation_record = *record;
+        validation_record.version = primechain::node::kDirectCompositeRecordVersion;
+        validation_record.composite_lottery = {};
+        if (!node.validateCompositeCandidate(validation_record, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!passCompositeLottery(*record, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeCommand(fd, "COMPOSITE_LOTTERY_WIN "
+            + std::to_string(record->composite_lottery.round) + " "
+            + std::to_string(record->composite_lottery.win_bps) + " "
+            + primechain::crypto::toHex(record->composite_lottery.subject_hash) + " "
+            + record->composite_lottery.assigned_validator + " "
+            + bytesToHex(record->composite_lottery.public_key) + " "
+            + bytesToHex(record->composite_lottery.signature) + "\n");
     }
 
     void signRecordCandidate(int fd, const std::string& line) {
@@ -5952,6 +6049,195 @@ private:
         submitComposite(fd, submission.str(), true);
     }
 
+    struct CompositeLotteryCandidate {
+        primechain::Address provider_address;
+        primechain::Hash256 candidate_hash{};
+    };
+
+    struct CompositeLotteryRoundState {
+        std::uint64_t round{1};
+        primechain::Hash256 previous_record_hash{};
+        std::chrono::steady_clock::time_point opened_at{};
+        std::vector<CompositeLotteryCandidate> candidates;
+        bool decided{false};
+        bool has_winner{false};
+        primechain::Hash256 winning_candidate_hash{};
+    };
+
+    bool compositeLotteryEnabled() const {
+        return composite_lottery_window_ms_ > 0;
+    }
+
+    bool compositeLotteryCandidateEquals(
+        const CompositeLotteryCandidate& candidate,
+        const primechain::Hash256& candidate_hash) const {
+        return candidate.candidate_hash == candidate_hash;
+    }
+
+    bool passCompositeLottery(
+        primechain::protocol::CompositeRecordV0& record,
+        std::string& error) {
+        if (!compositeLotteryEnabled()) return true;
+        if (!localValidatorActive()) {
+            error = "composite lottery requires an active local validator identity";
+            return false;
+        }
+        record.version = std::max<std::uint64_t>(record.version, primechain::node::kCompositeLotteryRecordVersion);
+        record.composite_lottery = {};
+        const auto subject_hash = primechain::protocol::compositeLotterySubjectHash(record);
+        const auto assigned = primechain::protocol::assignedCompositeLotteryValidator(record, validator_set_, error);
+        if (!assigned.has_value()) return false;
+        if (*assigned != validator_identity_->address) {
+            error = "composite lottery assigned to " + *assigned;
+            return false;
+        }
+
+        const auto candidate_hash = subject_hash;
+        const auto window = std::chrono::milliseconds(composite_lottery_window_ms_);
+        const auto now = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point deadline;
+        std::uint64_t observed_round = 1;
+
+        {
+            std::lock_guard<std::mutex> lock(composite_lottery_mutex_);
+            auto& state = composite_lottery_[record.integer];
+            if (state.candidates.empty() && !state.decided) {
+                state.round = 1;
+                state.previous_record_hash = record.previous_record_hash;
+                state.opened_at = now;
+            }
+            if (state.previous_record_hash != record.previous_record_hash) {
+                state = CompositeLotteryRoundState{};
+                state.round = 1;
+                state.previous_record_hash = record.previous_record_hash;
+                state.opened_at = now;
+            }
+            observed_round = state.round;
+            if (state.decided) {
+                if (state.has_winner) {
+                    if (state.winning_candidate_hash == candidate_hash) return true;
+                    error = "composite lottery selected a different candidate";
+                    return false;
+                }
+                state = CompositeLotteryRoundState{};
+                state.round = observed_round + 1;
+                state.previous_record_hash = record.previous_record_hash;
+                state.opened_at = now;
+            }
+            observed_round = state.round;
+            if (state.candidates.size() >= kMaxCompositeLotteryCandidates &&
+                std::none_of(state.candidates.begin(), state.candidates.end(),
+                    [&](const auto& candidate) { return compositeLotteryCandidateEquals(candidate, candidate_hash); })) {
+                error = "composite lottery candidate set is full";
+                return false;
+            }
+            if (std::none_of(state.candidates.begin(), state.candidates.end(),
+                    [&](const auto& candidate) { return compositeLotteryCandidateEquals(candidate, candidate_hash); })) {
+                state.candidates.push_back({record.proof.provider_address, candidate_hash});
+            }
+            deadline = state.opened_at + window;
+        }
+
+        const auto after_registration = std::chrono::steady_clock::now();
+        if (after_registration < deadline) {
+            std::this_thread::sleep_until(deadline);
+        }
+
+        std::lock_guard<std::mutex> lock(composite_lottery_mutex_);
+        auto found = composite_lottery_.find(record.integer);
+        if (found == composite_lottery_.end()) {
+            error = "composite lottery state disappeared";
+            return false;
+        }
+        auto& state = found->second;
+        if (state.previous_record_hash != record.previous_record_hash) {
+            error = "composite lottery previous hash changed";
+            return false;
+        }
+        if (!state.decided) {
+            state.decided = true;
+            if (state.candidates.empty()) {
+                state.has_winner = false;
+            } else {
+                std::random_device device;
+                std::mt19937_64 rng(device());
+                std::uniform_int_distribution<std::uint32_t> pass_dist(1, 10000);
+                state.has_winner = pass_dist(rng) <= composite_lottery_win_bps_;
+                if (state.has_winner) {
+                    std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
+                    state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
+                    std::cerr << "composite lottery winner integer " << record.integer
+                              << " round " << state.round << " candidates " << state.candidates.size()
+                              << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
+                } else {
+                    std::cerr << "composite lottery no-winner integer " << record.integer
+                              << " round " << state.round << " candidates " << state.candidates.size() << "\n";
+                }
+            }
+        }
+        if (!state.has_winner) {
+            error = "composite lottery returned no winner for round " + std::to_string(state.round);
+            return false;
+        }
+        if (state.winning_candidate_hash != candidate_hash) {
+            error = "composite lottery selected a different candidate";
+            return false;
+        }
+
+        record.composite_lottery.round = state.round;
+        record.composite_lottery.win_bps = composite_lottery_win_bps_;
+        record.composite_lottery.subject_hash = subject_hash;
+        record.composite_lottery.assigned_validator = validator_identity_->address;
+        record.composite_lottery.public_key = validator_identity_->public_key;
+        record.composite_lottery.signature = primechain::crypto::signProtocolMessage(
+            validator_identity_->private_key,
+            primechain::crypto::compositeLotteryWinSigningPayload(
+                record.previous_record_hash, record.integer, subject_hash,
+                state.round, composite_lottery_win_bps_, validator_identity_->address),
+            error).value_or(primechain::crypto::Bytes{});
+        if (record.composite_lottery.signature.empty()) {
+            if (error.empty()) error = "could not sign composite lottery win";
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureCompositeLottery(
+        primechain::protocol::CompositeRecordV0& record,
+        std::string& error) {
+        if (!compositeLotteryEnabled()) return true;
+        record.version = std::max<std::uint64_t>(record.version, primechain::node::kCompositeLotteryRecordVersion);
+        record.composite_lottery = {};
+        const auto assigned = primechain::protocol::assignedCompositeLotteryValidator(record, validator_set_, error);
+        if (!assigned.has_value()) return false;
+        if (localValidatorActive() && *assigned == validator_identity_->address) {
+            return passCompositeLottery(record, error);
+        }
+        for (const auto& peer : peers_) {
+            std::string peer_error;
+            const auto proof = requestCompositeLotteryWin(peer, record, peer_error);
+            if (!proof.has_value()) {
+                std::cerr << "composite lottery peer warning from " << peer.host << ":"
+                          << peer.port << ": " << peer_error << "\n";
+                continue;
+            }
+            record.composite_lottery = *proof;
+            if (primechain::protocol::verifyCompositeLotteryProof(record, validator_set_, peer_error)) {
+                return true;
+            }
+            std::cerr << "composite lottery peer proof rejected from " << peer.host << ":"
+                      << peer.port << ": " << peer_error << "\n";
+            record.composite_lottery = {};
+        }
+        error = "could not collect assigned composite lottery win from " + *assigned;
+        return false;
+    }
+
+    void clearCompositeLottery(primechain::PrimeValue integer) {
+        std::lock_guard<std::mutex> lock(composite_lottery_mutex_);
+        composite_lottery_.erase(integer);
+    }
+
     void submitCompositeReveal(int fd, const std::string& line) {
         if (quorumEnabled()) {
             writeAll(fd, "ERROR unsigned reveals disabled in quorum mode\n");
@@ -6160,6 +6446,11 @@ private:
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
             }
+            error.clear();
+            if (!ensureCompositeLottery(record, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Composite, error)) {
                 std::string sync_error;
@@ -6204,6 +6495,7 @@ private:
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
+        clearCompositeLottery(record.integer);
         propagateRecord(stored);
         writeAll(fd, "COMPOSITE_ACCEPTED "
             + std::to_string(g)
@@ -6807,6 +7099,8 @@ private:
     bool ack_mempool_enabled_{false};
     bool factorization_helper_enabled_{false};
     int finalization_timeout_ms_{0};
+    int composite_lottery_window_ms_{0};
+    std::uint32_t composite_lottery_win_bps_{kDefaultCompositeLotteryWinBps};
     primechain::storage::RecordStore store_;
     primechain::storage::CommitmentStore commitment_store_;
     primechain::storage::PhaseStore phase_store_;
@@ -6837,6 +7131,8 @@ private:
     std::mutex finalization_mutex_;
     mutable std::mutex client_penalty_mutex_;
     mutable std::map<std::uint32_t, ClientPenaltyState> client_penalties_;
+    std::mutex composite_lottery_mutex_;
+    std::map<primechain::PrimeValue, CompositeLotteryRoundState> composite_lottery_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::protocol::ValidatorVoteV0> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
@@ -6855,6 +7151,8 @@ struct Options {
     bool enable_ack_mempool{false};
     bool enable_factorization_helper{false};
     int finalization_timeout_ms{0};
+    int composite_lottery_window_ms{0};
+    std::uint32_t composite_lottery_win_bps{kDefaultCompositeLotteryWinBps};
     std::vector<primechain::Address> validator_set;
     std::string validator_identity_path;
     bool use_chain_endpoints{false};
@@ -6917,6 +7215,19 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             if (options.finalization_timeout_ms < 0) return std::nullopt;
             continue;
         }
+        if (flag == "--composite-lottery-window-ms") {
+            if (index >= argc) return std::nullopt;
+            options.composite_lottery_window_ms = std::stoi(argv[index++]);
+            if (options.composite_lottery_window_ms < 0) return std::nullopt;
+            continue;
+        }
+        if (flag == "--composite-lottery-win-bps") {
+            if (index >= argc) return std::nullopt;
+            const auto value = std::stoul(argv[index++]);
+            if (value > 10000) return std::nullopt;
+            options.composite_lottery_win_bps = static_cast<std::uint32_t>(value);
+            continue;
+        }
         if (flag == "--validator-set" || flag == "--genesis-validator-set") {
             options.validator_set.clear();
             while (index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
@@ -6946,7 +7257,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--composite-lottery-window-ms ms] [--composite-lottery-win-bps bps] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
               << "       " << argv0 << " --version\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
@@ -7026,6 +7337,8 @@ int main(int argc, char** argv) {
         options.enable_ack_mempool,
         options.enable_factorization_helper,
         options.finalization_timeout_ms,
+        options.composite_lottery_window_ms,
+        options.composite_lottery_win_bps,
         options.validator_set,
         validator_identity,
         options.use_chain_endpoints,
@@ -7118,6 +7431,10 @@ int main(int argc, char** argv) {
     }
     if (options.finalization_timeout_ms > 0) {
         std::cout << "finalization timeout: " << options.finalization_timeout_ms << " ms\n";
+    }
+    if (options.composite_lottery_window_ms > 0) {
+        std::cout << "composite lottery: window_ms=" << options.composite_lottery_window_ms
+                  << " win_bps=" << options.composite_lottery_win_bps << "\n";
     }
     if (validator_identity.has_value()) {
         const bool active = std::binary_search(

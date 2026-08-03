@@ -575,6 +575,44 @@ add_test(
 )
 
 add_test(
+    NAME composite_lottery_allows_winning_composites
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_smoke.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/composite-lottery-win
+        win
+)
+
+add_test(
+    NAME composite_lottery_rejects_no_winner_round
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_smoke.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/composite-lottery-lose
+        lose
+)
+
+add_test(
+    NAME composite_lottery_quorum_mines_to_6
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_quorum_smoke.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/composite-lottery-quorum
+)
+
+add_test(
+    NAME composite_lottery_two_client_bypass
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_two_client_bypass.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/composite-lottery-two-client-bypass
+)
+
+add_test(
     NAME quorum_direct_reveal_accepts_without_commitment
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/quorum_pending_reveal.sh

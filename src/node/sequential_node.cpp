@@ -525,6 +525,9 @@ bool validateStoredCompositePayload(
     if (!protocol::verifyCommitPhaseCertificate(*decoded, error)) {
         return false;
     }
+    if (!protocol::verifyCompositeLotteryProof(*decoded, validator_set, error)) {
+        return false;
+    }
     if (decoded->version == 1 && decoded->commit_phase.validator_set.empty()) {
         error = "embedded commit-phase certificate has no validator set";
         return false;
@@ -820,6 +823,7 @@ bool SequentialNode::validateCompositeCandidate(
     if (!validateCompositeProviderSignature(record.proof, error)) { error = "invalid composite provider signature: " + error; return false; }
     if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
+    if (!protocol::verifyCompositeLotteryProof(record, validator_set_, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
         (record.version < 1 ||
          (record.version <= kValidatorRewardRecordVersion && record.commit_phase.validator_set != validator_set_))) {

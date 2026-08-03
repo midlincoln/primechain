@@ -426,6 +426,24 @@ Bytes economicPolicySigningPayload(
     return payload;
 }
 
+Bytes compositeLotteryWinSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    const Hash256& subject_hash,
+    std::uint64_t round,
+    std::uint64_t win_bps,
+    const Address& assigned_validator) {
+    Bytes payload;
+    appendString(payload, "primechain-composite-lottery-win-mldsa65-v1");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, integer);
+    appendHash(payload, subject_hash);
+    appendUint64(payload, round);
+    appendUint64(payload, win_bps);
+    appendString(payload, assigned_validator);
+    return payload;
+}
+
 Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,

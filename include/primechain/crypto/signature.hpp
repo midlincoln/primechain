@@ -135,6 +135,13 @@ Bytes economicPolicySigningPayload(
     PrimeValue effective_integer,
     std::uint64_t sequence,
     const Address& validator_address);
+Bytes compositeLotteryWinSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    const Hash256& subject_hash,
+    std::uint64_t round,
+    std::uint64_t win_bps,
+    const Address& assigned_validator);
 Bytes recordFinalizationVoteSigningPayload(
     const Hash256& candidate_hash,
     std::uint64_t round,
