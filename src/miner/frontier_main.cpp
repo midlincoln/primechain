@@ -248,6 +248,12 @@ std::optional<Socket> connectToNode(const std::string& host, int port) {
         return std::nullopt;
     }
 
+    timeval timeout{};
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<std::uint16_t>(port));
@@ -292,7 +298,11 @@ std::optional<std::string> readRawLine(int fd) {
     char ch = '\0';
     while (true) {
         const ssize_t received = recv(fd, &ch, 1, 0);
+        if (received < 0 && errno == EINTR) continue;
         if (received <= 0) {
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                std::cerr << "read timed out waiting for node response\n";
+            }
             return std::nullopt;
         }
         if (ch == '\n') {
@@ -318,7 +328,12 @@ std::optional<std::string> readLine(int fd) {
     while (offset < size) {
         const ssize_t received = recv(fd, payload.data() + offset, size - offset, 0);
         if (received < 0 && errno == EINTR) continue;
-        if (received <= 0) return std::nullopt;
+        if (received <= 0) {
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                std::cerr << "read timed out waiting for framed node response\n";
+            }
+            return std::nullopt;
+        }
         offset += static_cast<std::size_t>(received);
     }
     return payload;
