@@ -13,6 +13,8 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -263,8 +265,45 @@ std::optional<Socket> connectToNode(const std::string& host, int port) {
         return std::nullopt;
     }
 
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        std::cerr << "connect failed: " << std::strerror(errno) << "\n";
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        std::cerr << "could not configure nonblocking connect: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+
+    const int connected = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (connected != 0 && errno != EINPROGRESS) {
+        std::cerr << "connect failed to " << host << ":" << port << ": " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+
+    if (connected != 0) {
+        fd_set write_set;
+        FD_ZERO(&write_set);
+        FD_SET(fd, &write_set);
+        timeval connect_timeout{};
+        connect_timeout.tv_sec = 5;
+        connect_timeout.tv_usec = 0;
+        const int ready = select(fd + 1, nullptr, &write_set, nullptr, &connect_timeout);
+        if (ready <= 0) {
+            std::cerr << "connect timed out to " << host << ":" << port << "\n";
+            close(fd);
+            return std::nullopt;
+        }
+        int socket_error = 0;
+        socklen_t socket_error_size = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_size) != 0 || socket_error != 0) {
+            std::cerr << "connect failed to " << host << ":" << port << ": "
+                      << std::strerror(socket_error != 0 ? socket_error : errno) << "\n";
+            close(fd);
+            return std::nullopt;
+        }
+    }
+
+    if (fcntl(fd, F_SETFL, flags) != 0) {
+        std::cerr << "could not restore blocking socket mode: " << std::strerror(errno) << "\n";
         close(fd);
         return std::nullopt;
     }
