@@ -585,7 +585,7 @@ add_test(
 )
 
 add_test(
-    NAME composite_lottery_rejects_no_winner_round
+    NAME composite_lottery_zero_bps_still_selects_candidate
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_smoke.sh
         $<TARGET_FILE:primechain-client>

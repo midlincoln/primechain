@@ -27,7 +27,7 @@ a=$(new_miner "$base/a.wallet")
 
 case "$mode" in
     win) win_bps=10000 ; target=6 ;;
-    lose) win_bps=0 ; target=4 ;;
+    lose) win_bps=0 ; target=6 ;;
     *) echo "unknown mode: $mode" >&2 ; exit 2 ;;
 esac
 
@@ -50,14 +50,8 @@ if [ "$mode" = win ]; then
     grep -q "^JOB_COMPLETE target=$target frontier=$target$" "$base/run.out"
     grep -q "composite lottery winner" "$base/a.log"
 else
-    if timeout 4 "$client" run-jobs "$base/work" > "$base/run.out" 2>&1; then
-        cat "$base/run.out"
-        echo "expected no-winner lottery run not to complete" >&2
-        exit 1
-    fi
+    "$client" run-jobs "$base/work" > "$base/run.out" 2>&1
     cat "$base/run.out"
-    grep -q "composite lottery returned no winner" "$base/run.out"
-    "$client" status 127.0.0.1 19140 > "$base/status.out"
-    cat "$base/status.out"
-    grep -q "^STATUS 2 " "$base/status.out"
+    grep -q "^JOB_COMPLETE target=$target frontier=$target$" "$base/run.out"
+    grep -q "composite lottery winner" "$base/a.log"
 fi

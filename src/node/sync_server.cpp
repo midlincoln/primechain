@@ -6070,7 +6070,6 @@ private:
         std::chrono::steady_clock::time_point opened_at{};
         std::vector<CompositeLotteryCandidate> candidates;
         bool decided{false};
-        bool has_winner{false};
         primechain::Hash256 winning_candidate_hash{};
     };
 
@@ -6124,15 +6123,9 @@ private:
             }
             observed_round = state.round;
             if (state.decided) {
-                if (state.has_winner) {
-                    if (state.winning_candidate_hash == candidate_hash) return true;
-                    error = "composite lottery selected a different candidate";
-                    return false;
-                }
-                state = CompositeLotteryRoundState{};
-                state.round = observed_round + 1;
-                state.previous_record_hash = record.previous_record_hash;
-                state.opened_at = now;
+                if (state.winning_candidate_hash == candidate_hash) return true;
+                error = "composite lottery selected a different candidate";
+                return false;
             }
             observed_round = state.round;
             if (state.candidates.size() >= kMaxCompositeLotteryCandidates &&
@@ -6167,27 +6160,17 @@ private:
         if (!state.decided) {
             state.decided = true;
             if (state.candidates.empty()) {
-                state.has_winner = false;
+                error = "composite lottery candidate set is empty";
+                return false;
             } else {
                 std::random_device device;
                 std::mt19937_64 rng(device());
-                std::uniform_int_distribution<std::uint32_t> pass_dist(1, 10000);
-                state.has_winner = pass_dist(rng) <= composite_lottery_win_bps_;
-                if (state.has_winner) {
-                    std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
-                    state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
-                    std::cerr << "composite lottery winner integer " << record.integer
-                              << " round " << state.round << " candidates " << state.candidates.size()
-                              << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
-                } else {
-                    std::cerr << "composite lottery no-winner integer " << record.integer
-                              << " round " << state.round << " candidates " << state.candidates.size() << "\n";
-                }
+                std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
+                state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
+                std::cerr << "composite lottery winner integer " << record.integer
+                          << " round " << state.round << " candidates " << state.candidates.size()
+                          << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
             }
-        }
-        if (!state.has_winner) {
-            error = "composite lottery returned no winner for round " + std::to_string(state.round);
-            return false;
         }
         if (state.winning_candidate_hash != candidate_hash) {
             error = "composite lottery selected a different candidate";
