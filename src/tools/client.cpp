@@ -2896,7 +2896,7 @@ std::optional<StatusLine> waitForFrontierAdvance(
     const PeerConfig& peer,
     primechain::PrimeValue previous_frontier,
     primechain::PrimeValue target) {
-    for (int attempt = 0; attempt < 24; ++attempt) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (syncWorkdir(argv0, workdir, peer) != 0) continue;
         const auto local = loadLocalStatus(chainPath(workdir));
@@ -3029,6 +3029,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
     if (!writeMineState(workdir, state)) return 1;
 
     int stagnant_attempts = 0;
+    constexpr int kMaxStagnantAttempts = 30;
     while (true) {
         const auto before_mine = loadLocalStatus(chainPath(workdir));
         std::vector<std::string> miner_args{
@@ -3064,12 +3065,16 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["updated_at"] = nowSeconds();
             state["last_result"] = "waiting-for-race-winner";
             if (!writeMineState(workdir, state)) return 1;
+            std::cout << "WAITING_FOR_RACE_WINNER frontier=" << before_mine.frontier
+                      << " target=" << *target << "\n";
             auto advanced = waitForFrontierAdvance(
                 argv0, workdir, *peer, before_mine.frontier, *target);
             if (!advanced.has_value()) {
-                state["last_result"] = "retrying-after-stalled-finalization";
+                state["last_result"] = "retrying-local-miner-after-race-wait";
                 state["updated_at"] = nowSeconds();
                 if (!writeMineState(workdir, state)) return 1;
+                std::cout << "RACE_WAIT_TIMEOUT_RETRY frontier=" << before_mine.frontier
+                          << " target=" << *target << "\n";
             }
             if (advanced.has_value()) {
                 local = *advanced;
@@ -3078,7 +3083,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
         }
         if (sync_rc != 0 || local.frontier <= before_mine.frontier) {
             ++stagnant_attempts;
-            if (stagnant_attempts >= 5) {
+            if (stagnant_attempts >= kMaxStagnantAttempts) {
                 state["status"] = "failed";
                 state["updated_at"] = nowSeconds();
                 state["last_result"] = sync_rc != 0 ? "sync-after-miner-failed" : "miner-failed";
@@ -3089,6 +3094,10 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["updated_at"] = nowSeconds();
             state["last_result"] = sync_rc != 0 ? "retrying-after-sync-failure" : "retrying-after-stalled-race";
             if (!writeMineState(workdir, state)) return 1;
+            std::cout << "RETRYING_LOCAL_MINER attempt=" << stagnant_attempts
+                      << " frontier=" << local.frontier
+                      << " target=" << *target << "\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
         stagnant_attempts = 0;
