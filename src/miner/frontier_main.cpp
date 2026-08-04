@@ -903,6 +903,21 @@ bool staleOrTransient(const std::string& response) {
            response.rfind("RECORD_CONFLICT", 0) == 0;
 }
 
+bool compositeLotteryLost(const std::string& response) {
+    return response.find("composite lottery selected a different candidate") != std::string::npos ||
+           response.find("could not collect assigned composite lottery win") != std::string::npos;
+}
+
+std::string compositeLotteryLossReason(const std::string& response) {
+    if (response.find("composite lottery selected a different candidate") != std::string::npos) {
+        return "selected-different-candidate";
+    }
+    if (response.find("could not collect assigned composite lottery win") != std::string::npos) {
+        return "assigned-validator-no-win";
+    }
+    return "not-selected";
+}
+
 bool resetsCompositeCommitState(const std::string& response) {
     return response.find("reveal does not match prior commitment") != std::string::npos ||
            response.find("commitment not selected for reveal") != std::string::npos;
@@ -1053,6 +1068,7 @@ int main(int argc, char** argv) {
         std::optional<std::string> commit_request;
         bool reused_pending_composite = false;
         bool skip_commit_request = false;
+        bool mining_composite = false;
         if (primechain::math::isPrime(next)) {
             const auto proof = primechain::math::makePrattProof(next, proofs);
             if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
@@ -1083,6 +1099,7 @@ int main(int argc, char** argv) {
             }
             proof_summary = prattProofSummary(*proof);
         } else {
+            mining_composite = true;
             auto proof = primechain::math::makeCompositeProof(next, composite_miner);
             if (!proof.has_value() || !primechain::math::verifyCompositeProof(*proof)) {
                 std::cerr << "could not construct composite proof for " << next << "\n";
@@ -1196,6 +1213,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!submitted_ok) {
+            if (mining_composite && compositeLotteryLost(last_rejection)) {
+                std::cout << withPeerPrefix(active_peer,
+                    "LOTTERY_LOST integer=" + std::to_string(next) +
+                    " provider=" + local_provider +
+                    " reason=" + compositeLotteryLossReason(last_rejection)) << "\n";
+            }
             if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {
                 clearPendingComposite(pending_composite_path);
             }
