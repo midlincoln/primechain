@@ -50,8 +50,19 @@ if [ "$mode" = win ]; then
     grep -q "^JOB_COMPLETE target=$target frontier=$target$" "$base/run.out"
     grep -q "composite lottery winner" "$base/a.log"
 else
-    "$client" run-jobs "$base/work" > "$base/run.out" 2>&1
+    if timeout 4 "$client" run-jobs "$base/work" > "$base/run.out" 2>&1; then
+        cat "$base/run.out"
+        echo "zero-bps lottery unexpectedly completed" >&2
+        exit 1
+    fi
     cat "$base/run.out"
-    grep -q "^JOB_COMPLETE target=$target frontier=$target$" "$base/run.out"
-    grep -q "composite lottery winner" "$base/a.log"
+    grep -q "LOTTERY_LOST integer=4" "$base/run.out"
+    grep -q "composite lottery lost integer 4" "$base/a.log"
+    "$client" status 127.0.0.1 19140 > "$base/status.out"
+    cat "$base/status.out"
+    frontier=$(awk '/^STATUS / { print $7 }' "$base/status.out")
+    if [ -z "$frontier" ] || [ "$frontier" -ge 4 ]; then
+        echo "zero-bps lottery advanced composite frontier unexpectedly: frontier=$frontier" >&2
+        exit 1
+    fi
 fi

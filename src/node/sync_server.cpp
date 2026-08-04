@@ -6162,15 +6162,32 @@ private:
             if (state.candidates.empty()) {
                 error = "composite lottery candidate set is empty";
                 return false;
-            } else {
-                std::random_device device;
-                std::mt19937_64 rng(device());
-                std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
-                state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
-                std::cerr << "composite lottery winner integer " << record.integer
-                          << " round " << state.round << " candidates " << state.candidates.size()
-                          << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
             }
+
+            const auto resolved_round = state.round;
+            std::random_device device;
+            std::mt19937_64 rng(device());
+            std::uniform_int_distribution<std::uint32_t> win_dist(1, 10000);
+            const auto draw = win_dist(rng);
+            if (draw > composite_lottery_win_bps_) {
+                std::cerr << "composite lottery lost integer " << record.integer
+                          << " round " << resolved_round << " candidates " << state.candidates.size()
+                          << " draw " << draw << " win_bps " << composite_lottery_win_bps_ << "\n";
+                state.decided = false;
+                state.candidates.clear();
+                state.winning_candidate_hash = {};
+                state.opened_at = std::chrono::steady_clock::now();
+                state.round = resolved_round + 1;
+                error = "composite lottery lost round " + std::to_string(resolved_round);
+                return false;
+            }
+
+            std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
+            state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
+            std::cerr << "composite lottery winner integer " << record.integer
+                      << " round " << state.round << " candidates " << state.candidates.size()
+                      << " draw " << draw << " win_bps " << composite_lottery_win_bps_
+                      << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
         }
         if (state.winning_candidate_hash != candidate_hash) {
             error = "composite lottery selected a different candidate";

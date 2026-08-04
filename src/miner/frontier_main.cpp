@@ -904,11 +904,15 @@ bool staleOrTransient(const std::string& response) {
 }
 
 bool compositeLotteryLost(const std::string& response) {
-    return response.find("composite lottery selected a different candidate") != std::string::npos ||
+    return response.find("composite lottery lost") != std::string::npos ||
+           response.find("composite lottery selected a different candidate") != std::string::npos ||
            response.find("could not collect assigned composite lottery win") != std::string::npos;
 }
 
 std::string compositeLotteryLossReason(const std::string& response) {
+    if (response.find("composite lottery lost") != std::string::npos) {
+        return "lottery-draw-lost";
+    }
     if (response.find("composite lottery selected a different candidate") != std::string::npos) {
         return "selected-different-candidate";
     }
