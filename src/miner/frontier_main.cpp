@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -500,17 +501,31 @@ std::size_t remoteValidatorCount(const std::string& host, int port) {
 std::vector<PeerEndpoint> quorumEndpoints(
     const std::string& host,
     int port,
-    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
+    const std::vector<PeerEndpoint>& configured_validator_endpoints,
+    bool parallel_probes) {
     std::vector<PeerEndpoint> peers;
     addUniquePeer(peers, {host, port});
     for (const auto& peer : configured_validator_endpoints) {
         addUniquePeer(peers, peer);
     }
-    for (const auto& peer : requestValidatorEndpointList(host, port)) {
-        addUniquePeer(peers, peer);
-    }
-    for (const auto& peer : requestPeerList(host, port)) {
-        addUniquePeer(peers, peer);
+    if (parallel_probes) {
+        auto validator_endpoints_future = std::async(
+            std::launch::async, requestValidatorEndpointList, host, port);
+        auto peer_list_future = std::async(
+            std::launch::async, requestPeerList, host, port);
+        for (const auto& peer : validator_endpoints_future.get()) {
+            addUniquePeer(peers, peer);
+        }
+        for (const auto& peer : peer_list_future.get()) {
+            addUniquePeer(peers, peer);
+        }
+    } else {
+        for (const auto& peer : requestValidatorEndpointList(host, port)) {
+            addUniquePeer(peers, peer);
+        }
+        for (const auto& peer : requestPeerList(host, port)) {
+            addUniquePeer(peers, peer);
+        }
     }
     return peers;
 }
@@ -684,8 +699,9 @@ std::optional<Status> getStatus(const std::string& host, int port) {
 std::vector<PeerEndpoint> sampledStatusProbePeers(
     const std::string& host,
     int port,
-    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
-    auto peers = quorumEndpoints(host, port, configured_validator_endpoints);
+    const std::vector<PeerEndpoint>& configured_validator_endpoints,
+    bool parallel_probes) {
+    auto peers = quorumEndpoints(host, port, configured_validator_endpoints, parallel_probes);
     if (peers.size() <= kMaxStatusProbeValidators) return peers;
 
     std::vector<PeerEndpoint> sample;
@@ -709,13 +725,30 @@ std::vector<PeerEndpoint> sampledStatusProbePeers(
 std::optional<PeerStatus> freshestPeerStatus(
     const std::string& host,
     int port,
-    const std::vector<PeerEndpoint>& configured_validator_endpoints) {
+    const std::vector<PeerEndpoint>& configured_validator_endpoints,
+    bool parallel_probes) {
+    const auto peers = sampledStatusProbePeers(host, port, configured_validator_endpoints, parallel_probes);
     std::optional<PeerStatus> best;
-    for (const auto& peer : sampledStatusProbePeers(host, port, configured_validator_endpoints)) {
-        const auto status = getStatus(peer.host, peer.port);
-        if (!status.has_value()) continue;
-        if (!best.has_value() || status->frontier > best->status.frontier) {
-            best = PeerStatus{peer, *status};
+    if (parallel_probes) {
+        std::vector<std::future<std::optional<Status>>> futures;
+        futures.reserve(peers.size());
+        for (const auto& peer : peers) {
+            futures.push_back(std::async(std::launch::async, getStatus, peer.host, peer.port));
+        }
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            const auto status = futures[i].get();
+            if (!status.has_value()) continue;
+            if (!best.has_value() || status->frontier > best->status.frontier) {
+                best = PeerStatus{peers[i], *status};
+            }
+        }
+    } else {
+        for (const auto& peer : peers) {
+            const auto status = getStatus(peer.host, peer.port);
+            if (!status.has_value()) continue;
+            if (!best.has_value() || status->frontier > best->status.frontier) {
+                best = PeerStatus{peer, *status};
+            }
         }
     }
     return best;
@@ -953,7 +986,7 @@ void warmQuorumCommitments(
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...]\n"
+              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...] [--parallel-probes]\n"
               << "legacy development: " << argv0
               << " [host] [port] [limit] [prime_miner] [composite_miner]\n";
 }
@@ -975,6 +1008,7 @@ int main(int argc, char** argv) {
     std::optional<primechain::wallet::MinerIdentity> composite_identity;
     std::optional<std::string> proof_store_path;
     std::optional<std::string> pending_composite_path;
+    bool parallel_probes = false;
     std::vector<PeerEndpoint> configured_validator_endpoints;
     int argument = 4;
     while (argument < argc) {
@@ -985,6 +1019,8 @@ int main(int argc, char** argv) {
         } else if (option == "--pending-composite") {
             if (argument >= argc) { printUsage(argv[0]); return 1; }
             pending_composite_path = argv[argument++];
+        } else if (option == "--parallel-probes") {
+            parallel_probes = true;
         } else if (option == "--validator-endpoint") {
             if (argument + 1 >= argc) { printUsage(argv[0]); return 1; }
             PeerEndpoint peer;
@@ -1031,7 +1067,7 @@ int main(int argc, char** argv) {
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
 
     while (true) {
-        const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints);
+        const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints, parallel_probes);
         if (!peer_status.has_value()) {
             std::cerr << "could not query any validator status\n";
             return 1;
