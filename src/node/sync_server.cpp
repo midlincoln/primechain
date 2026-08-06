@@ -418,6 +418,7 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SIGN_COMMIT_PHASE_TIMEOUT ", 0) == 0 ||
            line.rfind("TIMEOUT_COMMIT_PHASE ", 0) == 0 ||
            line.rfind("SIGN_RECORD_CANDIDATE ", 0) == 0 ||
+           line.rfind("SIGN_COMPOSITE_LOTTERY ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_REVEAL_PEER ", 0) == 0 ||
            line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
@@ -3124,8 +3125,18 @@ private:
             return;
         }
 
-        MapProofIndex proofs;
         std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (!node.status().has_genesis || n > node.status().frontier_integer) {
+            writeAll(fd, "ERROR factorization helper only serves integers at or below the local frontier\n");
+            return;
+        }
+
+        MapProofIndex proofs;
         if (!loadCompositeProofIndex(store_, proofs, error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
@@ -6560,12 +6571,30 @@ private:
             writeAll(fd, "ERROR invalid prime submission trailing data\n");
             return;
         }
-        if (!primechain::math::verifyPrattProof(proof)) {
-            writeAll(fd, "ERROR invalid Pratt proof\n");
-            return;
-        }
         if (!signed_submission) {
             writeAll(fd, "ERROR unsigned prime submissions are disabled\n");
+            return;
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (node.status().has_genesis && proof.p != node.status().frontier_integer + 1 &&
+            !(proof.p == node.status().frontier_integer && node.status().frontier_integer > 2)) {
+            std::ostringstream out;
+            out << "ERROR prime submission must target current frontier "
+                << node.status().frontier_integer
+                << " or next integer "
+                << (node.status().frontier_integer + 1) << "\n";
+            writeAll(fd, out.str());
+            return;
+        }
+
+        if (!primechain::math::verifyPrattProof(proof)) {
+            writeAll(fd, "ERROR invalid Pratt proof\n");
             return;
         }
 
@@ -6582,12 +6611,6 @@ private:
             authentication = primechain::crypto::packPrimeProofAuthentication(public_key, signature);
         }
 
-        std::string error;
-        primechain::node::SequentialNode node(store_path_);
-        if (!node.load(error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
         if (!node.status().has_genesis) {
             error.clear();
             if (!node.initializeGenesis(validator_set_, error)) {
