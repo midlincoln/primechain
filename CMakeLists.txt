@@ -129,6 +129,7 @@ add_executable(primechain-frontier-miner
 target_link_libraries(primechain-frontier-miner
     PRIVATE
         primechain_core
+        Threads::Threads
 )
 
 add_executable(primechain-estimator
