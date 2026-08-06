@@ -779,6 +779,55 @@ The frontier miner repeatedly:
 
 This is the first real mining flow for the sequential arithmetic chain. The optional `--proof-store` argument bootstraps the miner's local composite-proof index from an existing downloaded chain, so a miner can continue from a previously synced frontier instead of needing to start from genesis in the same process. `primechain-client run-jobs` passes the workdir chain as the proof store automatically.
 
+For public launch mining, the workdir runner is the conservative entry point. It syncs before mining and records job state:
+
+```bash
+./build/primechain-client init-workdir ~/pc-launch-miner 192.81.209.230 8339
+./build/primechain-client sync-peer ~/pc-launch-miner
+./build/primechain-client clear-job ~/pc-launch-miner
+./build/primechain-client add-mine-job ~/pc-launch-miner --target 10000
+./build/primechain-client run-jobs ~/pc-launch-miner
+```
+
+For competitive mining, `primechain-frontier-miner` also supports optional parallel validator probing. The flag does not change consensus rules; it only performs independent validator status and endpoint requests concurrently so the miner can see the freshest frontier faster:
+
+```bash
+./build/primechain-frontier-miner \
+  67.205.172.245 8339 10000 \
+  --prime-identity ~/pc-launch-miner/wallets/prime.wallet \
+  --composite-identity ~/pc-launch-miner/wallets/composite.wallet \
+  --proof-store ~/pc-launch-miner/data/chain.dat \
+  --pending-composite ~/pc-launch-miner/data/pending-composite.txt \
+  --validator-endpoint 192.81.209.230 8339 \
+  --validator-endpoint 137.184.129.231 8339 \
+  --validator-endpoint 67.205.172.245 8339 \
+  --parallel-probes
+```
+
+The direct frontier miner exits if its proof store is behind the validator frontier. On a fast-moving public chain, wrap the direct miner in a sync/retry loop:
+
+```bash
+while true
+do
+  ./build/primechain-client sync-peer ~/pc-launch-miner
+
+  ./build/primechain-frontier-miner \
+    67.205.172.245 8339 10000 \
+    --prime-identity ~/pc-launch-miner/wallets/prime.wallet \
+    --composite-identity ~/pc-launch-miner/wallets/composite.wallet \
+    --proof-store ~/pc-launch-miner/data/chain.dat \
+    --pending-composite ~/pc-launch-miner/data/pending-composite.txt \
+    --validator-endpoint 192.81.209.230 8339 \
+    --validator-endpoint 137.184.129.231 8339 \
+    --validator-endpoint 67.205.172.245 8339 \
+    --parallel-probes
+
+  sleep 1
+done
+```
+
+Stop the loop with `Ctrl+C`. If a submit response times out, the record may still have been accepted; sync and inspect the accepted record before assuming the attempt failed.
+
 When `ADVANCE_TO` creates new arithmetic records, the node also forwards each finalized record to configured peers with `SUBMIT_RECORD`. The receiving peer replays normal record validation before appending anything locally. Exact duplicate records are ignored. Same-tip conflicts are resolved deterministically: if two records have the same integer and same previous record hash, the lower finalized record hash replaces the local tip after replay validation. Continuous peer sync remains a fallback for peers that were offline or too far behind during direct propagation.
 
 Current development conflict responses:
