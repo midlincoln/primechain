@@ -83,7 +83,7 @@ private:
     void noteValidatorParticipation(const protocol::PrimeRecordV0& record, bool note_fee, bool note_reward);
     bool restoreSnapshot(const storage::ReplaySnapshot& snapshot);
     void saveSnapshot(bool force = false) const;
-    void credit(const Address& address, PrimeValue prime, std::uint64_t micro_units);
+    bool credit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error);
     bool debit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error);
 
     storage::RecordStore store_;

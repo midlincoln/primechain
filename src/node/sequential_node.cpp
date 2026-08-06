@@ -1344,7 +1344,9 @@ bool SequentialNode::applyTransactions(
             }
         }
         for (const auto& output : tx.outputs) {
-            credit(output.receiver_address, output.prime, output.amount.numerator);
+            if (!credit(output.receiver_address, output.prime, output.amount.numerator, error)) {
+                return false;
+            }
         }
         if (tx.fee.amount.numerator != 0 &&
             !checkedAdd(collected_fees[tx.fee.prime], tx.fee.amount.numerator)) {
@@ -1355,7 +1357,9 @@ bool SequentialNode::applyTransactions(
     }
     if (!fee_recipient.empty()) {
         for (const auto& fee : collected_fees) {
-            credit(fee_recipient, fee.first, fee.second);
+            if (!credit(fee_recipient, fee.first, fee.second, error)) {
+                return false;
+            }
         }
     }
     return true;
@@ -1375,33 +1379,47 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
 
     if (validator_set_.empty() || record.height == 0) {
         if (pending_composite_providers_.empty()) {
-            credit(record.proof.provider_address, record.integer, kAssetMicroUnits);
+            if (!credit(record.proof.provider_address, record.integer, kAssetMicroUnits, error)) {
+                return false;
+            }
         } else {
             constexpr std::uint64_t prime_reward = kAssetMicroUnits / 2;
             const std::uint64_t composite_pool = kAssetMicroUnits - prime_reward;
             const std::uint64_t per_composite = composite_pool / pending_composite_providers_.size();
             const std::uint64_t remainder = composite_pool % pending_composite_providers_.size();
 
-            credit(record.proof.provider_address, record.integer, prime_reward + remainder);
+            if (!credit(record.proof.provider_address, record.integer, prime_reward + remainder, error)) {
+                return false;
+            }
             for (const auto& provider : pending_composite_providers_) {
-                credit(provider, record.integer, per_composite);
+                if (!credit(provider, record.integer, per_composite, error)) {
+                    return false;
+                }
             }
         }
     } else {
-        credit(validatorRewardPoolAddress(), record.integer, kValidatorPrimeRewardMicroUnits);
+        if (!credit(validatorRewardPoolAddress(), record.integer, kValidatorPrimeRewardMicroUnits, error)) {
+            return false;
+        }
         if (pending_composite_providers_.empty()) {
-            credit(record.proof.provider_address, record.integer,
-                kPrimeDiscoveryRewardMicroUnits + kCompositeDiscoveryRewardMicroUnits);
+            if (!credit(record.proof.provider_address, record.integer,
+                    kPrimeDiscoveryRewardMicroUnits + kCompositeDiscoveryRewardMicroUnits, error)) {
+                return false;
+            }
         } else {
             const std::uint64_t per_composite =
                 kCompositeDiscoveryRewardMicroUnits / pending_composite_providers_.size();
             const std::uint64_t remainder =
                 kCompositeDiscoveryRewardMicroUnits % pending_composite_providers_.size();
 
-            credit(record.proof.provider_address, record.integer,
-                kPrimeDiscoveryRewardMicroUnits + remainder);
+            if (!credit(record.proof.provider_address, record.integer,
+                    kPrimeDiscoveryRewardMicroUnits + remainder, error)) {
+                return false;
+            }
             for (const auto& provider : pending_composite_providers_) {
-                credit(provider, record.integer, per_composite);
+                if (!credit(provider, record.integer, per_composite, error)) {
+                    return false;
+                }
             }
         }
     }
@@ -1414,9 +1432,13 @@ bool SequentialNode::applyPrimeLedger(const protocol::PrimeRecordV0& record, std
     return true;
 }
 
-void SequentialNode::credit(const Address& address, PrimeValue prime, std::uint64_t micro_units) {
-    balances_[{address, prime}] += micro_units;
-    total_supply_[prime] += micro_units;
+bool SequentialNode::credit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error) {
+    if (!checkedAdd(balances_[{address, prime}], micro_units) ||
+        !checkedAdd(total_supply_[prime], micro_units)) {
+        error = "credit amount overflow";
+        return false;
+    }
+    return true;
 }
 
 bool SequentialNode::debit(const Address& address, PrimeValue prime, std::uint64_t micro_units, std::string& error) {
