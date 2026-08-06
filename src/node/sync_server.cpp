@@ -65,6 +65,11 @@ constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
+// Legit queries only ever cover integers already in the local proof index
+// (bounded by the frontier). Without a cap, isPrime() runs unbounded
+// O(sqrt(n)) trial division on the raw client-supplied n before the index
+// is even checked -- an easy unauthenticated CPU-burn.
+constexpr primechain::PrimeValue kMaxFactorizationQuery = 1'000'000'000'000ULL;  // 1e12
 constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 8;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
@@ -3121,6 +3126,10 @@ private:
         std::string extra;
         if (!in || command != "GET_FACTORIZATION" || n < 2 || (in >> extra)) {
             writeAll(fd, "ERROR invalid GET_FACTORIZATION; expected GET_FACTORIZATION n\n");
+            return;
+        }
+        if (n > kMaxFactorizationQuery) {
+            writeAll(fd, "ERROR n exceeds maximum GET_FACTORIZATION query size\n");
             return;
         }
 
