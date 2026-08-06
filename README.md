@@ -22,6 +22,8 @@ Implemented and tested in the current public repository:
 
 The tested one-validator-to-three-validator launch procedure is documented in [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). Mainnet-candidate validator owner onboarding is documented in [`docs/mainnet-validator-onboarding.md`](docs/mainnet-validator-onboarding.md). Validator admission, reserve, quorum, reward, fee, and slashing-status rules are summarized in [`docs/validator-economics.md`](docs/validator-economics.md). The active public-launch and Bitcoin-readiness plan is tracked in [`docs/working-plan.md`](docs/working-plan.md), and the lower-level production backlog is tracked in [`docs/production-roadmap-v0.md`](docs/production-roadmap-v0.md).
 
+Public validator operators should keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, `--enable-factorization-helper` is not part of the public launch validator profile. Release commit `b6c453e2cfbb` hardens public sync-server command handling around helper factorization, off-frontier prime submission, and composite-lottery signing rate limits; see the validator runbooks for the operator note.
+
 Still not production-ready:
 
 - permissionless validator selection and Sybil-resistance economics

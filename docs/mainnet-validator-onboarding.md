@@ -44,6 +44,8 @@ Minimum operational requirements:
 
 Firewall/security group must allow inbound TCP to the validator port, normally `8339`.
 
+Public validator security baseline: run only the normal validator service profile unless debugging. Do not enable `--enable-factorization-helper` on an internet-facing validator as a default setting. Release commit `b6c453e2cfbb` hardens helper factorization by bounding it to the replayed frontier, rejects off-frontier prime submissions before expensive Pratt proof verification, and counts composite-lottery signing as a write command for connection limiting. The launch-testnet-1 validators currently keep `GET_FACTORIZATION` disabled.
+
 ## Build Or Update The Validator
 
 Run as the `primechain` user unless the command explicitly uses `sudo`.

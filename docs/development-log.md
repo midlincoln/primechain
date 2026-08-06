@@ -2,6 +2,26 @@
 
 This file records important project decisions and unresolved questions so the architecture does not depend on chat history.
 
+## 2026-08-06: Public Sync-Server Command Hardening
+
+An external review pointed out that the optional `GET_FACTORIZATION` development
+helper could become a public CPU denial-of-service surface if enabled on an
+internet-facing validator: a client could request factorization for a large
+off-chain integer and force the server down the trial-division path.
+
+Release commit `b6c453e2cfbb` hardens the public sync-server boundary:
+
+- `GET_FACTORIZATION` is still disabled by default and now refuses integers
+  above the node's replayed local frontier before building a proof index or
+  factorizing.
+- `SUBMIT_SIGNED_PRIME` rejects off-frontier submissions before running Pratt
+  certificate verification.
+- `SIGN_COMPOSITE_LOTTERY` is counted as a write command for the existing
+  per-connection command limit.
+
+The launch-testnet-1 validators were updated to this commit and continue to run
+with `GET_FACTORIZATION` disabled.
+
 ## 2026-07-18: Pending Signed Composite Reveals
 
 Added validator-side pending reveal handling for composite commit/reveal races.

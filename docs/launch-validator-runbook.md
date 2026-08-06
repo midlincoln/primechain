@@ -29,6 +29,8 @@ Do not press Ctrl-C in a validator server terminal unless you intend to stop tha
 
 For long-running validators, prefer `primechain-ops` over hand-editing systemd units. It generates the full `ExecStart` line, checks that the binary supports chain-derived startup flags, writes the service, enables it, and restarts it.
 
+Security note for public validators: keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, do not enable `--enable-factorization-helper` on an internet-facing validator as a normal launch setting. Release commit `b6c453e2cfbb` hardens this area by serving `GET_FACTORIZATION` only for integers at or below the local frontier, rejecting off-frontier `SUBMIT_SIGNED_PRIME` requests before Pratt verification, and counting `SIGN_COMPOSITE_LOTTERY` as a write command for connection limiting. The live launch-testnet-1 validators run with `GET_FACTORIZATION` disabled.
+
 Validator 1:
 
 ```bash
