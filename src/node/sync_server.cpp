@@ -586,6 +586,74 @@ std::optional<primechain::Hash256> previousRecordHash(
     return decoded->previous_record_hash;
 }
 
+std::optional<primechain::Hash256> recordSubjectHashWithoutFinalization(
+    const primechain::storage::StoredRecord& stored,
+    std::string& error) {
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) return std::nullopt;
+        return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*decoded);
+    }
+
+    const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!decoded.has_value()) return std::nullopt;
+    return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*decoded);
+}
+
+std::optional<std::uint64_t> recordFinalizationRound(
+    const primechain::storage::StoredRecord& stored,
+    const std::vector<primechain::Address>& validator_set,
+    std::string& error) {
+    primechain::protocol::FinalizationProofV0 proof;
+    primechain::Hash256 previous_hash{};
+    primechain::PrimeValue integer = 0;
+
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!decoded.has_value()) return std::nullopt;
+        proof = decoded->finalized_by;
+        previous_hash = decoded->previous_record_hash;
+        integer = decoded->integer;
+    } else {
+        const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!decoded.has_value()) return std::nullopt;
+        proof = decoded->finalized_by;
+        previous_hash = decoded->previous_record_hash;
+        integer = decoded->integer;
+    }
+
+    std::uint64_t round = 0;
+    if (!primechain::protocol::verifyRoundChangeCertificate(
+            proof, previous_hash, integer, validator_set, round, error)) {
+        return std::nullopt;
+    }
+    return round;
+}
+
+std::optional<bool> recordsShareFinalizationSubject(
+    const primechain::storage::StoredRecord& left,
+    const primechain::storage::StoredRecord& right,
+    std::string& error) {
+    if (left.kind != right.kind || left.integer != right.integer || left.height != right.height) {
+        return false;
+    }
+
+    const auto left_previous = previousRecordHash(left, error);
+    if (!left_previous.has_value()) return std::nullopt;
+    error.clear();
+    const auto right_previous = previousRecordHash(right, error);
+    if (!right_previous.has_value()) return std::nullopt;
+    if (*left_previous != *right_previous) return false;
+
+    error.clear();
+    const auto left_subject = recordSubjectHashWithoutFinalization(left, error);
+    if (!left_subject.has_value()) return std::nullopt;
+    error.clear();
+    const auto right_subject = recordSubjectHashWithoutFinalization(right, error);
+    if (!right_subject.has_value()) return std::nullopt;
+    return *left_subject == *right_subject;
+}
+
 std::optional<primechain::Address> recordProviderAddress(
     const primechain::storage::StoredRecord& stored,
     std::string& error) {
@@ -3298,7 +3366,12 @@ private:
                     writeAll(fd, "ERROR " + error + "\n");
                     return;
                 }
-                if (!existing.has_value() || existing->record_hash != submitted->record_hash) {
+                if (!existing.has_value()) {
+                    writeAll(fd, "ERROR finalized quorum record is immutable\n");
+                    return;
+                }
+                if (existing->record_hash != submitted->record_hash &&
+                    submitted->integer < node.status().frontier_integer) {
                     writeAll(fd, "ERROR finalized quorum record is immutable\n");
                     return;
                 }
@@ -3352,6 +3425,58 @@ private:
             return;
         }
         if (existing.has_value() && quorumEnabled()) {
+            if (submitted.integer == frontier_integer) {
+                error.clear();
+                const auto same_subject = recordsShareFinalizationSubject(*existing, submitted, error);
+                if (!same_subject.has_value()) {
+                    writeAll(fd, "ERROR could not compare quorum tip replacement: " + error + "\n");
+                    return;
+                }
+                if (*same_subject) {
+                    error.clear();
+                    const auto existing_round = recordFinalizationRound(*existing, validator_set_, error);
+                    if (!existing_round.has_value()) {
+                        writeAll(fd, "ERROR could not verify existing tip finalization round: " + error + "\n");
+                        return;
+                    }
+                    error.clear();
+                    const auto submitted_round = recordFinalizationRound(submitted, validator_set_, error);
+                    if (!submitted_round.has_value()) {
+                        writeAll(fd, "ERROR could not verify submitted tip finalization round: " + error + "\n");
+                        return;
+                    }
+                    if (*submitted_round > *existing_round) {
+                        error.clear();
+                        const auto validated =
+                            validateTipReplacementCandidate(store_path_, *existing, submitted, error);
+                        if (!validated.has_value()) {
+                            writeAll(fd, "ERROR invalid newer-round tip replacement: " + error + "\n");
+                            return;
+                        }
+                        error.clear();
+                        if (!store_.replaceTip(existing->record_hash, *validated, error)) {
+                            writeAll(fd, "ERROR could not replace tip: " + error + "\n");
+                            return;
+                        }
+                        primechain::node::SequentialNode reloaded(store_path_);
+                        if (!reloaded.load(error)) {
+                            writeAll(fd, "ERROR could not replay replaced tip: " + error + "\n");
+                            return;
+                        }
+                        validator_set_ = reloaded.validatorSet();
+                        clearEpochVotesAfterRecord();
+                        clearSignedCandidate(submitted.integer);
+                        revalidateMempool();
+                        propagateRecord(*validated);
+                        writeAll(fd, "RECORD_REPLACED "
+                            + primechain::crypto::toHex(validated->record_hash)
+                            + " "
+                            + primechain::crypto::toHex(existing->record_hash)
+                            + "\n");
+                        return;
+                    }
+                }
+            }
             writeAll(fd, "RECORD_CONFLICT_WORSE "
                 + primechain::crypto::toHex(submitted.record_hash)
                 + " "
