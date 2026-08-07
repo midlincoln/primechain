@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <sys/stat.h>
@@ -612,7 +613,21 @@ bool RecordStore::append(const StoredRecord& record, std::string& error) const {
 
     const IndexEntry entry{record.integer, store_size};
     const std::uint64_t new_store_size = store_size + bytes.size();
-    appendIndexEntry(path_, store_size, new_store_size, entries.size(), entry);
+    if (!appendIndexEntry(path_, store_size, new_store_size, entries.size(), entry)) {
+        // The record body above is already durably written (fsynced);
+        // this is the index -- a derived structure loadIndex()/
+        // prepareIndex() can already detect as stale by size and, in
+        // principle, rebuild from the record store itself. So this
+        // isn't escalated to a hard failure (returning false here
+        // would make append() look like it failed when the data
+        // that matters is safely on disk), just made visible instead
+        // of silently swallowed, which is what happened before.
+        std::cerr << "record_store: index update failed for integer="
+                  << record.integer << " at " << path_
+                  << " -- record data is durable, but the index is now"
+                     " stale and needs to be rebuilt from the record"
+                     " store\n";
+    }
     return true;
 }
 
