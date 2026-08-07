@@ -24,6 +24,56 @@ namespace {
 
 constexpr std::uint64_t kFixedTransferFeeMicroUnits = 1;
 
+// Every numeric CLI argument here (prime, amount, fee, nonce, epoch,
+// port) went straight through std::stoull/std::stoi with no bounds or
+// format checking. std::stoull throws std::out_of_range on anything
+// that doesn't fit in a uint64_t -- an uncaught exception that
+// terminates the process outright ("terminate called after throwing
+// an instance of 'std::out_of_range'") instead of a normal CLI error,
+// confirmed by actually triggering it. std::stoi has the same failure
+// mode for a too-large port, plus std::invalid_argument for anything
+// non-numeric. A malformed/adversarial amount from any caller --
+// including a well-behaved wallet client passing along whatever a
+// user typed -- shouldn't be able to crash the process instead of
+// getting a clean rejection.
+std::optional<std::uint64_t> parseUint64Arg(const std::string& text, const std::string& what) {
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+        std::cerr << what << " must be a non-negative integer: '" << text << "'\n";
+        return std::nullopt;
+    }
+    try {
+        std::size_t consumed = 0;
+        const unsigned long long value = std::stoull(text, &consumed);
+        if (consumed != text.size()) {
+            std::cerr << what << " must be a non-negative integer: '" << text << "'\n";
+            return std::nullopt;
+        }
+        return static_cast<std::uint64_t>(value);
+    } catch (const std::out_of_range&) {
+        std::cerr << what << " is too large to fit in 64 bits: '" << text << "'\n";
+        return std::nullopt;
+    }
+}
+
+std::optional<int> parsePortArg(const std::string& text) {
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+        std::cerr << "port must be a non-negative integer: '" << text << "'\n";
+        return std::nullopt;
+    }
+    try {
+        std::size_t consumed = 0;
+        const int value = std::stoi(text, &consumed);
+        if (consumed != text.size() || value < 0 || value > 65535) {
+            std::cerr << "port must be between 0 and 65535: '" << text << "'\n";
+            return std::nullopt;
+        }
+        return value;
+    } catch (const std::out_of_range&) {
+        std::cerr << "port is too large: '" << text << "'\n";
+        return std::nullopt;
+    }
+}
+
 struct DevWallet {
     std::string address;
     std::vector<std::uint8_t> public_key;
@@ -362,33 +412,38 @@ int main(int argc, char** argv) {
             return 1;
         }
         const std::string host = argv[2];
-        const int port = std::stoi(argv[3]);
+        const auto port = parsePortArg(argv[3]);
         const std::string sender_wallet_path = argv[4];
         const std::string receiver_address = argv[5];
-        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
-        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto prime = parseUint64Arg(argv[6], "prime");
+        const auto amount = parseUint64Arg(argv[7], "amount");
         const auto fee = argc == 10
-            ? static_cast<std::uint64_t>(std::stoull(argv[8]))
-            : kFixedTransferFeeMicroUnits;
-        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[argc - 1]));
+            ? parseUint64Arg(argv[8], "fee")
+            : std::optional<std::uint64_t>(kFixedTransferFeeMicroUnits);
+        const auto nonce = parseUint64Arg(argv[argc - 1], "nonce");
+        if (!port.has_value() || !prime.has_value() || !amount.has_value() ||
+            !fee.has_value() || !nonce.has_value()) {
+            return 1;
+        }
+        const auto prime_value = static_cast<primechain::PrimeValue>(*prime);
         primechain::wallet::MinerIdentity sender;
         std::string error;
         if (!primechain::wallet::loadMinerIdentity(sender_wallet_path, sender, error)) {
             std::cerr << "could not load authenticated sender wallet: " << error << "\n";
             return 1;
         }
-        if (!primechain::protocol::isProtocolAddress(receiver_address) || prime < 2 || amount == 0) {
+        if (!primechain::protocol::isProtocolAddress(receiver_address) || prime_value < 2 || *amount == 0) {
             std::cerr << "invalid transfer arguments\n";
             return 1;
         }
 
         const auto tx = makeAuthenticatedTransferTransaction(
-            sender, receiver_address, prime, amount, fee, nonce, error);
+            sender, receiver_address, prime_value, *amount, *fee, *nonce, error);
         if (!tx.has_value()) {
             std::cerr << "could not sign transaction: " << error << "\n";
             return 1;
         }
-        return submitTransaction(host, port, *tx) ? 0 : 1;
+        return submitTransaction(host, *port, *tx) ? 0 : 1;
     }
 
     if (argc > 1 && std::string(argv[1]) == "distribute-fee-pool") {
@@ -397,24 +452,28 @@ int main(int argc, char** argv) {
             return 1;
         }
         const std::string host = argv[2];
-        const int port = std::stoi(argv[3]);
-        const auto epoch = static_cast<std::uint64_t>(std::stoull(argv[4]));
-        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[5]));
-        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[6]));
-        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto port = parsePortArg(argv[3]);
+        const auto epoch = parseUint64Arg(argv[4], "epoch");
+        const auto prime = parseUint64Arg(argv[5], "prime");
+        const auto amount = parseUint64Arg(argv[6], "amount");
+        const auto nonce = parseUint64Arg(argv[7], "nonce");
+        if (!port.has_value() || !epoch.has_value() || !prime.has_value() ||
+            !amount.has_value() || !nonce.has_value()) {
+            return 1;
+        }
         std::vector<primechain::Address> validators;
         validators.reserve(static_cast<std::size_t>(argc - 8));
         for (int i = 8; i < argc; ++i) validators.push_back(argv[i]);
 
         std::string error;
         const auto tx = makeValidatorPoolDistributionTransaction(
-            3, primechain::protocol::validatorFeePoolAddress(epoch),
-            prime, amount, nonce, std::move(validators), error);
+            3, primechain::protocol::validatorFeePoolAddress(*epoch),
+            static_cast<primechain::PrimeValue>(*prime), *amount, *nonce, std::move(validators), error);
         if (!tx.has_value()) {
             std::cerr << "could not build fee-pool distribution transaction: " << error << "\n";
             return 1;
         }
-        return submitTransaction(host, port, *tx) ? 0 : 1;
+        return submitTransaction(host, *port, *tx) ? 0 : 1;
     }
 
     if (argc > 1 && std::string(argv[1]) == "distribute-validator-reward-pool") {
@@ -423,24 +482,28 @@ int main(int argc, char** argv) {
             return 1;
         }
         const std::string host = argv[2];
-        const int port = std::stoi(argv[3]);
-        const auto epoch = static_cast<std::uint64_t>(std::stoull(argv[4]));
-        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[5]));
-        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[6]));
-        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[7]));
+        const auto port = parsePortArg(argv[3]);
+        const auto epoch = parseUint64Arg(argv[4], "epoch");
+        const auto prime = parseUint64Arg(argv[5], "prime");
+        const auto amount = parseUint64Arg(argv[6], "amount");
+        const auto nonce = parseUint64Arg(argv[7], "nonce");
+        if (!port.has_value() || !epoch.has_value() || !prime.has_value() ||
+            !amount.has_value() || !nonce.has_value()) {
+            return 1;
+        }
         std::vector<primechain::Address> validators;
         validators.reserve(static_cast<std::size_t>(argc - 8));
         for (int i = 8; i < argc; ++i) validators.push_back(argv[i]);
 
         std::string error;
         const auto tx = makeValidatorPoolDistributionTransaction(
-            5, primechain::protocol::validatorRewardPoolAddress(epoch),
-            prime, amount, nonce, std::move(validators), error);
+            5, primechain::protocol::validatorRewardPoolAddress(*epoch),
+            static_cast<primechain::PrimeValue>(*prime), *amount, *nonce, std::move(validators), error);
         if (!tx.has_value()) {
             std::cerr << "could not build validator reward-pool distribution transaction: " << error << "\n";
             return 1;
         }
-        return submitTransaction(host, port, *tx) ? 0 : 1;
+        return submitTransaction(host, *port, *tx) ? 0 : 1;
     }
 
     if (argc > 1 && std::string(argv[1]) == "reserve-lock") {
@@ -449,13 +512,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         const std::string host = argv[2];
-        const int port = std::stoi(argv[3]);
+        const auto port = parsePortArg(argv[3]);
         const std::string sender_wallet_path = argv[4];
         const primechain::Address validator_address = argv[5];
-        const auto prime = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
-        const auto amount = static_cast<std::uint64_t>(std::stoull(argv[7]));
-        const auto fee = static_cast<std::uint64_t>(std::stoull(argv[8]));
-        const auto nonce = static_cast<std::uint64_t>(std::stoull(argv[9]));
+        const auto prime = parseUint64Arg(argv[6], "prime");
+        const auto amount = parseUint64Arg(argv[7], "amount");
+        const auto fee = parseUint64Arg(argv[8], "fee");
+        const auto nonce = parseUint64Arg(argv[9], "nonce");
+        if (!port.has_value() || !prime.has_value() || !amount.has_value() ||
+            !fee.has_value() || !nonce.has_value()) {
+            return 1;
+        }
 
         primechain::wallet::MinerIdentity sender;
         std::string error;
@@ -464,12 +531,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         const auto tx = makeValidatorReserveLockTransaction(
-            sender, validator_address, prime, amount, fee, nonce, error);
+            sender, validator_address, static_cast<primechain::PrimeValue>(*prime), *amount, *fee, *nonce, error);
         if (!tx.has_value()) {
             std::cerr << "could not sign validator reserve-lock transaction: " << error << "\n";
             return 1;
         }
-        return submitTransaction(host, port, *tx) ? 0 : 1;
+        return submitTransaction(host, *port, *tx) ? 0 : 1;
     }
 
     if (argc != 9 && argc != 11) {
