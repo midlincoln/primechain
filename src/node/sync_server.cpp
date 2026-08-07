@@ -1915,6 +1915,10 @@ public:
                 sendValidatorEndpoints(fd);
                 continue;
             }
+            if (*line == "GET_FINALIZATION_PROPOSER" || line->rfind("GET_FINALIZATION_PROPOSER ", 0) == 0) {
+                sendFinalizationProposer(fd, *line);
+                continue;
+            }
             if (*line == "GET_ECONOMIC_POLICY") {
                 sendEconomicPolicy(fd);
                 continue;
@@ -3111,6 +3115,45 @@ private:
         writeAll(fd, out.str());
     }
 
+    void sendFinalizationProposer(int fd, const std::string& line) const {
+        std::istringstream in(line);
+        std::string command;
+        primechain::PrimeValue integer = 0;
+        std::uint64_t round = 0;
+        std::string extra;
+        in >> command;
+        if (!in || command != "GET_FINALIZATION_PROPOSER") {
+            writeAll(fd, "ERROR invalid GET_FINALIZATION_PROPOSER\n");
+            return;
+        }
+        if (in >> integer) {
+            if (!(in >> round)) round = 0;
+            if (in >> extra) {
+                writeAll(fd, "ERROR invalid GET_FINALIZATION_PROPOSER\n");
+                return;
+            }
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        const auto target = node.status().frontier_integer + 1;
+        if (integer == 0) integer = target;
+        if (integer != target) {
+            writeAll(fd, "ERROR finalization proposer query must target next integer "
+                + std::to_string(target) + "\n");
+            return;
+        }
+        if (round == 0) round = activeFinalizationRound(integer);
+        const auto proposer = finalizationProposer(node.status().latest_record_hash, integer, round);
+        writeAll(fd, "FINALIZATION_PROPOSER " + std::to_string(integer) + " "
+            + std::to_string(round) + " " + proposer + " "
+            + primechain::crypto::toHex(node.status().latest_record_hash) + "\n");
+    }
+
     void sendRecord(int fd, const std::string& line) const {
         std::istringstream in(line);
         std::string command;
@@ -3703,6 +3746,26 @@ private:
         return true;
     }
 
+    primechain::Address finalizationProposer(
+        const primechain::Hash256& previous_hash,
+        primechain::PrimeValue integer,
+        std::uint64_t round) const {
+        if (validator_set_.empty()) return {};
+        std::string payload = "primechain-finalization-proposer-v1:";
+        payload += primechain::crypto::toHex(previous_hash);
+        payload += ":";
+        payload += std::to_string(integer);
+        payload += ":";
+        payload += std::to_string(round);
+        const std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
+        const auto hash = primechain::crypto::sha3_256(bytes);
+        std::uint64_t selector = 0;
+        for (std::size_t i = 0; i < 8; ++i) {
+            selector = (selector << 8) | hash[i];
+        }
+        return validator_set_[selector % validator_set_.size()];
+    }
+
     void clearSignedCandidate(primechain::PrimeValue integer) {
         std::lock_guard<std::mutex> lock(finalization_mutex_);
         bool changed = false;
@@ -3768,8 +3831,13 @@ private:
             error = "candidate does not target active finalization round";
             return false;
         }
+        const auto expected_proposer = finalizationProposer(previous_hash, integer, round);
 
         if (proposer_vote != nullptr) {
+            if (proposer_vote->validator_address != expected_proposer) {
+                error = "candidate proposer is not assigned for this finalization round";
+                return false;
+            }
             if (proposer_vote->record_hash != candidate_hash || proposer_vote->round != round ||
                 !std::binary_search(validator_set_.begin(), validator_set_.end(), proposer_vote->validator_address) ||
                 proposer_vote->validator_address != primechain::crypto::addressFromProtocolPublicKey(proposer_vote->public_key)) {
@@ -3785,6 +3853,9 @@ private:
                 error = "invalid candidate proposer signature";
                 return false;
             }
+        } else if (validator_identity_->address != expected_proposer) {
+            error = "local validator is not assigned proposer for this finalization round";
+            return false;
         }
 
         const auto key = std::make_pair(integer, round);

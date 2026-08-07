@@ -129,6 +129,18 @@ struct PeerEndpoint {
     int port{0};
 };
 
+struct ValidatorEndpoint {
+    std::string validator_address;
+    PeerEndpoint peer;
+};
+
+struct FinalizationProposer {
+    primechain::PrimeValue integer{0};
+    std::uint64_t round{0};
+    std::string validator_address;
+    std::string previous_hash;
+};
+
 struct CommitPhaseStatus {
     PeerEndpoint peer;
     std::string state;
@@ -446,35 +458,71 @@ std::vector<PeerEndpoint> requestPeerList(const std::string& host, int port) {
     return peers;
 }
 
-std::vector<PeerEndpoint> requestValidatorEndpointList(const std::string& host, int port) {
-    std::vector<PeerEndpoint> peers;
+std::vector<ValidatorEndpoint> requestValidatorEndpoints(const std::string& host, int port) {
+    std::vector<ValidatorEndpoint> endpoints;
     const auto lines = requestLines(host, port, "GET_VALIDATOR_ENDPOINTS\n");
     if (lines.empty()) {
-        return peers;
+        return endpoints;
     }
     std::istringstream header(lines.front());
     std::string tag;
     std::size_t expected = 0;
     header >> tag >> expected;
     if (!header || tag != "VALIDATOR_ENDPOINTS") {
-        return peers;
+        return endpoints;
     }
     for (std::size_t i = 1; i < lines.size(); ++i) {
         if (lines[i] == "END_VALIDATOR_ENDPOINTS") break;
         std::istringstream in(lines[i]);
-        std::string validator_address;
-        PeerEndpoint peer;
+        ValidatorEndpoint endpoint;
         primechain::PrimeValue effective_integer = 0;
         std::uint64_t sequence = 0;
-        in >> tag >> validator_address >> peer.host >> peer.port >> effective_integer >> sequence;
-        if (in && tag == "VALIDATOR_ENDPOINT" && peer.port > 0) {
-            addUniquePeer(peers, std::move(peer));
+        in >> tag >> endpoint.validator_address >> endpoint.peer.host >> endpoint.peer.port
+           >> effective_integer >> sequence;
+        if (in && tag == "VALIDATOR_ENDPOINT" && endpoint.peer.port > 0) {
+            endpoints.push_back(std::move(endpoint));
         }
     }
-    if (peers.size() > expected) {
-        peers.resize(expected);
+    if (endpoints.size() > expected) {
+        endpoints.resize(expected);
+    }
+    return endpoints;
+}
+
+std::vector<PeerEndpoint> requestValidatorEndpointList(const std::string& host, int port) {
+    std::vector<PeerEndpoint> peers;
+    for (const auto& endpoint : requestValidatorEndpoints(host, port)) {
+        addUniquePeer(peers, endpoint.peer);
     }
     return peers;
+}
+
+std::optional<FinalizationProposer> requestFinalizationProposer(
+    const PeerEndpoint& peer,
+    primechain::PrimeValue integer) {
+    std::ostringstream command;
+    command << "GET_FINALIZATION_PROPOSER " << integer << "\n";
+    const auto response = requestLine(peer.host, peer.port, command.str());
+    if (!response.has_value()) return std::nullopt;
+
+    std::istringstream in(*response);
+    std::string tag;
+    FinalizationProposer proposer;
+    in >> tag >> proposer.integer >> proposer.round
+       >> proposer.validator_address >> proposer.previous_hash;
+    if (!in || tag != "FINALIZATION_PROPOSER" || proposer.integer != integer) {
+        return std::nullopt;
+    }
+    return proposer;
+}
+
+std::optional<PeerEndpoint> endpointForValidator(
+    const std::vector<ValidatorEndpoint>& endpoints,
+    const std::string& validator_address) {
+    for (const auto& endpoint : endpoints) {
+        if (endpoint.validator_address == validator_address) return endpoint.peer;
+    }
+    return std::nullopt;
 }
 
 std::size_t phaseVoteCount(const std::string& response) {
@@ -1072,7 +1120,7 @@ int main(int argc, char** argv) {
             std::cerr << "could not query any validator status\n";
             return 1;
         }
-        const auto active_peer = peer_status->peer;
+        auto active_peer = peer_status->peer;
         const auto status = peer_status->status;
         const primechain::PrimeValue effective_frontier =
             status.has_genesis ? status.frontier : 2;
@@ -1091,6 +1139,26 @@ int main(int argc, char** argv) {
         }
 
         const primechain::PrimeValue next = effective_frontier + 1;
+        if (!configured_validator_endpoints.empty()) {
+            const auto proposer = requestFinalizationProposer(active_peer, next);
+            if (proposer.has_value()) {
+                std::vector<ValidatorEndpoint> endpoints;
+                for (const auto& peer : quorumEndpoints(
+                         active_peer.host, active_peer.port, configured_validator_endpoints, parallel_probes)) {
+                    for (const auto& endpoint : requestValidatorEndpoints(peer.host, peer.port)) {
+                        const auto duplicate = std::find_if(
+                            endpoints.begin(), endpoints.end(), [&](const auto& existing) {
+                                return existing.validator_address == endpoint.validator_address;
+                            });
+                        if (duplicate == endpoints.end()) endpoints.push_back(endpoint);
+                    }
+                    if (!endpoints.empty()) break;
+                }
+                const auto proposer_peer = endpointForValidator(
+                    endpoints, proposer->validator_address);
+                if (proposer_peer.has_value()) active_peer = *proposer_peer;
+            }
+        }
         auto retryCurrentInteger = [&](const std::string& reason) -> bool {
             auto& attempts = retry_counts[next];
             if (attempts >= 5) {
