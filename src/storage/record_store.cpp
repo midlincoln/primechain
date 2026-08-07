@@ -386,6 +386,20 @@ bool appendIndexEntry(
             written += static_cast<std::size_t>(result);
         }
     }
+    // Every other write path in this file (append()'s own record write,
+    // writeIndex(), writeStoreAtomically(), backupRecordStoreBeforeRecovery())
+    // fsyncs before considering its write durable; this in-place update
+    // was the one exception. Without it, a reader that opens the index
+    // right after this call returns has no guarantee it sees the entry
+    // and the header update together rather than one without the other --
+    // on a filesystem/mount that doesn't guarantee same-process-set write
+    // visibility without an explicit fsync, that gap is real, not just
+    // theoretical (a torn write here is consistent with, though not
+    // conclusively proven to be the cause of, replay failures observed
+    // in the wild on a WSL2/DrvFs mount after an interrupted sync).
+    if (ok && fsync(fd) != 0) {
+        ok = false;
+    }
     close(fd);
     if (!ok || entry.offset != old_store_size) {
         std::remove(index_path.c_str());
