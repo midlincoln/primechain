@@ -99,3 +99,10 @@ for port in 19130 19131 19132; do
     cat "$base/status-$port.out"
     grep -q '^STATUS 13 6 7 1 12 14 ' "$base/status-$port.out"
 done
+
+"$client" decode-record "$base/work-b/data/chain.dat" 13 > "$base/decode-13.out"
+"$client" decode-record "$base/work-b/data/chain.dat" 14 > "$base/decode-14.out"
+grep -q '^finalization_votes: 2$' "$base/decode-13.out"
+grep -q '^finalization_votes: 2$' "$base/decode-14.out"
+grep -q '^round_changes: 0$' "$base/decode-13.out"
+grep -q '^round_changes: 0$' "$base/decode-14.out"
