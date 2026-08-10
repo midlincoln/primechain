@@ -64,6 +64,36 @@ primechain::protocol::RoundChangeVoteV1 makeRoundChangeVote(
     return vote;
 }
 
+primechain::protocol::RoundChangeVoteV1 makeLockedRoundChangeVote(
+    const ValidatorKey& validator,
+    const primechain::Hash256& previous_hash,
+    primechain::PrimeValue integer,
+    std::uint64_t new_round,
+    std::uint64_t locked_round,
+    const std::string& locked_kind,
+    const primechain::Hash256& locked_hash,
+    const std::vector<std::uint8_t>& locked_payload,
+    std::string& error) {
+    primechain::protocol::RoundChangeVoteV1 vote;
+    vote.validator_address = validator.address;
+    vote.public_key = validator.keys.public_key;
+    vote.previous_record_hash = previous_hash;
+    vote.integer = integer;
+    vote.new_round = new_round;
+    vote.locked_round = locked_round;
+    vote.locked_candidate_kind = locked_kind;
+    vote.locked_candidate_hash = locked_hash;
+    vote.locked_candidate_payload = locked_payload;
+    const auto signature = primechain::crypto::signProtocolMessage(
+        validator.keys.private_key,
+        primechain::crypto::lockedRoundChangeVoteSigningPayload(
+            previous_hash, integer, new_round, locked_round, locked_kind,
+            locked_hash, locked_payload, validator.address),
+        error);
+    if (signature.has_value()) vote.signature = *signature;
+    return vote;
+}
+
 primechain::protocol::PrimeRecordV0 makeRoundTwoPrime(
     const primechain::node::SequentialNode& node,
     const std::vector<ValidatorKey>& validators,
@@ -197,6 +227,60 @@ int main(int argc, char** argv) {
                     wrong_frontier, candidate_hash, record.previous_record_hash,
                     record.integer, addresses(validators), error),
                 "reject round change for another integer")) {
+        return 1;
+    }
+
+    auto locked_candidate = record;
+    locked_candidate.finalized_by.votes.clear();
+    const auto locked_payload = primechain::protocol::serializePrimeRecord(locked_candidate);
+    const auto locked_subject = primechain::protocol::legacyCandidateRecordHashWithoutFinalization(locked_candidate);
+    primechain::protocol::FinalizationProofV0 locked_proof;
+    locked_proof.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
+    for (std::size_t i = 0; i < 2; ++i) {
+        locked_proof.round_changes.push_back(makeLockedRoundChangeVote(
+            validators[i], record.previous_record_hash, record.integer, 2, 1,
+            "PRIME", locked_subject, locked_payload, error));
+        locked_proof.votes.push_back(primechain::protocol::makeSignedValidatorVote(
+            validators[i].address, validators[i].keys.public_key,
+            validators[i].keys.private_key, locked_subject, 2, error));
+    }
+    error.clear();
+    if (!expect(primechain::protocol::verifyRecordFinalization(
+                    locked_proof, locked_subject, record.previous_record_hash,
+                    record.integer, addresses(validators), error),
+                "accept v4 finalization matching highest lock")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+
+    auto other_candidate = locked_candidate;
+    other_candidate.proof.provider_address = validators[2].address;
+    const auto other_subject = primechain::protocol::legacyCandidateRecordHashWithoutFinalization(other_candidate);
+    auto wrong_locked_proof = locked_proof;
+    wrong_locked_proof.votes.clear();
+    for (std::size_t i = 0; i < 2; ++i) {
+        wrong_locked_proof.votes.push_back(primechain::protocol::makeSignedValidatorVote(
+            validators[i].address, validators[i].keys.public_key,
+            validators[i].keys.private_key, other_subject, 2, error));
+    }
+    error.clear();
+    if (!expect(!primechain::protocol::verifyRecordFinalization(
+                    wrong_locked_proof, other_subject, record.previous_record_hash,
+                    record.integer, addresses(validators), error),
+                "reject v4 finalization conflicting with highest lock")) {
+        return 1;
+    }
+
+    auto conflicting_lock_proof = locked_proof;
+    const auto other_payload = primechain::protocol::serializePrimeRecord(other_candidate);
+    conflicting_lock_proof.round_changes[1] = makeLockedRoundChangeVote(
+        validators[1], record.previous_record_hash, record.integer, 2, 1,
+        "PRIME", other_subject, other_payload, error);
+    error.clear();
+    if (!expect(!primechain::protocol::verifyRecordFinalization(
+                    conflicting_lock_proof, locked_subject, record.previous_record_hash,
+                    record.integer, addresses(validators), error),
+                "reject conflicting highest v4 locks")) {
         return 1;
     }
 

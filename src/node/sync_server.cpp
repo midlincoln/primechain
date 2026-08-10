@@ -654,6 +654,48 @@ std::optional<bool> recordsShareFinalizationSubject(
     return *left_subject == *right_subject;
 }
 
+std::string storedKindName(primechain::storage::StoredRecordKind kind) {
+    return kind == primechain::storage::StoredRecordKind::Prime ? "PRIME" : "COMPOSITE";
+}
+
+std::optional<primechain::storage::StoredRecordKind> parseStoredKindName(const std::string& kind) {
+    if (kind == "PRIME") return primechain::storage::StoredRecordKind::Prime;
+    if (kind == "COMPOSITE") return primechain::storage::StoredRecordKind::Composite;
+    return std::nullopt;
+}
+
+std::optional<primechain::Hash256> subjectHashFromCandidatePayload(
+    primechain::storage::StoredRecordKind kind,
+    const std::vector<std::uint8_t>& payload,
+    std::string& error) {
+    if (kind == primechain::storage::StoredRecordKind::Prime) {
+        const auto record = primechain::protocol::deserializePrimeRecord(payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record);
+    }
+    const auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record);
+}
+
+std::optional<primechain::Hash256> finalizationVoteTargetHashFromPayload(
+    primechain::storage::StoredRecordKind kind,
+    const std::vector<std::uint8_t>& payload,
+    const primechain::protocol::FinalizationProofV0& proof,
+    std::string& error) {
+    if (proof.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
+        return subjectHashFromCandidatePayload(kind, payload, error);
+    }
+    if (kind == primechain::storage::StoredRecordKind::Prime) {
+        const auto record = primechain::protocol::deserializePrimeRecord(payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return primechain::protocol::candidateRecordHash(*record);
+    }
+    const auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return primechain::protocol::candidateRecordHash(*record);
+}
+
 std::optional<primechain::Address> recordProviderAddress(
     const primechain::storage::StoredRecord& stored,
     std::string& error) {
@@ -1321,6 +1363,10 @@ std::optional<primechain::protocol::RoundChangeVoteV1> requestRoundChangeVote(
     command << "SIGN_ROUND_CHANGE "
             << primechain::crypto::toHex(proposer_vote.previous_record_hash) << " "
             << proposer_vote.integer << " " << proposer_vote.new_round << " "
+            << proposer_vote.locked_round << " "
+            << (proposer_vote.locked_candidate_kind.empty() ? "NONE" : proposer_vote.locked_candidate_kind) << " "
+            << primechain::crypto::toHex(proposer_vote.locked_candidate_hash) << " "
+            << (proposer_vote.locked_candidate_payload.empty() ? "-" : bytesToHex(proposer_vote.locked_candidate_payload)) << " "
             << proposer_vote.validator_address << " "
             << bytesToHex(proposer_vote.public_key) << " "
             << bytesToHex(proposer_vote.signature) << "\n";
@@ -1329,15 +1375,20 @@ std::optional<primechain::protocol::RoundChangeVoteV1> requestRoundChangeVote(
     const auto response = readLine(socket->fd());
     if (!response.has_value()) { error = "validator did not return round-change vote"; return std::nullopt; }
     std::istringstream in(*response);
-    std::string tag, previous_hex, public_hex, signature_hex, extra;
+    std::string tag, previous_hex, kind, locked_hash_hex, locked_payload_hex, public_hex, signature_hex, extra;
     primechain::protocol::RoundChangeVoteV1 vote;
     in >> tag >> previous_hex >> vote.integer >> vote.new_round
+       >> vote.locked_round >> kind >> locked_hash_hex >> locked_payload_hex
        >> vote.validator_address >> public_hex >> signature_hex;
     const auto previous = parseHash(previous_hex);
-    if (!in || tag != "ROUND_CHANGE_VOTE" || !previous.has_value() || (in >> extra)) {
+    const auto locked_hash = parseHash(locked_hash_hex);
+    if (!in || tag != "ROUND_CHANGE_VOTE" || !previous.has_value() || !locked_hash.has_value() || (in >> extra)) {
         error = *response; return std::nullopt;
     }
     vote.previous_record_hash = *previous;
+    vote.locked_candidate_kind = (kind == "NONE") ? std::string{} : kind;
+    vote.locked_candidate_hash = *locked_hash;
+    vote.locked_candidate_payload = (locked_payload_hex == "-") ? std::vector<std::uint8_t>{} : hexToBytes(locked_payload_hex);
     vote.public_key = hexToBytes(public_hex);
     vote.signature = hexToBytes(signature_hex);
     return vote;
@@ -3363,7 +3414,9 @@ private:
             if (!record.has_value()) return false;
             proof = record->finalized_by;
             previous_hash = record->previous_record_hash;
-            candidate_hash = primechain::protocol::candidateRecordHash(*record);
+            candidate_hash = record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
+                ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
+                : primechain::protocol::candidateRecordHash(*record);
             integer = record->integer;
         } else {
             const auto record = primechain::protocol::deserializePrimeRecord(
@@ -3372,7 +3425,9 @@ private:
             if (record->height == 0) return true;
             proof = record->finalized_by;
             previous_hash = record->previous_record_hash;
-            candidate_hash = primechain::protocol::candidateRecordHash(*record);
+            candidate_hash = record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
+                ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
+                : primechain::protocol::candidateRecordHash(*record);
             integer = record->integer;
         }
 
@@ -3589,7 +3644,7 @@ private:
 
     std::vector<primechain::storage::SignedCandidateRecord> signedCandidateSnapshot() const {
         std::vector<primechain::storage::SignedCandidateRecord> out;
-        for (const auto& entry : signed_candidates_) out.push_back({std::get<0>(entry.first), entry.second});
+        for (const auto& entry : signed_candidates_) out.push_back(entry.second);
         return out;
     }
 
@@ -3650,10 +3705,34 @@ private:
             error = "invalid round-change vote target";
             return false;
         }
+        if (vote.locked_round == 0) {
+            if (!vote.locked_candidate_kind.empty() ||
+                vote.locked_candidate_payload.size() != 0 ||
+                std::any_of(vote.locked_candidate_hash.begin(), vote.locked_candidate_hash.end(),
+                    [](std::uint8_t byte) { return byte != 0; })) {
+                error = "empty round-change lock carries candidate data";
+                return false;
+            }
+        } else {
+            const auto kind = parseStoredKindName(vote.locked_candidate_kind);
+            if (!kind.has_value() || vote.locked_round >= vote.new_round || vote.locked_candidate_payload.empty()) {
+                error = "invalid round-change lock";
+                return false;
+            }
+            std::string subject_error;
+            const auto subject = subjectHashFromCandidatePayload(*kind, vote.locked_candidate_payload, subject_error);
+            if (!subject.has_value() || *subject != vote.locked_candidate_hash) {
+                error = subject_error.empty() ? "round-change lock subject mismatch" : subject_error;
+                return false;
+            }
+        }
         return primechain::crypto::verifyProtocolMessageSignature(
             vote.public_key,
-            primechain::crypto::roundChangeVoteSigningPayload(
-                vote.previous_record_hash, vote.integer, vote.new_round, vote.validator_address),
+            primechain::crypto::lockedRoundChangeVoteSigningPayload(
+                vote.previous_record_hash, vote.integer, vote.new_round,
+                vote.locked_round, vote.locked_candidate_kind,
+                vote.locked_candidate_hash, vote.locked_candidate_payload,
+                vote.validator_address),
             vote.signature, error);
     }
 
@@ -3664,7 +3743,11 @@ private:
         const auto key = std::make_tuple(vote.integer, vote.new_round, vote.validator_address);
         const auto existing = round_changes_.find(key);
         if (existing != round_changes_.end()) {
-            if (existing->second.public_key == vote.public_key) return true;
+            if (existing->second.public_key == vote.public_key &&
+                existing->second.locked_round == vote.locked_round &&
+                existing->second.locked_candidate_kind == vote.locked_candidate_kind &&
+                existing->second.locked_candidate_hash == vote.locked_candidate_hash &&
+                existing->second.locked_candidate_payload == vote.locked_candidate_payload) return true;
             error = "validator already submitted a different round-change vote";
             return false;
         }
@@ -3734,7 +3817,19 @@ private:
                 error = "invalid persisted finalization signature";
                 return false;
             }
-            if (!signed_candidates_.emplace(std::make_pair(record.integer, vote.round), vote).second) {
+            if (!record.candidate_payload.empty()) {
+                const auto kind = parseStoredKindName(record.candidate_kind);
+                if (!kind.has_value()) {
+                    error = "invalid persisted finalization candidate kind";
+                    return false;
+                }
+                std::string subject_error;
+                if (!subjectHashFromCandidatePayload(*kind, record.candidate_payload, subject_error).has_value()) {
+                    error = "invalid persisted finalization candidate payload: " + subject_error;
+                    return false;
+                }
+            }
+            if (!signed_candidates_.emplace(std::make_pair(record.integer, vote.round), record).second) {
                 error = "duplicate persisted finalization vote";
                 return false;
             }
@@ -3752,22 +3847,25 @@ private:
         const auto quorum = validatorQuorumRequired();
         if (quorum == 0 || quorum > validator_set_.size()) return committee;
 
-        std::string payload = "primechain-finalization-committee-v1:";
+        std::string payload = "primechain-finalization-committee-rotation-v1:";
         payload += primechain::crypto::toHex(previous_hash);
         payload += ":";
         payload += std::to_string(integer);
-        payload += ":";
-        payload += std::to_string(round);
         const std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
         const auto hash = primechain::crypto::sha3_256(bytes);
         std::uint64_t selector = 0;
         for (std::size_t i = 0; i < 8; ++i) {
             selector = (selector << 8) | hash[i];
         }
-        const auto start = static_cast<std::size_t>(selector % validator_set_.size());
+        const auto base = static_cast<std::size_t>(selector % validator_set_.size());
+        const auto start = (base + static_cast<std::size_t>((round - 1) % validator_set_.size())) % validator_set_.size();
         committee.reserve(quorum);
         for (std::size_t i = 0; i < quorum; ++i) {
             committee.push_back(validator_set_[(start + i) % validator_set_.size()]);
+        }
+        if (!committee.empty()) {
+            const auto proposer_offset = static_cast<std::size_t>(((round - 1) / validator_set_.size()) % committee.size());
+            std::rotate(committee.begin(), committee.begin() + proposer_offset, committee.end());
         }
         return committee;
     }
@@ -3885,6 +3983,31 @@ private:
         std::uint64_t round = 0;
         if (!primechain::protocol::verifyRoundChangeCertificate(
                 proof, previous_hash, integer, validator_set_, round, error)) return false;
+        error.clear();
+        const auto vote_target_hash = finalizationVoteTargetHashFromPayload(kind, candidate_payload, proof, error);
+        if (!vote_target_hash.has_value()) return false;
+        candidate_hash = *vote_target_hash;
+        if (proof.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
+            std::uint64_t highest_lock = 0;
+            primechain::Hash256 highest_hash{};
+            bool have_lock = false;
+            for (const auto& change : proof.round_changes) {
+                if (change.locked_round == 0) continue;
+                if (change.locked_round > highest_lock) {
+                    highest_lock = change.locked_round;
+                    highest_hash = change.locked_candidate_hash;
+                    have_lock = true;
+                } else if (change.locked_round == highest_lock &&
+                           change.locked_candidate_hash != highest_hash) {
+                    error = "conflicting highest round-change locks";
+                    return false;
+                }
+            }
+            if (have_lock && highest_hash != candidate_hash) {
+                error = "candidate does not match highest round-change lock";
+                return false;
+            }
+        }
         if (round != activeFinalizationRound(integer)) {
             error = "candidate does not target active finalization round";
             return false;
@@ -3927,18 +4050,23 @@ private:
         const auto key = std::make_pair(integer, round);
         const auto existing = signed_candidates_.find(key);
         if (existing != signed_candidates_.end()) {
-            if (existing->second.record_hash != candidate_hash) {
+            if (existing->second.vote.record_hash != candidate_hash) {
                 error = "validator already signed a different candidate in this round";
                 return false;
             }
-            vote = existing->second;
+            vote = existing->second.vote;
             return true;
         }
         vote = primechain::protocol::makeSignedValidatorVote(
             validator_identity_->address, validator_identity_->public_key,
             validator_identity_->private_key, candidate_hash, round, error);
         if (vote.signature.empty()) return false;
-        signed_candidates_[key] = vote;
+        primechain::storage::SignedCandidateRecord signed_record;
+        signed_record.integer = integer;
+        signed_record.candidate_kind = storedKindName(kind);
+        signed_record.candidate_payload = candidate_payload;
+        signed_record.vote = vote;
+        signed_candidates_[key] = signed_record;
         if (!persistSignedCandidates(error)) {
             signed_candidates_.erase(key);
             return false;
@@ -4203,7 +4331,7 @@ private:
         const primechain::Hash256& previous_hash,
         primechain::PrimeValue integer,
         std::uint64_t new_round,
-        std::string& error) const {
+        std::string& error) {
         primechain::protocol::RoundChangeVoteV1 vote;
         if (!localValidatorActive()) { error = "local validator identity is not active in current validator epoch"; return vote; }
         vote.validator_address = validator_identity_->address;
@@ -4211,26 +4339,74 @@ private:
         vote.previous_record_hash = previous_hash;
         vote.integer = integer;
         vote.new_round = new_round;
+
+        std::lock_guard<std::mutex> lock(finalization_mutex_);
+        for (const auto& entry : signed_candidates_) {
+            const auto& signed_record = entry.second;
+            const auto& signed_vote = signed_record.vote;
+            if (signed_record.integer != integer || signed_vote.round == 0 ||
+                signed_vote.round >= new_round || signed_record.candidate_payload.empty()) continue;
+            const auto kind = parseStoredKindName(signed_record.candidate_kind);
+            if (!kind.has_value()) continue;
+            std::string candidate_error;
+            primechain::Hash256 candidate_previous{};
+            primechain::PrimeValue candidate_integer = 0;
+            if (*kind == primechain::storage::StoredRecordKind::Prime) {
+                const auto record = primechain::protocol::deserializePrimeRecord(
+                    signed_record.candidate_payload, candidate_error);
+                if (!record.has_value()) continue;
+                candidate_previous = record->previous_record_hash;
+                candidate_integer = record->integer;
+            } else {
+                const auto record = primechain::protocol::deserializeCompositeRecord(
+                    signed_record.candidate_payload, candidate_error);
+                if (!record.has_value()) continue;
+                candidate_previous = record->previous_record_hash;
+                candidate_integer = record->integer;
+            }
+            if (candidate_previous != previous_hash || candidate_integer != integer) continue;
+            candidate_error.clear();
+            const auto subject = subjectHashFromCandidatePayload(
+                *kind, signed_record.candidate_payload, candidate_error);
+            if (!subject.has_value()) continue;
+            if (signed_vote.round > vote.locked_round) {
+                vote.locked_round = signed_vote.round;
+                vote.locked_candidate_kind = signed_record.candidate_kind;
+                vote.locked_candidate_hash = *subject;
+                vote.locked_candidate_payload = signed_record.candidate_payload;
+            }
+        }
+
         const auto signature = primechain::crypto::signProtocolMessage(
             validator_identity_->private_key,
-            primechain::crypto::roundChangeVoteSigningPayload(
-                previous_hash, integer, new_round, vote.validator_address), error);
+            primechain::crypto::lockedRoundChangeVoteSigningPayload(
+                previous_hash, integer, new_round, vote.locked_round,
+                vote.locked_candidate_kind, vote.locked_candidate_hash,
+                vote.locked_candidate_payload, vote.validator_address), error);
         if (signature.has_value()) vote.signature = *signature;
         return vote;
     }
 
     void signRoundChange(int fd, const std::string& line) {
         std::istringstream in(line);
-        std::string command, previous_hex, proposer_public_hex, proposer_signature_hex, extra;
+        std::string command, previous_hex, locked_kind, locked_hash_hex, locked_payload_hex,
+            proposer_public_hex, proposer_signature_hex, extra;
         primechain::protocol::RoundChangeVoteV1 proposer;
         in >> command >> previous_hex >> proposer.integer >> proposer.new_round
+           >> proposer.locked_round >> locked_kind >> locked_hash_hex >> locked_payload_hex
            >> proposer.validator_address >> proposer_public_hex >> proposer_signature_hex;
         const auto previous = parseHash(previous_hex);
-        if (!in || command != "SIGN_ROUND_CHANGE" || !previous.has_value() || (in >> extra)) {
+        const auto locked_hash = parseHash(locked_hash_hex);
+        if (!in || command != "SIGN_ROUND_CHANGE" || !previous.has_value() ||
+            !locked_hash.has_value() || (in >> extra)) {
             writeAll(fd, "ERROR invalid SIGN_ROUND_CHANGE\n");
             return;
         }
         proposer.previous_record_hash = *previous;
+        proposer.locked_candidate_kind = (locked_kind == "NONE") ? std::string{} : locked_kind;
+        proposer.locked_candidate_hash = *locked_hash;
+        proposer.locked_candidate_payload = (locked_payload_hex == "-")
+            ? std::vector<std::uint8_t>{} : hexToBytes(locked_payload_hex);
         proposer.public_key = hexToBytes(proposer_public_hex);
         proposer.signature = hexToBytes(proposer_signature_hex);
         std::string error;
@@ -4260,6 +4436,10 @@ private:
         writeCommand(fd, "ROUND_CHANGE_VOTE "
             + primechain::crypto::toHex(local.previous_record_hash) + " "
             + std::to_string(local.integer) + " " + std::to_string(local.new_round) + " "
+            + std::to_string(local.locked_round) + " "
+            + (local.locked_candidate_kind.empty() ? std::string("NONE") : local.locked_candidate_kind) + " "
+            + primechain::crypto::toHex(local.locked_candidate_hash) + " "
+            + (local.locked_candidate_payload.empty() ? std::string("-") : bytesToHex(local.locked_candidate_payload)) + " "
             + local.validator_address + " " + bytesToHex(local.public_key) + " "
             + bytesToHex(local.signature) + "\n");
     }
@@ -4388,13 +4568,16 @@ private:
         std::uint64_t round,
         std::string& error) {
         record.finalized_by.votes.clear();
-        const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
         std::vector<std::uint8_t> payload;
         if constexpr (std::is_same_v<Record, primechain::protocol::CompositeRecordV0>) {
             payload = primechain::protocol::serializeCompositeRecord(record);
         } else {
             payload = primechain::protocol::serializePrimeRecord(record);
         }
+        error.clear();
+        const auto target_hash = finalizationVoteTargetHashFromPayload(kind, payload, record.finalized_by, error);
+        if (!target_hash.has_value()) return false;
+        const auto candidate_hash = *target_hash;
         const auto committee = finalizationCommittee(record.previous_record_hash, record.integer, round);
         const auto proposer = finalizationProposer(record.previous_record_hash, record.integer, round);
         std::optional<primechain::protocol::ValidatorVoteV0> proposer_vote;
@@ -4517,12 +4700,54 @@ private:
         primechain::storage::StoredRecordKind kind,
         std::string& error) {
         std::uint64_t round = activeFinalizationRound(record.integer);
+        auto apply_highest_lock = [&](std::uint64_t target_round) -> bool {
+            if (record.finalized_by.rule != "fixed-2-of-3-mldsa65-rounds-locks-v4") return true;
+            std::uint64_t highest_lock = 0;
+            primechain::Hash256 highest_hash{};
+            const primechain::protocol::RoundChangeVoteV1* locked_vote = nullptr;
+            for (const auto& change : record.finalized_by.round_changes) {
+                if (change.locked_round == 0) continue;
+                if (change.locked_round > highest_lock) {
+                    highest_lock = change.locked_round;
+                    highest_hash = change.locked_candidate_hash;
+                    locked_vote = &change;
+                } else if (change.locked_round == highest_lock &&
+                           change.locked_candidate_hash != highest_hash) {
+                    error = "conflicting highest round-change locks";
+                    return false;
+                }
+            }
+            if (locked_vote == nullptr) return true;
+            const auto locked_kind = parseStoredKindName(locked_vote->locked_candidate_kind);
+            if (!locked_kind.has_value() || *locked_kind != kind) {
+                error = "highest round-change lock has wrong record kind";
+                return false;
+            }
+            if constexpr (std::is_same_v<Record, primechain::protocol::PrimeRecordV0>) {
+                const auto locked = primechain::protocol::deserializePrimeRecord(
+                    locked_vote->locked_candidate_payload, error);
+                if (!locked.has_value()) return false;
+                record = *locked;
+            } else {
+                const auto locked = primechain::protocol::deserializeCompositeRecord(
+                    locked_vote->locked_candidate_payload, error);
+                if (!locked.has_value()) return false;
+                record = *locked;
+            }
+            record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
+            record.finalized_by.round_changes = certifiedRoundChanges(record.integer, target_round);
+            record.finalized_by.votes.clear();
+            return true;
+        };
+
         if (round == 1) {
             record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
             record.finalized_by.round_changes.clear();
         } else {
-            record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-v3";
+            record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
             record.finalized_by.round_changes = certifiedRoundChanges(record.integer, round);
+            record.finalized_by.votes.clear();
+            if (!apply_highest_lock(round)) return false;
         }
         if (collectFinalizationVotes(record, kind, round, error)) return true;
         if (finalization_timeout_ms_ <= 0) return false;
@@ -4544,13 +4769,24 @@ private:
                   << finalization_timeout_ms_ << " ms retry window\n";
 
         error.clear();
-        const std::uint64_t next_round = round + 1;
-        if (!advanceFinalizationRound(
-                record.previous_record_hash, record.integer, next_round, error)) return false;
-        record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-v3";
-        record.finalized_by.round_changes = certifiedRoundChanges(record.integer, next_round);
-        record.finalized_by.votes.clear();
-        return collectFinalizationVotes(record, kind, next_round, error);
+        const std::uint64_t max_round_attempts = std::max<std::uint64_t>(
+            2, static_cast<std::uint64_t>(validator_set_.size()) * 4);
+        for (std::uint64_t attempt = 0; attempt < max_round_attempts; ++attempt) {
+            const std::uint64_t next_round = round + 1 + attempt;
+            if (!advanceFinalizationRound(
+                    record.previous_record_hash, record.integer, next_round, error)) return false;
+            record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
+            record.finalized_by.round_changes = certifiedRoundChanges(record.integer, next_round);
+            record.finalized_by.votes.clear();
+            if (!apply_highest_lock(next_round)) return false;
+            std::string round_error;
+            if (collectFinalizationVotes(record, kind, next_round, round_error)) return true;
+            if (!round_error.empty()) error = round_error;
+            std::cerr << "finalization round " << next_round << " failed for integer "
+                      << record.integer << "; trying next round: " << error << "\n";
+        }
+        if (error.empty()) error = "could not finalize after round-change attempts";
+        return false;
     }
 
     bool quorumEnabled() const {
@@ -7519,7 +7755,7 @@ private:
     std::mutex composite_lottery_mutex_;
     std::map<primechain::PrimeValue, CompositeLotteryRoundState> composite_lottery_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
-        primechain::protocol::ValidatorVoteV0> signed_candidates_;
+        primechain::storage::SignedCandidateRecord> signed_candidates_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
         primechain::protocol::RoundChangeVoteV1> round_changes_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, std::uint64_t, primechain::Address>,

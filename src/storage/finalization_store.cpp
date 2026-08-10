@@ -10,7 +10,8 @@
 namespace primechain::storage {
 namespace {
 constexpr std::uint64_t kMagic = 0x31544f5643464350ull;
-constexpr std::uint64_t kMaxFieldBytes = 8192;
+constexpr std::uint64_t kMagicV2 = 0x32544f5643464350ull;
+constexpr std::uint64_t kMaxFieldBytes = 16ull * 1024ull * 1024ull;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
     value = 0;
@@ -47,6 +48,15 @@ bool readAddress(std::istream& in, Address& address) {
 void writeAddress(std::ostream& out, const Address& address) {
     writeBytes(out, std::vector<std::uint8_t>(address.begin(), address.end()));
 }
+bool readString(std::istream& in, std::string& value) {
+    std::vector<std::uint8_t> bytes;
+    if (!readBytes(in, bytes)) return false;
+    value.assign(bytes.begin(), bytes.end());
+    return true;
+}
+void writeString(std::ostream& out, const std::string& value) {
+    writeBytes(out, std::vector<std::uint8_t>(value.begin(), value.end()));
+}
 }
 
 FinalizationStore::FinalizationStore(std::string path) : path_(std::move(path)) {}
@@ -69,11 +79,27 @@ std::vector<SignedCandidateRecord> FinalizationStore::loadAll(std::string& error
             return {};
         }
         SignedCandidateRecord record;
-        if (magic != kMagic || !readUint64(in, record.integer) ||
-            !readAddress(in, record.vote.validator_address) ||
-            !readBytes(in, record.vote.public_key) ||
-            !in.read(reinterpret_cast<char*>(record.vote.record_hash.data()), record.vote.record_hash.size()) ||
-            !readUint64(in, record.vote.round) || !readBytes(in, record.vote.signature)) {
+        if (magic == kMagic) {
+            if (!readUint64(in, record.integer) ||
+                !readAddress(in, record.vote.validator_address) ||
+                !readBytes(in, record.vote.public_key) ||
+                !in.read(reinterpret_cast<char*>(record.vote.record_hash.data()), record.vote.record_hash.size()) ||
+                !readUint64(in, record.vote.round) || !readBytes(in, record.vote.signature)) {
+                error = "invalid finalization store record";
+                return {};
+            }
+        } else if (magic == kMagicV2) {
+            if (!readUint64(in, record.integer) ||
+                !readString(in, record.candidate_kind) ||
+                !readBytes(in, record.candidate_payload) ||
+                !readAddress(in, record.vote.validator_address) ||
+                !readBytes(in, record.vote.public_key) ||
+                !in.read(reinterpret_cast<char*>(record.vote.record_hash.data()), record.vote.record_hash.size()) ||
+                !readUint64(in, record.vote.round) || !readBytes(in, record.vote.signature)) {
+                error = "invalid finalization store record";
+                return {};
+            }
+        } else {
             error = "invalid finalization store record";
             return {};
         }
@@ -93,14 +119,18 @@ bool FinalizationStore::replaceAll(
         if (record.vote.validator_address.empty() ||
             record.vote.validator_address.size() > kMaxFieldBytes ||
             record.vote.public_key.size() > kMaxFieldBytes ||
-            record.vote.signature.size() > kMaxFieldBytes) {
+            record.vote.signature.size() > kMaxFieldBytes ||
+            record.candidate_kind.size() > kMaxFieldBytes ||
+            record.candidate_payload.size() > kMaxFieldBytes) {
             error = "invalid finalization store field";
             out.close();
             std::remove(temp_path.c_str());
             return false;
         }
-        writeUint64(out, kMagic);
+        writeUint64(out, kMagicV2);
         writeUint64(out, record.integer);
+        writeString(out, record.candidate_kind);
+        writeBytes(out, record.candidate_payload);
         writeAddress(out, record.vote.validator_address);
         writeBytes(out, record.vote.public_key);
         out.write(reinterpret_cast<const char*>(record.vote.record_hash.data()), record.vote.record_hash.size());

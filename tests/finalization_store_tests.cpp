@@ -17,8 +17,14 @@ int main(int argc, char** argv) {
         address, keys->public_key, keys->private_key, candidate, 1, error);
     if (vote.signature.empty()) return 1;
 
+    primechain::storage::SignedCandidateRecord signed_record;
+    signed_record.integer = 17;
+    signed_record.candidate_kind = "PRIME";
+    signed_record.candidate_payload = {9, 8, 7};
+    signed_record.vote = vote;
+
     primechain::storage::FinalizationStore store(argv[1]);
-    if (!store.replaceAll({{17, vote}}, error)) {
+    if (!store.replaceAll({signed_record}, error)) {
         std::cerr << error << "\n";
         return 1;
     }
@@ -26,6 +32,8 @@ int main(int argc, char** argv) {
     if (!error.empty() || loaded.size() != 1 || loaded[0].integer != 17 ||
         loaded[0].vote.validator_address != vote.validator_address ||
         loaded[0].vote.public_key != vote.public_key ||
+        loaded[0].candidate_kind != signed_record.candidate_kind ||
+        loaded[0].candidate_payload != signed_record.candidate_payload ||
         loaded[0].vote.record_hash != vote.record_hash ||
         loaded[0].vote.round != vote.round || loaded[0].vote.signature != vote.signature) {
         std::cerr << "finalization store round trip failed\n";

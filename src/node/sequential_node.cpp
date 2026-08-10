@@ -432,11 +432,25 @@ bool verifyLegacyOpaqueFinalizationTarget(
     return true;
 }
 
+primechain::Hash256 finalizationVoteTargetHash(const protocol::CompositeRecordV0& record) {
+    if (record.finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
+        return protocol::legacyCandidateRecordHashWithoutFinalization(record);
+    }
+    return protocol::candidateRecordHash(record);
+}
+
+primechain::Hash256 finalizationVoteTargetHash(const protocol::PrimeRecordV0& record) {
+    if (record.finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
+        return protocol::legacyCandidateRecordHashWithoutFinalization(record);
+    }
+    return protocol::candidateRecordHash(record);
+}
+
 bool verifyRecordFinalizationWithLegacyFallback(
     const protocol::CompositeRecordV0& record,
     const std::vector<Address>& validator_set,
     std::string& error) {
-    const auto candidate_hash = protocol::candidateRecordHash(record);
+    const auto candidate_hash = finalizationVoteTargetHash(record);
     if (protocol::verifyRecordFinalization(
             record.finalized_by, candidate_hash, record.previous_record_hash,
             record.integer, validator_set, error)) {
@@ -463,7 +477,7 @@ bool verifyRecordFinalizationWithLegacyFallback(
     const protocol::PrimeRecordV0& record,
     const std::vector<Address>& validator_set,
     std::string& error) {
-    const auto candidate_hash = protocol::candidateRecordHash(record);
+    const auto candidate_hash = finalizationVoteTargetHash(record);
     if (protocol::verifyRecordFinalization(
             record.finalized_by, candidate_hash, record.previous_record_hash,
             record.integer, validator_set, error)) {
@@ -908,7 +922,7 @@ bool SequentialNode::validatePrimeCandidate(
 bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, std::string& error) {
     if (!validateCompositeCandidate(record, error)) return false;
     if (!protocol::verifyRecordFinalization(
-            record.finalized_by, protocol::candidateRecordHash(record),
+            record.finalized_by, finalizationVoteTargetHash(record),
             record.previous_record_hash, record.integer, validator_set_, error)) return false;
 
     const auto balances_before = balances_;
@@ -969,7 +983,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
 bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::string& error) {
     if (!validatePrimeCandidate(record, error)) return false;
     if (!protocol::verifyRecordFinalization(
-            record.finalized_by, protocol::candidateRecordHash(record),
+            record.finalized_by, finalizationVoteTargetHash(record),
             record.previous_record_hash, record.integer, validator_set_, error)) return false;
 
     const auto balances_before = balances_;

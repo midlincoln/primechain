@@ -35,6 +35,11 @@ void appendHash(Bytes& out, const Hash256& hash) {
     out.insert(out.end(), hash.begin(), hash.end());
 }
 
+void appendBytes(Bytes& out, const Bytes& bytes) {
+    appendUint64(out, bytes.size());
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
 std::string opensslError(const std::string& operation) {
     return operation + " failed";
 }
@@ -466,6 +471,28 @@ Bytes roundChangeVoteSigningPayload(
     appendHash(payload, previous_record_hash);
     appendUint64(payload, integer);
     appendUint64(payload, new_round);
+    appendString(payload, validator_address);
+    return payload;
+}
+
+Bytes lockedRoundChangeVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    std::uint64_t new_round,
+    std::uint64_t locked_round,
+    const std::string& locked_candidate_kind,
+    const Hash256& locked_candidate_hash,
+    const Bytes& locked_candidate_payload,
+    const Address& validator_address) {
+    Bytes payload;
+    appendString(payload, "primechain-finalization-round-change-mldsa65-locks-v4");
+    appendHash(payload, previous_record_hash);
+    appendUint64(payload, integer);
+    appendUint64(payload, new_round);
+    appendUint64(payload, locked_round);
+    appendString(payload, locked_candidate_kind);
+    appendHash(payload, locked_candidate_hash);
+    appendBytes(payload, locked_candidate_payload);
     appendString(payload, validator_address);
     return payload;
 }

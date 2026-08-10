@@ -10,7 +10,8 @@
 namespace primechain::storage {
 namespace {
 constexpr std::uint64_t kMagic = 0x3152474e48434350ull;
-constexpr std::uint64_t kMaxFieldBytes = 8192;
+constexpr std::uint64_t kMagicV2 = 0x3252474e48434350ull;
+constexpr std::uint64_t kMaxFieldBytes = 16ull * 1024ull * 1024ull;
 
 bool readUint64(std::istream& in, std::uint64_t& value) {
     value = 0;
@@ -47,6 +48,15 @@ bool readAddress(std::istream& in, Address& address) {
 void writeAddress(std::ostream& out, const Address& address) {
     writeBytes(out, std::vector<std::uint8_t>(address.begin(), address.end()));
 }
+bool readString(std::istream& in, std::string& value) {
+    std::vector<std::uint8_t> bytes;
+    if (!readBytes(in, bytes)) return false;
+    value.assign(bytes.begin(), bytes.end());
+    return true;
+}
+void writeString(std::ostream& out, const std::string& value) {
+    writeBytes(out, std::vector<std::uint8_t>(value.begin(), value.end()));
+}
 } // namespace
 
 RoundChangeStore::RoundChangeStore(std::string path) : path_(std::move(path)) {}
@@ -69,11 +79,29 @@ std::vector<protocol::RoundChangeVoteV1> RoundChangeStore::loadAll(std::string& 
             return {};
         }
         protocol::RoundChangeVoteV1 vote;
-        if (magic != kMagic || !readAddress(in, vote.validator_address) ||
-            !readBytes(in, vote.public_key) ||
-            !in.read(reinterpret_cast<char*>(vote.previous_record_hash.data()), vote.previous_record_hash.size()) ||
-            !readUint64(in, vote.integer) || !readUint64(in, vote.new_round) ||
-            !readBytes(in, vote.signature)) {
+        if (magic == kMagic) {
+            if (!readAddress(in, vote.validator_address) ||
+                !readBytes(in, vote.public_key) ||
+                !in.read(reinterpret_cast<char*>(vote.previous_record_hash.data()), vote.previous_record_hash.size()) ||
+                !readUint64(in, vote.integer) || !readUint64(in, vote.new_round) ||
+                !readBytes(in, vote.signature)) {
+                error = "invalid round-change store record";
+                return {};
+            }
+        } else if (magic == kMagicV2) {
+            if (!readAddress(in, vote.validator_address) ||
+                !readBytes(in, vote.public_key) ||
+                !in.read(reinterpret_cast<char*>(vote.previous_record_hash.data()), vote.previous_record_hash.size()) ||
+                !readUint64(in, vote.integer) || !readUint64(in, vote.new_round) ||
+                !readUint64(in, vote.locked_round) ||
+                !readString(in, vote.locked_candidate_kind) ||
+                !in.read(reinterpret_cast<char*>(vote.locked_candidate_hash.data()), vote.locked_candidate_hash.size()) ||
+                !readBytes(in, vote.locked_candidate_payload) ||
+                !readBytes(in, vote.signature)) {
+                error = "invalid round-change store record";
+                return {};
+            }
+        } else {
             error = "invalid round-change store record";
             return {};
         }
@@ -92,16 +120,22 @@ bool RoundChangeStore::replaceAll(
     for (const auto& vote : votes) {
         if (vote.validator_address.empty() || vote.validator_address.size() > kMaxFieldBytes ||
             vote.public_key.size() > kMaxFieldBytes || vote.signature.size() > kMaxFieldBytes ||
+            vote.locked_candidate_kind.size() > kMaxFieldBytes ||
+            vote.locked_candidate_payload.size() > kMaxFieldBytes ||
             vote.new_round < 2) {
             error = "invalid round-change store field";
             break;
         }
-        writeUint64(out, kMagic);
+        writeUint64(out, kMagicV2);
         writeAddress(out, vote.validator_address);
         writeBytes(out, vote.public_key);
         out.write(reinterpret_cast<const char*>(vote.previous_record_hash.data()), vote.previous_record_hash.size());
         writeUint64(out, vote.integer);
         writeUint64(out, vote.new_round);
+        writeUint64(out, vote.locked_round);
+        writeString(out, vote.locked_candidate_kind);
+        out.write(reinterpret_cast<const char*>(vote.locked_candidate_hash.data()), vote.locked_candidate_hash.size());
+        writeBytes(out, vote.locked_candidate_payload);
         writeBytes(out, vote.signature);
         if (!out) { error = "failed while writing round-change store"; break; }
     }

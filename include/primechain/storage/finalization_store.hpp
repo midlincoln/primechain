@@ -9,6 +9,8 @@ namespace primechain::storage {
 
 struct SignedCandidateRecord {
     PrimeValue integer{0};
+    std::string candidate_kind;
+    std::vector<std::uint8_t> candidate_payload;
     protocol::ValidatorVoteV0 vote;
 };
 

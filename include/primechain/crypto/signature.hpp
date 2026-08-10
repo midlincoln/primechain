@@ -151,6 +151,15 @@ Bytes roundChangeVoteSigningPayload(
     PrimeValue integer,
     std::uint64_t new_round,
     const Address& validator_address);
+Bytes lockedRoundChangeVoteSigningPayload(
+    const Hash256& previous_record_hash,
+    PrimeValue integer,
+    std::uint64_t new_round,
+    std::uint64_t locked_round,
+    const std::string& locked_candidate_kind,
+    const Hash256& locked_candidate_hash,
+    const Bytes& locked_candidate_payload,
+    const Address& validator_address);
 Bytes transactionSigningPayload(const Bytes& unsigned_transaction);
 Bytes primeProofSigningPayload(
     const Hash256& previous_record_hash,

@@ -149,6 +149,8 @@ int main(int argc, char** argv) {
 
     primechain::storage::SignedCandidateRecord finalization;
     finalization.integer = 18;
+    finalization.candidate_kind = "PRIME";
+    finalization.candidate_payload = {22, 23, 24};
     finalization.vote.validator_address = "pcpq1_finalization";
     finalization.vote.public_key = {19};
     finalization.vote.record_hash[0] = 20;
@@ -158,6 +160,7 @@ int main(int argc, char** argv) {
             prefix + ".finalization", finalization,
             [](const auto& loaded) {
                 return loaded.integer == 18 && loaded.vote.round == 1 &&
+                    loaded.candidate_kind == "PRIME" && loaded.candidate_payload.size() == 3 &&
                     loaded.vote.validator_address == "pcpq1_finalization";
             }, "finalization store")) return 1;
 

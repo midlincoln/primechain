@@ -104,6 +104,10 @@ struct RoundChangeVoteV1 {
     Hash256 previous_record_hash{};
     PrimeValue integer{0};
     std::uint64_t new_round{0};
+    std::uint64_t locked_round{0};
+    std::string locked_candidate_kind;
+    Hash256 locked_candidate_hash{};
+    Bytes locked_candidate_payload;
     Bytes signature;
 };
 

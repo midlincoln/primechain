@@ -20,6 +20,7 @@ constexpr std::uint64_t kPrimeRecordTag = 2;
 constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
 constexpr std::string_view kSignedFinalizationRule = "fixed-2-of-3-mldsa65-v2";
 constexpr std::string_view kRoundFinalizationRule = "fixed-2-of-3-mldsa65-rounds-v3";
+constexpr std::string_view kLockedRoundFinalizationRule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
 constexpr std::string_view kDevelopmentVoteDomain = "primechain-dev-vote-v0";
 constexpr std::uint64_t kMaxDecodedPrattFactors = 1024;
 constexpr std::uint64_t kMaxDecodedTransactions = 10000;
@@ -40,6 +41,10 @@ bool isCanonicalProtocolValidatorSet(const std::vector<Address>& validators) {
 bool hasQuorumVoteCount(std::size_t vote_count, std::size_t validator_count) {
     return vote_count >= core::requiredValidatorQuorum(validator_count) &&
            vote_count <= validator_count;
+}
+
+bool isZeroHash(const Hash256& hash) {
+    return std::all_of(hash.begin(), hash.end(), [](std::uint8_t byte) { return byte == 0; });
 }
 
 class ByteReader;
@@ -223,6 +228,21 @@ void appendRoundChangeVote(
     appendBytes(out, vote.signature);
 }
 
+void appendLockedRoundChangeVote(
+    std::vector<std::uint8_t>& out,
+    const RoundChangeVoteV1& vote) {
+    appendAddress(out, vote.validator_address);
+    appendBytes(out, vote.public_key);
+    appendHash(out, vote.previous_record_hash);
+    appendUint64(out, vote.integer);
+    appendUint64(out, vote.new_round);
+    appendUint64(out, vote.locked_round);
+    appendString(out, vote.locked_candidate_kind);
+    appendHash(out, vote.locked_candidate_hash);
+    appendBytes(out, vote.locked_candidate_payload);
+    appendBytes(out, vote.signature);
+}
+
 void appendCompositeLotteryProof(std::vector<std::uint8_t>& out, const CompositeLotteryProofV1& proof) {
     appendUint64(out, proof.round);
     appendUint64(out, proof.win_bps);
@@ -237,9 +257,12 @@ void appendFinalizationProof(
     const FinalizationProofV0& proof,
     bool include_votes) {
     appendString(out, proof.rule);
-    if (proof.rule == kRoundFinalizationRule) {
+    if (proof.rule == kRoundFinalizationRule || proof.rule == kLockedRoundFinalizationRule) {
         appendUint64(out, proof.round_changes.size());
-        for (const auto& vote : proof.round_changes) appendRoundChangeVote(out, vote);
+        for (const auto& vote : proof.round_changes) {
+            if (proof.rule == kLockedRoundFinalizationRule) appendLockedRoundChangeVote(out, vote);
+            else appendRoundChangeVote(out, vote);
+        }
     }
     if (!include_votes) {
         appendUint64(out, 0);
@@ -606,6 +629,10 @@ bool readEconomicPolicyUpdate(
 }
 
 bool readRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
+    vote.locked_round = 0;
+    vote.locked_candidate_kind.clear();
+    vote.locked_candidate_hash = {};
+    vote.locked_candidate_payload.clear();
     return reader.readString(vote.validator_address) &&
            reader.readBytes(vote.public_key) &&
            reader.readHash(vote.previous_record_hash) &&
@@ -614,16 +641,31 @@ bool readRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
            reader.readBytes(vote.signature);
 }
 
+bool readLockedRoundChangeVote(ByteReader& reader, RoundChangeVoteV1& vote) {
+    return reader.readString(vote.validator_address) &&
+           reader.readBytes(vote.public_key) &&
+           reader.readHash(vote.previous_record_hash) &&
+           reader.readUint64(vote.integer) &&
+           reader.readUint64(vote.new_round) &&
+           reader.readUint64(vote.locked_round) &&
+           reader.readString(vote.locked_candidate_kind) &&
+           reader.readHash(vote.locked_candidate_hash) &&
+           reader.readBytes(vote.locked_candidate_payload) &&
+           reader.readBytes(vote.signature);
+}
+
 bool readFinalizationProof(ByteReader& reader, FinalizationProofV0& proof) {
     std::uint64_t round_change_count = 0;
     std::uint64_t vote_count = 0;
     if (!reader.readString(proof.rule)) return false;
     proof.round_changes.clear();
-    if (proof.rule == kRoundFinalizationRule) {
+    if (proof.rule == kRoundFinalizationRule || proof.rule == kLockedRoundFinalizationRule) {
         if (!reader.readUint64(round_change_count) || round_change_count > 16) return false;
         for (std::uint64_t i = 0; i < round_change_count; ++i) {
             RoundChangeVoteV1 vote;
-            if (!readRoundChangeVote(reader, vote)) return false;
+            if (proof.rule == kLockedRoundFinalizationRule) {
+                if (!readLockedRoundChangeVote(reader, vote)) return false;
+            } else if (!readRoundChangeVote(reader, vote)) return false;
             proof.round_changes.push_back(std::move(vote));
         }
     }
@@ -1519,7 +1561,8 @@ bool verifyRoundChangeCertificate(
         }
         return true;
     }
-    if (proof.rule != kRoundFinalizationRule ||
+    const bool locked_round_rule = proof.rule == kLockedRoundFinalizationRule;
+    if ((proof.rule != kRoundFinalizationRule && !locked_round_rule) ||
         !hasQuorumVoteCount(proof.round_changes.size(), validator_set.size())) {
         error = "later finalization rounds require a validator-quorum round-change certificate";
         return false;
@@ -1538,11 +1581,50 @@ bool verifyRoundChangeCertificate(
             change.new_round != round) {
             error = "round-change vote target mismatch"; return false;
         }
+        if (locked_round_rule) {
+            if (change.locked_round == 0) {
+                if (!change.locked_candidate_kind.empty() || !isZeroHash(change.locked_candidate_hash) ||
+                    !change.locked_candidate_payload.empty()) {
+                    error = "empty round-change lock carries candidate data"; return false;
+                }
+            } else {
+                if (change.locked_round >= change.new_round ||
+                    (change.locked_candidate_kind != "PRIME" && change.locked_candidate_kind != "COMPOSITE") ||
+                    change.locked_candidate_payload.empty()) {
+                    error = "invalid round-change lock target"; return false;
+                }
+                std::string candidate_error;
+                Hash256 computed_hash{};
+                if (change.locked_candidate_kind == "PRIME") {
+                    auto locked = deserializePrimeRecord(change.locked_candidate_payload, candidate_error);
+                    if (!locked.has_value() || locked->height == 0 || locked->previous_record_hash != previous_record_hash ||
+                        locked->integer != integer) { error = "invalid locked prime candidate"; return false; }
+                    computed_hash = legacyCandidateRecordHashWithoutFinalization(*locked);
+                } else {
+                    auto locked = deserializeCompositeRecord(change.locked_candidate_payload, candidate_error);
+                    if (!locked.has_value() || locked->previous_record_hash != previous_record_hash ||
+                        locked->integer != integer) { error = "invalid locked composite candidate"; return false; }
+                    computed_hash = legacyCandidateRecordHashWithoutFinalization(*locked);
+                }
+                if (computed_hash != change.locked_candidate_hash) {
+                    error = "round-change lock candidate hash mismatch"; return false;
+                }
+            }
+        } else if (change.locked_round != 0 || !change.locked_candidate_kind.empty() ||
+                   !isZeroHash(change.locked_candidate_hash) || !change.locked_candidate_payload.empty()) {
+            error = "legacy round-change vote carries lock data"; return false;
+        }
         std::string signature_error;
+        const auto signing_payload = locked_round_rule
+            ? crypto::lockedRoundChangeVoteSigningPayload(
+                change.previous_record_hash, change.integer, change.new_round,
+                change.locked_round, change.locked_candidate_kind,
+                change.locked_candidate_hash, change.locked_candidate_payload,
+                change.validator_address)
+            : crypto::roundChangeVoteSigningPayload(change.previous_record_hash,
+                change.integer, change.new_round, change.validator_address);
         if (!crypto::verifyProtocolMessageSignature(change.public_key,
-                crypto::roundChangeVoteSigningPayload(change.previous_record_hash,
-                    change.integer, change.new_round, change.validator_address),
-                change.signature, signature_error)) {
+                signing_payload, change.signature, signature_error)) {
             error = "invalid round-change vote signature"; return false;
         }
     }
@@ -1557,7 +1639,8 @@ bool verifyRecordFinalization(
     const std::vector<Address>& validator_set,
     std::string& error) {
     if (validator_set.empty()) return verifyDevelopmentFinalization(proof, candidate_hash, error);
-    if (proof.rule != kSignedFinalizationRule && proof.rule != kRoundFinalizationRule) {
+    if (proof.rule != kSignedFinalizationRule && proof.rule != kRoundFinalizationRule &&
+        proof.rule != kLockedRoundFinalizationRule) {
         error = "quorum records require ML-DSA-65 finalization"; return false;
     }
     if (!isCanonicalProtocolValidatorSet(validator_set) ||
@@ -1570,6 +1653,27 @@ bool verifyRecordFinalization(
     if (proof.votes.front().round != round) {
         error = "finalization votes do not match certified round";
         return false;
+    }
+    if (proof.rule == kLockedRoundFinalizationRule) {
+        std::uint64_t highest_locked_round = 0;
+        Hash256 highest_locked_hash{};
+        bool have_highest_lock = false;
+        for (const auto& change : proof.round_changes) {
+            if (change.locked_round == 0) continue;
+            if (change.locked_round > highest_locked_round) {
+                highest_locked_round = change.locked_round;
+                highest_locked_hash = change.locked_candidate_hash;
+                have_highest_lock = true;
+            } else if (change.locked_round == highest_locked_round &&
+                       change.locked_candidate_hash != highest_locked_hash) {
+                error = "conflicting highest round-change locks";
+                return false;
+            }
+        }
+        if (have_highest_lock && highest_locked_hash != candidate_hash) {
+            error = "finalized candidate does not match highest round-change lock";
+            return false;
+        }
     }
     Address previous;
     for (const auto& vote : proof.votes) {
