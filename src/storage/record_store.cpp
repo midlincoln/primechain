@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <sys/stat.h>
@@ -386,6 +387,9 @@ bool appendIndexEntry(
             written += static_cast<std::size_t>(result);
         }
     }
+    if (ok && fsync(fd) != 0) {
+        ok = false;
+    }
     close(fd);
     if (!ok || entry.offset != old_store_size) {
         std::remove(index_path.c_str());
@@ -612,7 +616,12 @@ bool RecordStore::append(const StoredRecord& record, std::string& error) const {
 
     const IndexEntry entry{record.integer, store_size};
     const std::uint64_t new_store_size = store_size + bytes.size();
-    appendIndexEntry(path_, store_size, new_store_size, entries.size(), entry);
+    if (!appendIndexEntry(path_, store_size, new_store_size, entries.size(), entry)) {
+        std::cerr << "record_store: index update failed for integer="
+                  << record.integer << " at " << path_
+                  << " -- record data is durable, but the index is stale"
+                  << " and will be rebuilt from the record store when needed\n";
+    }
     return true;
 }
 
