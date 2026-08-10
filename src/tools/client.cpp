@@ -11,6 +11,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <sys/stat.h>
@@ -384,6 +385,8 @@ std::string compositeWalletPath(const std::string& workdir) { return joinPath(wa
 std::string mineStatePath(const std::string& workdir) { return joinPath(jobsDir(workdir), "mine.state"); }
 std::string pendingCompositePath(const std::string& workdir) { return joinPath(jobsDir(workdir), "pending-composite.state"); }
 std::string compositeProofIndexPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "composite-proofs.idx"); }
+std::string addressIndexEventsPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "address-index.dat"); }
+std::string addressIndexMetaPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "address-index.meta"); }
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
     std::map<std::string, std::string> values;
@@ -710,6 +713,141 @@ void appendWalletTransactionEvent(
           << " sender=" << sender
           << " receiver=" << receiver;
     events.push_back(event.str());
+}
+
+// Secondary, derived address index: one EVENT line per (address, tx-side)
+// pair, covering the same three cases wallet-history already computes
+// (sent/received/self/fee-paid), extracted for every address a transaction
+// touches rather than filtered to a single wallet. This lets a single
+// incremental pass over new records serve lookups for any address, instead
+// of every command re-decoding and re-verifying the whole chain from
+// record 0. Deliberately a cache over data client.cpp already computes
+// today (via storedTransactions/deserializePrimeRecord/
+// deserializeCompositeRecord) -- it adds no new protocol logic and is
+// fully disposable: delete indexes/address-index.* and the next
+// update-address-index rebuilds it from the canonical record store.
+struct AddressIndexEvent {
+    primechain::Address address;
+    primechain::PrimeValue integer{0};
+    std::uint64_t height{0};
+    std::string kind;
+    std::string direction;
+    std::string tx_hash;
+    std::uint64_t version{0};
+    std::uint64_t nonce{0};
+    primechain::PrimeValue prime{0};
+    std::uint64_t amount_micro_units{0};
+    std::uint64_t amount_denominator{1};
+    primechain::Address sender;
+    primechain::Address receiver;
+};
+
+std::string formatAddressIndexEventLine(const AddressIndexEvent& event) {
+    std::ostringstream out;
+    out << "EVENT address=" << event.address
+        << " integer=" << event.integer
+        << " height=" << event.height
+        << " kind=" << event.kind
+        << " direction=" << event.direction
+        << " tx_hash=" << event.tx_hash
+        << " version=" << event.version
+        << " nonce=" << event.nonce
+        << " prime=" << event.prime
+        << " amount_micro_units=" << event.amount_micro_units
+        << " amount_denominator=" << event.amount_denominator
+        << " sender=" << event.sender
+        << " receiver=" << event.receiver;
+    return out.str();
+}
+
+std::optional<AddressIndexEvent> parseAddressIndexEventLine(const std::string& line) {
+    if (line.rfind("EVENT ", 0) != 0) return std::nullopt;
+    std::istringstream in(line);
+    std::string tag;
+    in >> tag;
+    AddressIndexEvent event;
+    std::string token;
+    try {
+        while (in >> token) {
+            const auto eq = token.find('=');
+            if (eq == std::string::npos) continue;
+            const auto key = token.substr(0, eq);
+            const auto value = token.substr(eq + 1);
+            if (key == "address") event.address = value;
+            else if (key == "integer") event.integer = std::stoull(value);
+            else if (key == "height") event.height = std::stoull(value);
+            else if (key == "kind") event.kind = value;
+            else if (key == "direction") event.direction = value;
+            else if (key == "tx_hash") event.tx_hash = value;
+            else if (key == "version") event.version = std::stoull(value);
+            else if (key == "nonce") event.nonce = std::stoull(value);
+            else if (key == "prime") event.prime = std::stoull(value);
+            else if (key == "amount_micro_units") event.amount_micro_units = std::stoull(value);
+            else if (key == "amount_denominator") event.amount_denominator = std::stoull(value);
+            else if (key == "sender") event.sender = value;
+            else if (key == "receiver") event.receiver = value;
+        }
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (event.address.empty() || event.kind.empty() || event.direction.empty() ||
+        event.tx_hash.empty() || event.sender.empty() || event.receiver.empty()) {
+        return std::nullopt;
+    }
+    return event;
+}
+
+void extractAddressIndexEvents(
+    const primechain::storage::StoredRecord& stored,
+    const std::vector<primechain::protocol::TransactionV0>& transactions,
+    std::vector<AddressIndexEvent>& out) {
+    for (const auto& tx : transactions) {
+        const auto tx_hash_hex = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+        for (const auto& output : tx.outputs) {
+            const bool self = tx.sender_address == output.receiver_address;
+            AddressIndexEvent base;
+            base.integer = stored.integer;
+            base.height = stored.height;
+            base.kind = kindName(stored.kind);
+            base.tx_hash = tx_hash_hex;
+            base.version = tx.version;
+            base.nonce = tx.nonce;
+            base.prime = output.prime;
+            base.amount_micro_units = output.amount.numerator;
+            base.amount_denominator = output.amount.denominator;
+            base.sender = tx.sender_address;
+            base.receiver = output.receiver_address;
+
+            AddressIndexEvent sender_event = base;
+            sender_event.address = tx.sender_address;
+            sender_event.direction = self ? "self" : "sent";
+            out.push_back(sender_event);
+
+            if (!self) {
+                AddressIndexEvent receiver_event = base;
+                receiver_event.address = output.receiver_address;
+                receiver_event.direction = "received";
+                out.push_back(receiver_event);
+            }
+        }
+        if (hasAmount(tx.fee.amount)) {
+            AddressIndexEvent fee_event;
+            fee_event.address = tx.sender_address;
+            fee_event.integer = stored.integer;
+            fee_event.height = stored.height;
+            fee_event.kind = kindName(stored.kind);
+            fee_event.direction = "fee-paid";
+            fee_event.tx_hash = tx_hash_hex;
+            fee_event.version = tx.version;
+            fee_event.nonce = tx.nonce;
+            fee_event.prime = tx.fee.prime;
+            fee_event.amount_micro_units = tx.fee.amount.numerator;
+            fee_event.amount_denominator = tx.fee.amount.denominator;
+            fee_event.sender = tx.sender_address;
+            fee_event.receiver = "validator-fee-pool";
+            out.push_back(fee_event);
+        }
+    }
 }
 
 std::vector<primechain::protocol::TransactionV0> parseMempoolTransactions(
@@ -2760,6 +2898,299 @@ int validatorRewardDistributionStatus(int argc, char** argv) {
     return 0;
 }
 
+bool readAddressIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue& checkpoint_integer,
+    std::string& checkpoint_hash_hex,
+    std::uint64_t& event_count,
+    bool& present) {
+    const auto path = addressIndexMetaPath(workdir);
+    checkpoint_integer = 0;
+    checkpoint_hash_hex.clear();
+    event_count = 0;
+    present = false;
+    if (!pathExists(path)) return true;
+    const auto values = readKeyValueFile(path);
+    const auto version = values.find("version");
+    if (version == values.end() || version->second != "primechain-address-index-v1") {
+        return false;
+    }
+    if (values.count("checkpoint_integer")) checkpoint_integer = std::stoull(values.at("checkpoint_integer"));
+    if (values.count("checkpoint_hash")) checkpoint_hash_hex = values.at("checkpoint_hash");
+    if (values.count("event_count")) event_count = std::stoull(values.at("event_count"));
+    present = true;
+    return true;
+}
+
+bool writeAddressIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue checkpoint_integer,
+    const std::string& checkpoint_hash_hex,
+    std::uint64_t event_count) {
+    std::map<std::string, std::string> values;
+    values["version"] = "primechain-address-index-v1";
+    values["checkpoint_integer"] = std::to_string(checkpoint_integer);
+    values["checkpoint_hash"] = checkpoint_hash_hex;
+    values["event_count"] = std::to_string(event_count);
+    return writeKeyValueFile(addressIndexMetaPath(workdir), values);
+}
+
+// Incrementally extends the address index up to the workdir's current
+// frontier. Anchored on (checkpoint_integer, checkpoint_hash): before
+// trusting the checkpoint as a starting point, re-reads that exact record
+// from the canonical store and compares hashes. Because every record's
+// hash is chained through previous_record_hash, a match at the checkpoint
+// integer cryptographically guarantees nothing before it changed either --
+// so this single-point check is sufficient to detect any divergence
+// (a tip replacement, a resync onto a different canonical history, a
+// corrupted local file) up to and including the checkpoint. On a mismatch
+// (or a missing/corrupt meta file) the index is wiped and rebuilt from the
+// local store in full, which is always safe since it carries no state that
+// isn't re-derivable from chain.dat.
+int updateAddressIndex(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!ensureWorkdirLayout(workdir)) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return 1;
+    }
+    if (!latest.has_value()) {
+        std::cout << "ADDRESS_INDEX_UPDATED " << workdir << " from=0 to=0 new_events=0 rebuilt=0\n";
+        return 0;
+    }
+    const auto frontier = latest->integer;
+
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool meta_present = false;
+    bool diverged = !readAddressIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, meta_present);
+    if (meta_present && !diverged && checkpoint_integer > 0) {
+        const auto checkpoint_record = store.findByInteger(checkpoint_integer, error);
+        if (!error.empty()) {
+            std::cerr << "could not verify address index checkpoint: " << error << "\n";
+            return 1;
+        }
+        if (!checkpoint_record.has_value() ||
+            primechain::crypto::toHex(checkpoint_record->record_hash) != checkpoint_hash_hex) {
+            diverged = true;
+        }
+    }
+
+    primechain::PrimeValue start = checkpoint_integer + 1;
+    const auto reported_from = checkpoint_integer;
+    if (!meta_present || diverged) {
+        unlink(addressIndexEventsPath(workdir).c_str());
+        unlink(addressIndexMetaPath(workdir).c_str());
+        event_count = 0;
+        start = 0;
+    }
+
+    if (meta_present && !diverged && start > frontier) {
+        std::cout << "ADDRESS_INDEX_UPDATED " << workdir
+                  << " from=" << reported_from << " to=" << frontier
+                  << " new_events=0 rebuilt=0\n";
+        return 0;
+    }
+
+    const auto new_records = start == 0 ? store.loadAll(error) : store.findRange(start, frontier, error);
+    if (!error.empty()) {
+        std::cerr << "could not load new records: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<AddressIndexEvent> new_events;
+    for (const auto& stored : new_records) {
+        const auto transactions = storedTransactions(stored, error);
+        if (!transactions.has_value()) {
+            std::cerr << "could not decode record " << stored.integer << ": " << error << "\n";
+            return 1;
+        }
+        extractAddressIndexEvents(stored, *transactions, new_events);
+    }
+
+    if (!ensureDirectory(indexesDir(workdir))) return 1;
+
+    const auto events_path = addressIndexEventsPath(workdir);
+    const auto temp_events_path = events_path + ".tmp";
+    {
+        std::ofstream out(temp_events_path, std::ios::trunc);
+        if (!out) {
+            std::cerr << "could not open temporary address index for write\n";
+            return 1;
+        }
+
+        std::uint64_t copied_events = 0;
+        if (meta_present && !diverged && event_count > 0) {
+            std::ifstream existing(events_path);
+            if (!existing) {
+                std::cerr << "address index metadata exists but events file is missing; rebuilding\n";
+                unlink(addressIndexMetaPath(workdir).c_str());
+                unlink(events_path.c_str());
+                unlink(temp_events_path.c_str());
+                return updateAddressIndex(argc, argv);
+            }
+            std::string existing_line;
+            while (copied_events < event_count && std::getline(existing, existing_line)) {
+                if (!parseAddressIndexEventLine(existing_line).has_value()) {
+                    std::cerr << "address index contains a malformed event; rebuilding\n";
+                    unlink(addressIndexMetaPath(workdir).c_str());
+                    unlink(events_path.c_str());
+                    unlink(temp_events_path.c_str());
+                    return updateAddressIndex(argc, argv);
+                }
+                out << existing_line << "\n";
+                ++copied_events;
+            }
+            if (copied_events != event_count) {
+                std::cerr << "address index ended before metadata event count; rebuilding\n";
+                unlink(addressIndexMetaPath(workdir).c_str());
+                unlink(events_path.c_str());
+                unlink(temp_events_path.c_str());
+                return updateAddressIndex(argc, argv);
+            }
+        }
+
+        for (const auto& event : new_events) {
+            out << formatAddressIndexEventLine(event) << "\n";
+        }
+        if (!out) {
+            std::cerr << "could not write address index events\n";
+            unlink(temp_events_path.c_str());
+            return 1;
+        }
+    }
+    if (std::rename(temp_events_path.c_str(), events_path.c_str()) != 0) {
+        std::cerr << "could not replace address index events file: " << std::strerror(errno) << "\n";
+        unlink(temp_events_path.c_str());
+        return 1;
+    }
+
+    event_count += new_events.size();
+    if (!writeAddressIndexMeta(workdir, frontier, primechain::crypto::toHex(latest->record_hash), event_count)) {
+        std::cerr << "could not write address index checkpoint\n";
+        return 1;
+    }
+
+    std::cout << "ADDRESS_INDEX_UPDATED " << workdir
+              << " from=" << (start == 0 ? primechain::PrimeValue{0} : reported_from) << " to=" << frontier
+              << " new_events=" << new_events.size()
+              << " rebuilt=" << (diverged ? 1 : 0) << "\n";
+    return 0;
+}
+
+int addressIndexStatus(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto events_path = addressIndexEventsPath(workdir);
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool present = false;
+    if (!readAddressIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present)) {
+        std::cout << "ADDRESS_INDEX_INVALID " << workdir << "\n";
+        return 1;
+    }
+    if (!present) {
+        std::cout << "ADDRESS_INDEX_MISSING " << workdir << " path=" << events_path << "\n";
+        return 0;
+    }
+    std::cout << "ADDRESS_INDEX_STATUS " << workdir
+              << " checkpoint_integer=" << checkpoint_integer
+              << " checkpoint_hash=" << checkpoint_hash_hex
+              << " events=" << event_count
+              << " path=" << events_path << "\n";
+    return 0;
+}
+
+// Fast wallet-history: reads events from the address index instead of
+// decoding and signature-verifying every record in the chain. Requires the
+// index to be present and caught up to the workdir's current frontier
+// (same anchor check as updateAddressIndex) -- if it's missing or stale,
+// fails with a message pointing at update-address-index rather than
+// silently falling back to a full replay, so staleness is never masked.
+int walletHistoryWorkdir(int argc, char** argv) {
+    if (argc != 4 && argc != 6) return 1;
+    const std::string workdir = argv[2];
+    const std::string wallet_path = argv[3];
+    std::uint64_t last = 0;
+    if (argc == 6) {
+        if (std::string(argv[4]) != "--last") return 1;
+        last = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    }
+    const auto address = loadMinerAddress(wallet_path);
+    if (!address.has_value()) return 1;
+
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool present = false;
+    if (!readAddressIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present) || !present) {
+        std::cerr << "address index is missing; run update-address-index\n";
+        return 1;
+    }
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return 1;
+    }
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+    if (!latest.has_value() || checkpoint_integer != frontier ||
+        primechain::crypto::toHex(latest->record_hash) != checkpoint_hash_hex) {
+        std::cerr << "address index is stale; run update-address-index\n";
+        return 1;
+    }
+
+    std::ifstream in(addressIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open address index events file\n";
+        return 1;
+    }
+    std::vector<std::string> events;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseAddressIndexEventLine(line);
+        if (!parsed.has_value() || parsed->address != *address) continue;
+        const auto confirmations = frontier >= parsed->integer ? frontier - parsed->integer + 1 : 0;
+        std::ostringstream event;
+        event << "TX_EVENT"
+              << " integer=" << parsed->integer
+              << " height=" << parsed->height
+              << " kind=" << parsed->kind
+              << " confirmations=" << confirmations
+              << " direction=" << parsed->direction
+              << " tx_hash=" << parsed->tx_hash
+              << " version=" << parsed->version
+              << " nonce=" << parsed->nonce
+              << " prime=" << parsed->prime
+              << " amount_micro_units=" << parsed->amount_micro_units
+              << " amount_denominator=" << parsed->amount_denominator
+              << " sender=" << parsed->sender
+              << " receiver=" << parsed->receiver;
+        events.push_back(event.str());
+    }
+
+    std::cout << "WALLET_HISTORY " << workdir
+              << " wallet=" << wallet_path
+              << " address=" << *address
+              << " events=" << events.size() << "\n";
+    const auto start = last == 0 || last >= events.size()
+        ? std::size_t{0}
+        : events.size() - static_cast<std::size_t>(last);
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    return 0;
+}
+
 int indexStatus(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string workdir = argv[2];
@@ -3194,6 +3625,9 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " fee-distribution-status <record-store> [interval-records]\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
+              << "  " << argv0 << " update-address-index <workdir>\n"
+              << "  " << argv0 << " address-index-status <workdir>\n"
+              << "  " << argv0 << " wallet-history-workdir <workdir> <wallet-file> [--last count]\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
               << "  " << argv0 << " pratt-workdir <workdir> <prime>\n"
               << "  " << argv0 << " status <host> <port>\n"
@@ -3327,6 +3761,18 @@ int main(int argc, char** argv) {
     if (command == "index-status") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return indexStatus(argc, argv);
+    }
+    if (command == "update-address-index") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return updateAddressIndex(argc, argv);
+    }
+    if (command == "address-index-status") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return addressIndexStatus(argc, argv);
+    }
+    if (command == "wallet-history-workdir") {
+        if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
+        return walletHistoryWorkdir(argc, argv);
     }
     if (command == "factor-workdir") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
