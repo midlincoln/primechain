@@ -2939,6 +2939,8 @@ int jobStatus(int argc, char** argv) {
     const auto state = readKeyValueFile(mineStatePath(workdir));
     const auto target = state.find("target");
     if (target != state.end()) std::cout << "MINE_TARGET " << target->second << "\n";
+    const auto parallel_probes = state.find("parallel_probes");
+    std::cout << "MINE_PARALLEL_PROBES " << (parallel_probes != state.end() && parallel_probes->second == "1" ? 1 : 0) << "\n";
     const auto status = state.find("status");
     if (status != state.end()) std::cout << "JOB_STATUS " << status->second << "\n";
     const auto started_at = state.find("started_at");
@@ -2953,9 +2955,14 @@ int jobStatus(int argc, char** argv) {
 }
 
 int addMineJob(int argc, char** argv) {
-    if (argc != 5 || std::string(argv[3]) != "--target") return 1;
+    if ((argc != 5 && argc != 6) || std::string(argv[3]) != "--target") return 1;
     const std::string workdir = argv[2];
     const std::string target = argv[4];
+    bool parallel_probes = false;
+    if (argc == 6) {
+        if (std::string(argv[5]) != "--parallel-probes") return 1;
+        parallel_probes = true;
+    }
     if (!ensureWorkdirLayout(workdir)) return 1;
     std::map<std::string, std::string> state;
     state["target"] = target;
@@ -2963,8 +2970,15 @@ int addMineJob(int argc, char** argv) {
     state["created_at"] = nowSeconds();
     state["updated_at"] = state["created_at"];
     state["last_result"] = "created";
+    if (parallel_probes) state["parallel_probes"] = "1";
     if (!writeMineState(workdir, state)) return 1;
-    std::cout << "MINE_JOB_ADDED " << workdir << " target=" << target << "\n";
+    // Existing tests match this line's target=<N> as the exact end of
+    // string (e.g. "target=6$") -- keep that case byte-for-byte
+    // unchanged and only append anything when the new flag is actually
+    // set, so the common/default path stays compatible.
+    std::cout << "MINE_JOB_ADDED " << workdir << " target=" << target;
+    if (parallel_probes) std::cout << " parallel_probes=1";
+    std::cout << "\n";
     return 0;
 }
 
@@ -3049,6 +3063,10 @@ int runJobs(const char* argv0, int argc, char** argv) {
             miner_args.push_back("--validator-endpoint");
             miner_args.push_back(endpoint.host);
             miner_args.push_back(std::to_string(endpoint.port));
+        }
+        const auto parallel_probes = state.find("parallel_probes");
+        if (parallel_probes != state.end() && parallel_probes->second == "1") {
+            miner_args.push_back("--parallel-probes");
         }
         rc = runTool(argv0, "primechain-frontier-miner", miner_args);
         if (rc == 0) break;
@@ -3173,7 +3191,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " init-workdir <workdir> [host port]\n"
               << "  " << argv0 << " sync-peer <workdir> [host port]\n"
               << "  " << argv0 << " job-status <workdir>\n"
-              << "  " << argv0 << " add-mine-job <workdir> --target <integer>\n"
+              << "  " << argv0 << " add-mine-job <workdir> --target <integer> [--parallel-probes]\n"
               << "  " << argv0 << " run-jobs <workdir>\n"
               << "  " << argv0 << " clear-job <workdir>\n"
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
@@ -3245,7 +3263,7 @@ int main(int argc, char** argv) {
         return jobStatus(argc, argv);
     }
     if (command == "add-mine-job") {
-        if (argc != 5) { printUsage(argv[0]); return 1; }
+        if (argc != 5 && argc != 6) { printUsage(argv[0]); return 1; }
         return addMineJob(argc, argv);
     }
     if (command == "run-jobs") {
