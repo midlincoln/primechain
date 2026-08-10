@@ -1179,17 +1179,25 @@ int recordExplorerLookup(int argc, char** argv) {
     const std::string store_path = argv[2];
     const primechain::PrimeValue integer = std::stoull(argv[3]);
 
+    // Single-record lookup: findByInteger seeks straight to it via the
+    // existing .idx offset index instead of decoding the whole chain just
+    // to find one entry.
     primechain::storage::RecordStore store(store_path);
     std::string error;
-    const auto records = store.loadAll(error);
+    const auto latest = store.latest(error);
     if (!error.empty()) {
         std::cerr << "record_error: " << error << "\n";
         return 1;
     }
-    const auto frontier = records.empty() ? primechain::PrimeValue{0} : records.back().integer;
-    for (const auto& stored : records) {
-        if (stored.integer != integer) continue;
-        if (!printExplorerRecord(stored, frontier, true, error)) {
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+
+    const auto stored = store.findByInteger(integer, error);
+    if (!error.empty()) {
+        std::cerr << "record_error: " << error << "\n";
+        return 1;
+    }
+    if (stored.has_value()) {
+        if (!printExplorerRecord(*stored, frontier, true, error)) {
             std::cerr << "record_error: " << error << "\n";
             return 1;
         }
@@ -1211,22 +1219,38 @@ int latestRecordsExplorer(int argc, char** argv) {
         last = static_cast<std::uint64_t>(std::stoull(argv[4]));
     }
 
+    // Every integer from 2 (the first prime) to frontier has exactly one
+    // record, so total record count is derivable from the frontier alone
+    // without loading anything, and the tail we actually want to print can
+    // be fetched with one findRange() seek instead of decoding the entire
+    // chain to throw away everything but the last `last` records.
     primechain::storage::RecordStore store(store_path);
     std::string error;
-    const auto records = store.loadAll(error);
+    const auto latest = store.latest(error);
     if (!error.empty()) {
         std::cerr << "latest_records_error: " << error << "\n";
         return 1;
     }
-    const auto frontier = records.empty() ? primechain::PrimeValue{0} : records.back().integer;
-    const auto showing = last >= records.size() ? records.size() : static_cast<std::size_t>(last);
-    const auto start = records.size() - showing;
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+    const std::uint64_t total_records = frontier >= 2 ? static_cast<std::uint64_t>(frontier - 1) : 0;
+    const auto showing = last >= total_records ? total_records : last;
+
+    std::vector<primechain::storage::StoredRecord> records;
+    if (showing > 0) {
+        const primechain::PrimeValue range_start = frontier - static_cast<primechain::PrimeValue>(showing) + 1;
+        records = store.findRange(range_start, frontier, error);
+        if (!error.empty()) {
+            std::cerr << "latest_records_error: " << error << "\n";
+            return 1;
+        }
+    }
+
     std::cout << "LATEST_RECORDS " << store_path
               << " frontier=" << frontier
-              << " records=" << records.size()
+              << " records=" << total_records
               << " showing=" << showing << "\n";
-    for (std::size_t i = start; i < records.size(); ++i) {
-        if (!printExplorerRecord(records[i], frontier, false, error)) {
+    for (const auto& stored : records) {
+        if (!printExplorerRecord(stored, frontier, false, error)) {
             std::cerr << "latest_records_error: " << error << "\n";
             return 1;
         }
@@ -3114,6 +3138,36 @@ int addressIndexStatus(int argc, char** argv) {
 // (same anchor check as updateAddressIndex) -- if it's missing or stale,
 // fails with a message pointing at update-address-index rather than
 // silently falling back to a full replay, so staleness is never masked.
+// Returns the workdir's current frontier if the address index is present
+// and caught up to it (same anchor check as updateAddressIndex);
+// std::nullopt (with a message on stderr pointing at update-address-index)
+// otherwise. Shared by every fast, index-backed workdir command so none of
+// them can silently serve stale or missing data.
+std::optional<primechain::PrimeValue> requireFreshAddressIndex(const std::string& workdir) {
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool present = false;
+    if (!readAddressIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present) || !present) {
+        std::cerr << "address index is missing; run update-address-index\n";
+        return std::nullopt;
+    }
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return std::nullopt;
+    }
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+    if (!latest.has_value() || checkpoint_integer != frontier ||
+        primechain::crypto::toHex(latest->record_hash) != checkpoint_hash_hex) {
+        std::cerr << "address index is stale; run update-address-index\n";
+        return std::nullopt;
+    }
+    return frontier;
+}
+
 int walletHistoryWorkdir(int argc, char** argv) {
     if (argc != 4 && argc != 6) return 1;
     const std::string workdir = argv[2];
@@ -3126,28 +3180,9 @@ int walletHistoryWorkdir(int argc, char** argv) {
     const auto address = loadMinerAddress(wallet_path);
     if (!address.has_value()) return 1;
 
-    primechain::PrimeValue checkpoint_integer = 0;
-    std::string checkpoint_hash_hex;
-    std::uint64_t event_count = 0;
-    bool present = false;
-    if (!readAddressIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present) || !present) {
-        std::cerr << "address index is missing; run update-address-index\n";
-        return 1;
-    }
-
-    primechain::storage::RecordStore store(chainPath(workdir));
-    std::string error;
-    const auto latest = store.latest(error);
-    if (!error.empty()) {
-        std::cerr << "could not read workdir chain: " << error << "\n";
-        return 1;
-    }
-    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
-    if (!latest.has_value() || checkpoint_integer != frontier ||
-        primechain::crypto::toHex(latest->record_hash) != checkpoint_hash_hex) {
-        std::cerr << "address index is stale; run update-address-index\n";
-        return 1;
-    }
+    const auto frontier_opt = requireFreshAddressIndex(workdir);
+    if (!frontier_opt.has_value()) return 1;
+    const auto frontier = *frontier_opt;
 
     std::ifstream in(addressIndexEventsPath(workdir));
     if (!in) {
@@ -3189,6 +3224,168 @@ int walletHistoryWorkdir(int argc, char** argv) {
         std::cout << events[i] << "\n";
     }
     return 0;
+}
+
+// Fast address-report: same idea as wallet-history-workdir, but for a raw
+// address rather than a local wallet file. Only the transaction-event half
+// of the report comes from the index -- current holdings/balance are
+// ledger state, not a log of past events, so they still require
+// SequentialNode::load() regardless. This still cuts the work in half:
+// the index removes the second, otherwise-redundant full decode-and-verify
+// pass over every record that the original implementation did purely to
+// build the event list.
+int addressReportWorkdir(int argc, char** argv) {
+    if (argc != 4 && argc != 6) return 1;
+    const std::string workdir = argv[2];
+    const primechain::Address address = argv[3];
+    std::uint64_t last = 0;
+    if (argc == 6) {
+        if (std::string(argv[4]) != "--last") return 1;
+        last = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    }
+
+    const auto frontier_opt = requireFreshAddressIndex(workdir);
+    if (!frontier_opt.has_value()) return 1;
+    const auto frontier = *frontier_opt;
+
+    std::string error;
+    primechain::node::SequentialNode node(chainPath(workdir));
+    if (!node.load(error)) {
+        std::cerr << "address_report_error: " << error << "\n";
+        return 1;
+    }
+    const auto holdings = node.holdingsForAddress(address);
+    std::uint64_t balance = 0;
+    for (const auto& holding : holdings) balance += holding.second;
+
+    std::ifstream in(addressIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open address index events file\n";
+        return 1;
+    }
+    std::vector<std::string> events;
+    std::set<std::string> matching_hashes;
+    AddressReportTotals totals;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseAddressIndexEventLine(line);
+        if (!parsed.has_value() || parsed->address != address) continue;
+        matching_hashes.insert(parsed->tx_hash);
+        if (parsed->amount_denominator == 1) {
+            if (parsed->direction == "sent") totals.sent_micro_units += parsed->amount_micro_units;
+            if (parsed->direction == "received") totals.received_micro_units += parsed->amount_micro_units;
+            if (parsed->direction == "fee-paid") totals.fee_micro_units += parsed->amount_micro_units;
+        }
+        const auto confirmations = frontier >= parsed->integer ? frontier - parsed->integer + 1 : 0;
+        std::ostringstream event;
+        event << "ADDRESS_TX"
+              << " integer=" << parsed->integer
+              << " height=" << parsed->height
+              << " kind=" << parsed->kind
+              << " confirmations=" << confirmations
+              << " direction=" << parsed->direction
+              << " tx_hash=" << parsed->tx_hash
+              << " version=" << parsed->version
+              << " nonce=" << parsed->nonce
+              << " prime=" << parsed->prime
+              << " amount_micro_units=" << parsed->amount_micro_units
+              << " amount_denominator=" << parsed->amount_denominator
+              << " sender=" << parsed->sender
+              << " receiver=" << parsed->receiver;
+        events.push_back(event.str());
+    }
+    totals.transactions = matching_hashes.size();
+
+    std::cout << "ADDRESS_REPORT " << workdir
+              << " address=" << address
+              << " frontier=" << frontier
+              << " holdings=" << holdings.size()
+              << " total_micro_units=" << balance
+              << " transactions=" << totals.transactions
+              << " events=" << events.size()
+              << " sent_micro_units=" << totals.sent_micro_units
+              << " received_micro_units=" << totals.received_micro_units
+              << " fee_micro_units=" << totals.fee_micro_units << "\n";
+    for (const auto& holding : holdings) {
+        std::cout << "ADDRESS_HOLDING address=" << address
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    const auto start = last == 0 || last >= events.size()
+        ? std::size_t{0}
+        : events.size() - static_cast<std::size_t>(last);
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    return 0;
+}
+
+// Fast tx lookup: a transaction's hash isn't derivable from its position,
+// so finding which record holds it normally means a full linear scan.
+// Every transaction has at least its sender indexed, so scanning the
+// (much smaller, decode-free) address index for a matching tx_hash finds
+// the record's integer directly; findByInteger then seeks straight to it
+// via the existing .idx offset index to fetch the full record for
+// display.
+int transactionLookupWorkdir(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const std::string wanted_hash = argv[3];
+
+    const auto frontier_opt = requireFreshAddressIndex(workdir);
+    if (!frontier_opt.has_value()) return 1;
+    const auto frontier = *frontier_opt;
+
+    std::ifstream in(addressIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open address index events file\n";
+        return 1;
+    }
+    std::optional<primechain::PrimeValue> found_integer;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseAddressIndexEventLine(line);
+        if (!parsed.has_value() || parsed->tx_hash != wanted_hash) continue;
+        found_integer = parsed->integer;
+        break;
+    }
+    if (!found_integer.has_value()) {
+        std::cout << "TX_NOT_FOUND " << wanted_hash << " store=" << workdir << " frontier=" << frontier << "\n";
+        return 1;
+    }
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto stored = store.findByInteger(*found_integer, error);
+    if (!error.empty() || !stored.has_value()) {
+        std::cerr << "tx_lookup_error: could not reload indexed record " << *found_integer << "\n";
+        return 1;
+    }
+    const auto transactions = storedTransactions(*stored, error);
+    if (!transactions.has_value()) {
+        std::cerr << "tx_lookup_error: " << error << "\n";
+        return 1;
+    }
+    for (const auto& tx : *transactions) {
+        const auto tx_hash = primechain::crypto::toHex(primechain::protocol::transactionHash(tx));
+        if (tx_hash != wanted_hash) continue;
+        const auto confirmations = frontier >= stored->integer ? frontier - stored->integer + 1 : 0;
+        std::cout << "TX_FOUND " << wanted_hash
+                  << " store=" << workdir
+                  << " integer=" << stored->integer
+                  << " height=" << stored->height
+                  << " kind=" << kindName(stored->kind)
+                  << " frontier=" << frontier
+                  << " confirmations=" << confirmations
+                  << " version=" << tx.version
+                  << " nonce=" << tx.nonce
+                  << " sender=" << tx.sender_address << "\n";
+        printTransactionDetails(tx, "TX");
+        return 0;
+    }
+    std::cerr << "tx_lookup_error: indexed record " << *found_integer
+              << " does not contain tx_hash " << wanted_hash << "\n";
+    return 1;
 }
 
 int indexStatus(int argc, char** argv) {
@@ -3646,6 +3843,8 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " update-address-index <workdir>\n"
               << "  " << argv0 << " address-index-status <workdir>\n"
               << "  " << argv0 << " wallet-history-workdir <workdir> <wallet-file> [--last count]\n"
+              << "  " << argv0 << " address-report-workdir <workdir> <address> [--last count]\n"
+              << "  " << argv0 << " tx-workdir <workdir> <tx-hash>\n"
               << "  " << argv0 << " factor-workdir <workdir> <n>\n"
               << "  " << argv0 << " pratt-workdir <workdir> <prime>\n"
               << "  " << argv0 << " status <host> <port>\n"
@@ -3791,6 +3990,14 @@ int main(int argc, char** argv) {
     if (command == "wallet-history-workdir") {
         if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
         return walletHistoryWorkdir(argc, argv);
+    }
+    if (command == "address-report-workdir") {
+        if (argc != 4 && argc != 6) { printUsage(argv[0]); return 1; }
+        return addressReportWorkdir(argc, argv);
+    }
+    if (command == "tx-workdir") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return transactionLookupWorkdir(argc, argv);
     }
     if (command == "factor-workdir") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
