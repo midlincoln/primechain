@@ -390,6 +390,8 @@ std::string addressIndexMetaPath(const std::string& workdir) { return joinPath(i
 std::string rewardIndexEventsPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.dat"); }
 std::string rewardIndexMetaPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.meta"); }
 std::string rewardIndexPendingPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.pending"); }
+std::string participationIndexEventsPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "participation-index.dat"); }
+std::string participationIndexMetaPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "participation-index.meta"); }
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
     std::map<std::string, std::string> values;
@@ -979,6 +981,272 @@ bool extractRewardIndexEvents(
         }
     }
     pending.clear();
+    return true;
+}
+
+// Secondary, derived participation index: covers everything left that's
+// still a client.cpp-local, sparse per-record event -- validator endpoint
+// updates, economic policy updates, fee/reward distribution transactions,
+// and validator votes (finalization, round-change, commit-phase, epoch).
+// One generic key=value event line serves all of these kinds rather than
+// a separate index per report, since each is rare (most records carry
+// none of them) and the fields involved barely overlap.
+//
+// Deliberately does NOT cover validator-registry (genesis/epoch-transition
+// detection) or anything derived from it (board-report, launch-report):
+// that logic lives in primechain::node::loadValidatorRegistry() in
+// src/node/, not a client.cpp helper, so indexing it would mean either
+// touching core library code or duplicating its logic here and accepting
+// drift risk if the canonical version ever changes. Out of scope for a
+// client-side cache.
+struct ParticipationEvent {
+    primechain::PrimeValue integer{0};
+    std::uint64_t height{0};
+    std::string kind;
+    primechain::Address validator;
+    std::string host;
+    std::uint64_t port{0};
+    primechain::PrimeValue effective_integer{0};
+    std::uint64_t sequence{0};
+    std::uint64_t transfer_fee{0};
+    std::uint64_t min_reserve{0};
+    std::uint64_t votes{0};
+    std::uint64_t epoch{0};
+    primechain::PrimeValue prime{0};
+    std::uint64_t amount{0};
+    std::uint64_t recipients{0};
+    std::uint64_t prime_count{0};
+};
+
+std::string formatParticipationEventLine(const ParticipationEvent& event) {
+    std::ostringstream out;
+    out << "PEVENT kind=" << event.kind
+        << " integer=" << event.integer
+        << " height=" << event.height
+        << " validator=" << event.validator
+        << " host=" << (event.host.empty() ? std::string("-") : event.host)
+        << " port=" << event.port
+        << " effective_integer=" << event.effective_integer
+        << " sequence=" << event.sequence
+        << " transfer_fee=" << event.transfer_fee
+        << " min_reserve=" << event.min_reserve
+        << " votes=" << event.votes
+        << " epoch=" << event.epoch
+        << " prime=" << event.prime
+        << " amount=" << event.amount
+        << " recipients=" << event.recipients
+        << " prime_count=" << event.prime_count;
+    return out.str();
+}
+
+std::optional<ParticipationEvent> parseParticipationEventLine(const std::string& line) {
+    if (line.rfind("PEVENT ", 0) != 0) return std::nullopt;
+    std::istringstream in(line);
+    std::string tag;
+    in >> tag;
+    ParticipationEvent event;
+    std::string token;
+    while (in >> token) {
+        const auto eq = token.find('=');
+        if (eq == std::string::npos) continue;
+        const auto key = token.substr(0, eq);
+        const auto value = token.substr(eq + 1);
+        if (key == "kind") event.kind = value;
+        else if (key == "integer") event.integer = std::stoull(value);
+        else if (key == "height") event.height = std::stoull(value);
+        else if (key == "validator") event.validator = value;
+        else if (key == "host") event.host = value == "-" ? std::string() : value;
+        else if (key == "port") event.port = std::stoull(value);
+        else if (key == "effective_integer") event.effective_integer = std::stoull(value);
+        else if (key == "sequence") event.sequence = std::stoull(value);
+        else if (key == "transfer_fee") event.transfer_fee = std::stoull(value);
+        else if (key == "min_reserve") event.min_reserve = std::stoull(value);
+        else if (key == "votes") event.votes = std::stoull(value);
+        else if (key == "epoch") event.epoch = std::stoull(value);
+        else if (key == "prime") event.prime = std::stoull(value);
+        else if (key == "amount") event.amount = std::stoull(value);
+        else if (key == "recipients") event.recipients = std::stoull(value);
+        else if (key == "prime_count") event.prime_count = std::stoull(value);
+    }
+    return event;
+}
+
+void appendVoteEvents(
+    std::vector<ParticipationEvent>& out,
+    const std::string& kind,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    const std::vector<primechain::protocol::ValidatorVoteV0>& votes) {
+    for (const auto& vote : votes) {
+        ParticipationEvent event;
+        event.integer = integer;
+        event.height = height;
+        event.kind = kind;
+        event.validator = vote.validator_address;
+        out.push_back(event);
+    }
+}
+
+void appendRoundChangeVoteEvents(
+    std::vector<ParticipationEvent>& out,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    const std::vector<primechain::protocol::RoundChangeVoteV1>& votes) {
+    for (const auto& vote : votes) {
+        ParticipationEvent event;
+        event.integer = integer;
+        event.height = height;
+        event.kind = "vote-round-change";
+        event.validator = vote.validator_address;
+        out.push_back(event);
+    }
+}
+
+void appendEpochVoteEvents(
+    std::vector<ParticipationEvent>& out,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    const std::vector<primechain::protocol::ValidatorEpochVoteV1>& votes) {
+    for (const auto& vote : votes) {
+        ParticipationEvent event;
+        event.integer = integer;
+        event.height = height;
+        event.kind = "vote-epoch";
+        event.validator = vote.validator_address;
+        out.push_back(event);
+    }
+}
+
+// A transaction with sender "pcpool_<label>_epoch_N..." and a leading
+// input is a distribution payout; both fee-distribution-status and
+// validator-reward-distribution-status key off the same shape, just a
+// different sender prefix/tx version.
+void appendDistributionEvent(
+    std::vector<ParticipationEvent>& out,
+    const std::string& kind,
+    const std::string& prefix,
+    std::uint64_t expected_version,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    std::uint64_t prime_count_so_far,
+    const primechain::protocol::TransactionV0& tx) {
+    if (tx.version != expected_version || tx.sender_address.rfind(prefix, 0) != 0 || tx.inputs.empty()) return;
+    std::uint64_t epoch = 0;
+    try {
+        epoch = static_cast<std::uint64_t>(std::stoull(tx.sender_address.substr(prefix.size())));
+    } catch (...) {
+        return;
+    }
+    ParticipationEvent event;
+    event.integer = integer;
+    event.height = height;
+    event.kind = kind;
+    event.epoch = epoch;
+    event.prime = tx.inputs.front().prime;
+    event.amount = tx.inputs.front().amount.denominator == 1 ? tx.inputs.front().amount.numerator : 0;
+    event.recipients = tx.outputs.size();
+    event.prime_count = prime_count_so_far;
+    out.push_back(event);
+}
+
+// Processes exactly one record; prime_record_count is threaded through by
+// the caller (a plain running total, incremented here whenever the record
+// is prime) since validator-reward-distribution-status's "how many prime
+// records since the last distribution" needs it and it isn't otherwise
+// recoverable from a single record in isolation.
+bool extractParticipationEvents(
+    const primechain::storage::StoredRecord& stored,
+    std::uint64_t& prime_record_count,
+    std::vector<ParticipationEvent>& out,
+    std::string& error) {
+    static const std::string kFeePrefix = "pcpool_validator_fees_epoch_";
+    static const std::string kRewardPrefix = "pcpool_validator_rewards_epoch_";
+
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        for (const auto& update : record->validator_endpoints) {
+            ParticipationEvent event;
+            event.integer = record->integer;
+            event.height = record->height;
+            event.kind = "endpoint";
+            event.validator = update.validator_address;
+            event.host = update.host;
+            event.port = update.port;
+            event.effective_integer = update.effective_integer;
+            event.sequence = update.sequence;
+            out.push_back(event);
+        }
+        if (record->economic_policy.transfer_fee_micro_units != 0 ||
+            record->economic_policy.validator_min_reserve_micro_units != 0) {
+            ParticipationEvent event;
+            event.integer = record->integer;
+            event.height = record->height;
+            event.kind = "policy";
+            event.transfer_fee = record->economic_policy.transfer_fee_micro_units;
+            event.min_reserve = record->economic_policy.validator_min_reserve_micro_units;
+            event.effective_integer = record->economic_policy.effective_integer;
+            event.sequence = record->economic_policy.sequence;
+            event.votes = record->economic_policy.votes.size();
+            out.push_back(event);
+        }
+        appendVoteEvents(out, "vote-finalization", record->integer, record->height, record->finalized_by.votes);
+        appendRoundChangeVoteEvents(out, record->integer, record->height, record->finalized_by.round_changes);
+        appendEpochVoteEvents(out, record->integer, record->height, record->validator_epoch.votes);
+        for (const auto& vote : record->commit_phase.votes) {
+            ParticipationEvent event;
+            event.integer = record->integer;
+            event.height = record->height;
+            event.kind = "vote-commit-phase";
+            event.validator = vote.validator_address;
+            out.push_back(event);
+        }
+        for (const auto& tx : record->transactions) {
+            appendDistributionEvent(out, "fee-distribution", kFeePrefix, 3,
+                record->integer, record->height, prime_record_count, tx);
+            appendDistributionEvent(out, "reward-distribution", kRewardPrefix, 5,
+                record->integer, record->height, prime_record_count, tx);
+        }
+        return true;
+    }
+
+    const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!record.has_value()) return false;
+    ++prime_record_count;
+    for (const auto& update : record->validator_endpoints) {
+        ParticipationEvent event;
+        event.integer = record->integer;
+        event.height = record->height;
+        event.kind = "endpoint";
+        event.validator = update.validator_address;
+        event.host = update.host;
+        event.port = update.port;
+        event.effective_integer = update.effective_integer;
+        event.sequence = update.sequence;
+        out.push_back(event);
+    }
+    if (record->economic_policy.transfer_fee_micro_units != 0 ||
+        record->economic_policy.validator_min_reserve_micro_units != 0) {
+        ParticipationEvent event;
+        event.integer = record->integer;
+        event.height = record->height;
+        event.kind = "policy";
+        event.transfer_fee = record->economic_policy.transfer_fee_micro_units;
+        event.min_reserve = record->economic_policy.validator_min_reserve_micro_units;
+        event.effective_integer = record->economic_policy.effective_integer;
+        event.sequence = record->economic_policy.sequence;
+        event.votes = record->economic_policy.votes.size();
+        out.push_back(event);
+    }
+    appendVoteEvents(out, "vote-finalization", record->integer, record->height, record->finalized_by.votes);
+    appendRoundChangeVoteEvents(out, record->integer, record->height, record->finalized_by.round_changes);
+    appendEpochVoteEvents(out, record->integer, record->height, record->validator_epoch.votes);
+    for (const auto& tx : record->transactions) {
+        appendDistributionEvent(out, "fee-distribution", kFeePrefix, 3,
+            record->integer, record->height, prime_record_count, tx);
+        appendDistributionEvent(out, "reward-distribution", kRewardPrefix, 5,
+            record->integer, record->height, prime_record_count, tx);
+    }
     return true;
 }
 
@@ -3509,6 +3777,552 @@ std::optional<primechain::PrimeValue> requireFreshRewardIndex(const std::string&
     return frontier;
 }
 
+bool readParticipationIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue& checkpoint_integer,
+    std::string& checkpoint_hash_hex,
+    std::uint64_t& event_count,
+    std::uint64_t& prime_record_count,
+    bool& present) {
+    const auto path = participationIndexMetaPath(workdir);
+    checkpoint_integer = 0;
+    checkpoint_hash_hex.clear();
+    event_count = 0;
+    prime_record_count = 0;
+    present = false;
+    if (!pathExists(path)) return true;
+    const auto values = readKeyValueFile(path);
+    const auto version = values.find("version");
+    if (version == values.end() || version->second != "primechain-participation-index-v1") {
+        return false;
+    }
+    if (values.count("checkpoint_integer")) checkpoint_integer = std::stoull(values.at("checkpoint_integer"));
+    if (values.count("checkpoint_hash")) checkpoint_hash_hex = values.at("checkpoint_hash");
+    if (values.count("event_count")) event_count = std::stoull(values.at("event_count"));
+    if (values.count("prime_record_count")) prime_record_count = std::stoull(values.at("prime_record_count"));
+    present = true;
+    return true;
+}
+
+bool writeParticipationIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue checkpoint_integer,
+    const std::string& checkpoint_hash_hex,
+    std::uint64_t event_count,
+    std::uint64_t prime_record_count) {
+    std::map<std::string, std::string> values;
+    values["version"] = "primechain-participation-index-v1";
+    values["checkpoint_integer"] = std::to_string(checkpoint_integer);
+    values["checkpoint_hash"] = checkpoint_hash_hex;
+    values["event_count"] = std::to_string(event_count);
+    values["prime_record_count"] = std::to_string(prime_record_count);
+    return writeKeyValueFile(participationIndexMetaPath(workdir), values);
+}
+
+// Same (integer, record_hash) anchoring, incremental findRange extension,
+// and full-rebuild-on-divergence behavior as update{Address,Reward}Index.
+// prime_record_count is the one piece of state carried across the
+// checkpoint boundary here -- see extractParticipationEvents.
+int updateParticipationIndex(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!ensureWorkdirLayout(workdir)) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return 1;
+    }
+    if (!latest.has_value()) {
+        std::cout << "PARTICIPATION_INDEX_UPDATED " << workdir << " from=0 to=0 new_events=0 rebuilt=0\n";
+        return 0;
+    }
+    const auto frontier = latest->integer;
+
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    std::uint64_t prime_record_count = 0;
+    bool meta_present = false;
+    bool diverged = !readParticipationIndexMeta(
+        workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, meta_present);
+    if (meta_present && !diverged && checkpoint_integer > 0) {
+        const auto checkpoint_record = store.findByInteger(checkpoint_integer, error);
+        if (!error.empty()) {
+            std::cerr << "could not verify participation index checkpoint: " << error << "\n";
+            return 1;
+        }
+        if (!checkpoint_record.has_value() ||
+            primechain::crypto::toHex(checkpoint_record->record_hash) != checkpoint_hash_hex) {
+            diverged = true;
+        }
+    }
+
+    primechain::PrimeValue start = checkpoint_integer + 1;
+    const auto reported_from = checkpoint_integer;
+    if (!meta_present || diverged) {
+        unlink(participationIndexEventsPath(workdir).c_str());
+        unlink(participationIndexMetaPath(workdir).c_str());
+        event_count = 0;
+        prime_record_count = 0;
+        start = 0;
+    }
+
+    if (meta_present && !diverged && start > frontier) {
+        std::cout << "PARTICIPATION_INDEX_UPDATED " << workdir
+                  << " from=" << reported_from << " to=" << frontier
+                  << " new_events=0 rebuilt=0\n";
+        return 0;
+    }
+
+    const auto new_records = start == 0 ? store.loadAll(error) : store.findRange(start, frontier, error);
+    if (!error.empty()) {
+        std::cerr << "could not load new records: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<ParticipationEvent> new_events;
+    for (const auto& stored : new_records) {
+        if (!extractParticipationEvents(stored, prime_record_count, new_events, error)) {
+            std::cerr << "could not decode record " << stored.integer << ": " << error << "\n";
+            return 1;
+        }
+    }
+
+    if (!ensureDirectory(indexesDir(workdir))) return 1;
+    {
+        std::ofstream out(participationIndexEventsPath(workdir), std::ios::app);
+        if (!out) {
+            std::cerr << "could not open participation index for append\n";
+            return 1;
+        }
+        for (const auto& event : new_events) {
+            out << formatParticipationEventLine(event) << "\n";
+        }
+        if (!out) {
+            std::cerr << "could not write participation index events\n";
+            return 1;
+        }
+    }
+
+    event_count += new_events.size();
+    if (!writeParticipationIndexMeta(
+            workdir, frontier, primechain::crypto::toHex(latest->record_hash), event_count, prime_record_count)) {
+        std::cerr << "could not write participation index checkpoint\n";
+        return 1;
+    }
+
+    std::cout << "PARTICIPATION_INDEX_UPDATED " << workdir
+              << " from=" << (start == 0 ? primechain::PrimeValue{0} : reported_from) << " to=" << frontier
+              << " new_events=" << new_events.size()
+              << " rebuilt=" << (diverged ? 1 : 0) << "\n";
+    return 0;
+}
+
+int participationIndexStatus(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto events_path = participationIndexEventsPath(workdir);
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    std::uint64_t prime_record_count = 0;
+    bool present = false;
+    if (!readParticipationIndexMeta(
+            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, present)) {
+        std::cout << "PARTICIPATION_INDEX_INVALID " << workdir << "\n";
+        return 1;
+    }
+    if (!present) {
+        std::cout << "PARTICIPATION_INDEX_MISSING " << workdir << " path=" << events_path << "\n";
+        return 0;
+    }
+    std::cout << "PARTICIPATION_INDEX_STATUS " << workdir
+              << " checkpoint_integer=" << checkpoint_integer
+              << " checkpoint_hash=" << checkpoint_hash_hex
+              << " events=" << event_count
+              << " prime_record_count=" << prime_record_count
+              << " path=" << events_path << "\n";
+    return 0;
+}
+
+// Returns the current prime_record_count if the participation index is
+// present and caught up to the workdir's frontier; std::nullopt (with a
+// message pointing at update-participation-index) otherwise.
+std::optional<std::uint64_t> requireFreshParticipationIndex(const std::string& workdir) {
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    std::uint64_t prime_record_count = 0;
+    bool present = false;
+    if (!readParticipationIndexMeta(
+            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, present) ||
+        !present) {
+        std::cerr << "participation index is missing; run update-participation-index\n";
+        return std::nullopt;
+    }
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return std::nullopt;
+    }
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+    if (!latest.has_value() || checkpoint_integer != frontier ||
+        primechain::crypto::toHex(latest->record_hash) != checkpoint_hash_hex) {
+        std::cerr << "participation index is stale; run update-participation-index\n";
+        return std::nullopt;
+    }
+    return prime_record_count;
+}
+
+// Fast validator-endpoints: dedupe latest-per-validator over PEVENT
+// kind=endpoint lines instead of decoding every record.
+int validatorEndpointsWorkdirFast(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    std::ifstream in(participationIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open participation index events file\n";
+        return 1;
+    }
+    std::map<primechain::Address, ParticipationEvent> latest;
+    std::uint64_t event_count = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseParticipationEventLine(line);
+        if (!parsed.has_value() || parsed->kind != "endpoint") continue;
+        latest[parsed->validator] = *parsed;
+        ++event_count;
+    }
+
+    std::cout << "VALIDATOR_ENDPOINT_REGISTRY " << workdir
+              << " active_endpoints=" << latest.size()
+              << " events=" << event_count << "\n";
+    for (const auto& entry : latest) {
+        const auto& update = entry.second;
+        std::cout << "VALIDATOR_ENDPOINT " << update.validator
+                  << " host=" << update.host
+                  << " port=" << update.port
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence << "\n";
+    }
+    return 0;
+}
+
+// Fast economic-policy: the event list comes from the index; the active
+// transfer-fee/min-reserve values still go through SequentialNode::load()
+// (current effective policy is ledger-derived state, not a log of past
+// events -- same reasoning as address-report-workdir's holdings).
+int economicPolicyWorkdirFast(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    std::string error;
+    primechain::node::SequentialNode node(chainPath(workdir));
+    if (!node.load(error)) {
+        std::cerr << "economic_policy_error: " << error << "\n";
+        return 1;
+    }
+
+    std::ifstream in(participationIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open participation index events file\n";
+        return 1;
+    }
+    std::vector<ParticipationEvent> events;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseParticipationEventLine(line);
+        if (!parsed.has_value() || parsed->kind != "policy") continue;
+        events.push_back(*parsed);
+    }
+
+    std::cout << "ECONOMIC_POLICY_REGISTRY " << workdir
+              << " active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " active_validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits()
+              << " events=" << events.size() << "\n";
+    for (const auto& event : events) {
+        std::cout << "ECONOMIC_POLICY_EVENT integer=" << event.integer
+                  << " transfer_fee_micro_units=" << event.transfer_fee
+                  << " validator_min_reserve_micro_units=" << event.min_reserve
+                  << " effective_integer=" << event.effective_integer
+                  << " sequence=" << event.sequence
+                  << " votes=" << event.votes << "\n";
+    }
+    return 0;
+}
+
+// Fast fee-distribution-status: events + last-distribution tracking come
+// from the index; pool holdings/eligible recipients/current epoch still
+// need SequentialNode::load() (ledger state).
+int feeDistributionStatusWorkdirFast(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const std::uint64_t interval_records = argc == 4
+        ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+        : 1000;
+    if (interval_records == 0) {
+        std::cerr << "fee_distribution_status_error: interval must be positive\n";
+        return 1;
+    }
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    std::string error;
+    primechain::node::SequentialNode node(chainPath(workdir));
+    if (!node.load(error)) {
+        std::cerr << "fee_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+
+    std::ifstream in(participationIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open participation index events file\n";
+        return 1;
+    }
+    std::uint64_t distribution_count = 0;
+    primechain::PrimeValue last_distribution_integer = 0;
+    std::uint64_t last_distribution_epoch = 0;
+    primechain::PrimeValue last_distribution_prime = 0;
+    std::uint64_t last_distribution_micro_units = 0;
+    std::vector<std::string> events;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseParticipationEventLine(line);
+        if (!parsed.has_value() || parsed->kind != "fee-distribution") continue;
+        ++distribution_count;
+        last_distribution_integer = parsed->integer;
+        last_distribution_epoch = parsed->epoch;
+        last_distribution_prime = parsed->prime;
+        last_distribution_micro_units = parsed->amount;
+        std::ostringstream event;
+        event << "FEE_DISTRIBUTION_EVENT integer=" << parsed->integer
+              << " epoch=" << parsed->epoch
+              << " prime=" << parsed->prime
+              << " micro_units=" << parsed->amount
+              << " recipients=" << parsed->recipients;
+        events.push_back(event.str());
+    }
+
+    const auto status = node.status();
+    const auto current_frontier = status.has_genesis ? status.frontier_integer : primechain::PrimeValue{0};
+    const auto anchor = last_distribution_integer == 0 ? primechain::PrimeValue{2} : last_distribution_integer;
+    const auto next_distribution_integer = anchor + interval_records;
+    const bool due = current_frontier >= next_distribution_integer;
+
+    const auto pool_address = node.validatorFeePoolAddress();
+    const auto holdings = node.holdingsForAddress(pool_address);
+    const auto eligible_recipients = node.feeDistributionRecipients();
+    std::uint64_t pool_total = 0;
+    for (const auto& holding : holdings) pool_total += holding.second;
+
+    std::cout << "FEE_DISTRIBUTION_STATUS " << workdir
+              << " interval_records=" << interval_records
+              << " current_frontier=" << current_frontier
+              << " last_distribution_integer=" << last_distribution_integer
+              << " next_distribution_integer=" << next_distribution_integer
+              << " due=" << (due ? 1 : 0)
+              << " current_epoch=" << node.validatorEpoch()
+              << " pool_address=" << pool_address
+              << " pool_holdings=" << holdings.size()
+              << " pool_total_micro_units=" << pool_total
+              << " distributions=" << distribution_count
+              << " eligible_recipients=" << eligible_recipients.size() << "\n";
+    if (last_distribution_integer != 0) {
+        std::cout << "LAST_FEE_DISTRIBUTION integer=" << last_distribution_integer
+                  << " epoch=" << last_distribution_epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units << "\n";
+    }
+    for (const auto& recipient : eligible_recipients) {
+        std::cout << "FEE_DISTRIBUTION_RECIPIENT address=" << recipient << "\n";
+    }
+    for (const auto& holding : holdings) {
+        std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    for (const auto& event : events) std::cout << event << "\n";
+    return 0;
+}
+
+// Fast validator-reward-distribution-status: same shape as
+// fee-distribution-status-fast, sourced from the reward-distribution
+// events and the persisted prime_record_count running total.
+int validatorRewardDistributionStatusWorkdirFast(int argc, char** argv) {
+    if (argc != 3 && argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const std::uint64_t interval_primes = argc == 4
+        ? static_cast<std::uint64_t>(std::stoull(argv[3]))
+        : 1000;
+    if (interval_primes == 0) {
+        std::cerr << "validator_reward_distribution_status_error: interval must be positive\n";
+        return 1;
+    }
+    const auto prime_record_count_opt = requireFreshParticipationIndex(workdir);
+    if (!prime_record_count_opt.has_value()) return 1;
+    const auto prime_record_count = *prime_record_count_opt;
+
+    std::string error;
+    primechain::node::SequentialNode node(chainPath(workdir));
+    if (!node.load(error)) {
+        std::cerr << "validator_reward_distribution_status_error: " << error << "\n";
+        return 1;
+    }
+
+    std::ifstream in(participationIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open participation index events file\n";
+        return 1;
+    }
+    std::uint64_t distribution_count = 0;
+    std::uint64_t last_distribution_prime_count = 0;
+    primechain::PrimeValue last_distribution_integer = 0;
+    std::uint64_t last_distribution_epoch = 0;
+    primechain::PrimeValue last_distribution_prime = 0;
+    std::uint64_t last_distribution_micro_units = 0;
+    std::vector<std::string> events;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseParticipationEventLine(line);
+        if (!parsed.has_value() || parsed->kind != "reward-distribution") continue;
+        ++distribution_count;
+        last_distribution_prime_count = parsed->prime_count;
+        last_distribution_integer = parsed->integer;
+        last_distribution_epoch = parsed->epoch;
+        last_distribution_prime = parsed->prime;
+        last_distribution_micro_units = parsed->amount;
+        std::ostringstream event;
+        event << "VALIDATOR_REWARD_DISTRIBUTION_EVENT integer=" << parsed->integer
+              << " prime_count=" << parsed->prime_count
+              << " epoch=" << parsed->epoch
+              << " prime=" << parsed->prime
+              << " micro_units=" << parsed->amount
+              << " recipients=" << parsed->recipients;
+        events.push_back(event.str());
+    }
+
+    const auto next_distribution_prime_count = last_distribution_prime_count + interval_primes;
+    const bool due = prime_record_count >= next_distribution_prime_count;
+    const auto pool_address = node.validatorRewardPoolAddress();
+    const auto holdings = node.holdingsForAddress(pool_address);
+    const auto eligible_recipients = node.validatorRewardDistributionRecipients();
+    std::uint64_t pool_total = 0;
+    for (const auto& holding : holdings) pool_total += holding.second;
+
+    std::cout << "VALIDATOR_REWARD_DISTRIBUTION_STATUS " << workdir
+              << " interval_primes=" << interval_primes
+              << " current_prime_records=" << prime_record_count
+              << " last_distribution_prime_count=" << last_distribution_prime_count
+              << " next_distribution_prime_count=" << next_distribution_prime_count
+              << " due=" << (due ? 1 : 0)
+              << " current_epoch=" << node.validatorEpoch()
+              << " pool_address=" << pool_address
+              << " pool_holdings=" << holdings.size()
+              << " pool_total_micro_units=" << pool_total
+              << " distributions=" << distribution_count
+              << " eligible_recipients=" << eligible_recipients.size() << "\n";
+    if (last_distribution_integer != 0) {
+        std::cout << "LAST_VALIDATOR_REWARD_DISTRIBUTION integer=" << last_distribution_integer
+                  << " prime_count=" << last_distribution_prime_count
+                  << " epoch=" << last_distribution_epoch
+                  << " prime=" << last_distribution_prime
+                  << " micro_units=" << last_distribution_micro_units << "\n";
+    }
+    for (const auto& recipient : eligible_recipients) {
+        std::cout << "VALIDATOR_REWARD_DISTRIBUTION_RECIPIENT address=" << recipient << "\n";
+    }
+    for (const auto& holding : holdings) {
+        std::cout << "VALIDATOR_REWARD_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    for (const auto& event : events) std::cout << event << "\n";
+    return 0;
+}
+
+// Fast validator-reputation: entirely index-driven, no SequentialNode
+// replay at all -- MINING_HISTORY comes from the (already-existing)
+// reward index's "prime"/"composite-seen"/"composite" events for this
+// provider, VALIDATOR_PARTICIPATION/GOVERNANCE_PARTICIPATION from the
+// participation index's vote events. Requires both indexes fresh.
+int validatorReputationWorkdirFast(int argc, char** argv) {
+    if (argc != 4) return 1;
+    const std::string workdir = argv[2];
+    const primechain::Address address = argv[3];
+    if (!requireFreshRewardIndex(workdir).has_value()) return 1;
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    std::uint64_t prime_records = 0;
+    std::uint64_t composite_records = 0;
+    std::uint64_t discovery_micro_units = 0;
+    {
+        std::ifstream in(rewardIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open reward index events file\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseRewardIndexEventLine(line);
+            if (!parsed.has_value() || parsed->provider != address) continue;
+            if (parsed->kind == "prime") {
+                ++prime_records;
+                discovery_micro_units += parsed->amount;
+            } else if (parsed->kind == "composite-seen") {
+                ++composite_records;
+            } else if (parsed->kind == "composite") {
+                discovery_micro_units += parsed->amount;
+            }
+        }
+    }
+
+    std::uint64_t finalization_votes = 0;
+    std::uint64_t round_change_votes = 0;
+    std::uint64_t commit_phase_votes = 0;
+    std::uint64_t epoch_votes = 0;
+    {
+        std::ifstream in(participationIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open participation index events file\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseParticipationEventLine(line);
+            if (!parsed.has_value() || parsed->validator != address) continue;
+            if (parsed->kind == "vote-finalization") ++finalization_votes;
+            else if (parsed->kind == "vote-round-change") ++round_change_votes;
+            else if (parsed->kind == "vote-commit-phase") ++commit_phase_votes;
+            else if (parsed->kind == "vote-epoch") ++epoch_votes;
+        }
+    }
+
+    const auto work_score = primechain::protocol::validatorWorkScoreV0(
+        {prime_records, composite_records, discovery_micro_units});
+    const auto participation = finalization_votes + commit_phase_votes + round_change_votes;
+    std::cout << "VALIDATOR_REPUTATION " << address << "\n";
+    std::cout << "MINING_HISTORY prime_records=" << prime_records
+              << " composite_records=" << composite_records
+              << " work_score=" << work_score
+              << " discovery_micro_units=" << discovery_micro_units
+              << " fee_micro_units=0\n";
+    std::cout << "VALIDATOR_PARTICIPATION finalization_votes=" << finalization_votes
+              << " commit_phase_votes=" << commit_phase_votes
+              << " round_change_votes=" << round_change_votes
+              << " total_participation_events=" << participation << "\n";
+    std::cout << "GOVERNANCE_PARTICIPATION epoch_votes=" << epoch_votes
+              << " policy_votes=0\n";
+    std::cout << "TRANSFERABILITY mining_history=non_transferable reserve_required=not_implemented\n";
+    return 0;
+}
+
 // Fast rewards/reward-history: reads REWARD lines from the reward index
 // instead of decoding and signature-verifying every record. Output is
 // exactly the original rewardsWorkdir/rewardHistoryWorkdir format, just
@@ -4322,6 +5136,13 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-reward-pool <record-store> [epoch]\n"
               << "  " << argv0 << " validator-reward-distribution-status <record-store> [interval-primes]\n"
               << "  " << argv0 << " fee-distribution-status <record-store> [interval-records]\n"
+              << "  " << argv0 << " update-participation-index <workdir>\n"
+              << "  " << argv0 << " participation-index-status <workdir>\n"
+              << "  " << argv0 << " validator-endpoints-fast <workdir>\n"
+              << "  " << argv0 << " economic-policy-fast <workdir>\n"
+              << "  " << argv0 << " fee-distribution-status-fast <workdir> [interval-records]\n"
+              << "  " << argv0 << " validator-reward-distribution-status-fast <workdir> [interval-primes]\n"
+              << "  " << argv0 << " validator-reputation-fast <workdir> <address>\n"
               << "  " << argv0 << " update-indexes <workdir>\n"
               << "  " << argv0 << " index-status <workdir>\n"
               << "  " << argv0 << " update-address-index <workdir>\n"
@@ -4470,6 +5291,34 @@ int main(int argc, char** argv) {
     if (command == "fee-distribution-status") {
         if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
         return feeDistributionStatus(argc, argv);
+    }
+    if (command == "update-participation-index") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return updateParticipationIndex(argc, argv);
+    }
+    if (command == "participation-index-status") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return participationIndexStatus(argc, argv);
+    }
+    if (command == "validator-endpoints-fast") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return validatorEndpointsWorkdirFast(argc, argv);
+    }
+    if (command == "economic-policy-fast") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return economicPolicyWorkdirFast(argc, argv);
+    }
+    if (command == "fee-distribution-status-fast") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return feeDistributionStatusWorkdirFast(argc, argv);
+    }
+    if (command == "validator-reward-distribution-status-fast") {
+        if (argc != 3 && argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorRewardDistributionStatusWorkdirFast(argc, argv);
+    }
+    if (command == "validator-reputation-fast") {
+        if (argc != 4) { printUsage(argv[0]); return 1; }
+        return validatorReputationWorkdirFast(argc, argv);
     }
     if (command == "update-indexes") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
