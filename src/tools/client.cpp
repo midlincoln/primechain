@@ -387,6 +387,9 @@ std::string pendingCompositePath(const std::string& workdir) { return joinPath(j
 std::string compositeProofIndexPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "composite-proofs.idx"); }
 std::string addressIndexEventsPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "address-index.dat"); }
 std::string addressIndexMetaPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "address-index.meta"); }
+std::string rewardIndexEventsPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.dat"); }
+std::string rewardIndexMetaPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.meta"); }
+std::string rewardIndexPendingPath(const std::string& workdir) { return joinPath(indexesDir(workdir), "reward-index.pending"); }
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& path) {
     std::map<std::string, std::string> values;
@@ -848,6 +851,135 @@ void extractAddressIndexEvents(
             out.push_back(fee_event);
         }
     }
+}
+
+// Secondary, derived reward index: mirrors the exact reward-attribution
+// logic rewards/reward-history already compute (record fees; the
+// prime-miner reward, split with any pending composite providers once one
+// exists), but emits one REWARD line per provider actually paid instead of
+// filtering to a single wallet's two addresses. A single incremental pass
+// then serves any wallet's rewards/reward-history.
+//
+// Unlike the address index, this needs state carried *across* the
+// incremental checkpoint boundary: a composite record's reward isn't
+// resolved by that record alone -- it's paid out only when the next prime
+// record lands, split across every composite record since the last one.
+// reward-index.pending persists that in-flight provider list so an
+// incremental update resumes the split correctly instead of losing track
+// of composites indexed in a previous run.
+struct PendingRewardProvider {
+    primechain::Address provider;
+    primechain::PrimeValue source_integer{0};
+};
+
+struct RewardIndexEvent {
+    primechain::PrimeValue integer{0};
+    std::uint64_t height{0};
+    std::string kind;   // fee | prime | composite
+    std::uint64_t amount{0};
+    std::string role;   // record-provider | prime-miner | composite-provider
+    primechain::Address provider;
+    primechain::PrimeValue source_integer{0};   // composite only
+};
+
+std::string formatRewardIndexEventLine(const RewardIndexEvent& event) {
+    std::ostringstream out;
+    out << "REWARD kind=" << event.kind
+        << " integer=" << event.integer
+        << " height=" << event.height
+        << " amount=" << event.amount
+        << " role=" << event.role
+        << " provider=" << event.provider
+        << " source=" << event.source_integer;
+    return out.str();
+}
+
+std::optional<RewardIndexEvent> parseRewardIndexEventLine(const std::string& line) {
+    if (line.rfind("REWARD ", 0) != 0) return std::nullopt;
+    std::istringstream in(line);
+    std::string tag;
+    in >> tag;
+    RewardIndexEvent event;
+    std::string token;
+    while (in >> token) {
+        const auto eq = token.find('=');
+        if (eq == std::string::npos) continue;
+        const auto key = token.substr(0, eq);
+        const auto value = token.substr(eq + 1);
+        if (key == "kind") event.kind = value;
+        else if (key == "integer") event.integer = std::stoull(value);
+        else if (key == "height") event.height = std::stoull(value);
+        else if (key == "amount") event.amount = std::stoull(value);
+        else if (key == "role") event.role = value;
+        else if (key == "provider") event.provider = value;
+        else if (key == "source") event.source_integer = std::stoull(value);
+    }
+    return event;
+}
+
+// Processes exactly one record, threading `pending` through in chain
+// order -- identical to the loop body in rewardsWorkdir/
+// rewardHistoryWorkdir, just emitting an event per provider actually paid
+// instead of only when that provider matches one filtered-for wallet.
+bool extractRewardIndexEvents(
+    const primechain::storage::StoredRecord& stored,
+    std::vector<PendingRewardProvider>& pending,
+    std::vector<RewardIndexEvent>& out,
+    std::string& error) {
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return false;
+        const auto fees = transactionFees(record->transactions);
+        if (fees != 0) {
+            out.push_back(RewardIndexEvent{
+                record->integer, record->height, "fee", fees,
+                "record-provider", record->proof.provider_address, 0});
+        }
+        // rewardsWorkdir counts a composite record against its provider's
+        // composite_records total as soon as it's mined, independent of
+        // whether the reward it's owed has been resolved yet (that only
+        // happens once the next prime record lands and splits the pool --
+        // see the "composite" event below). Emit that eager, unresolved
+        // marker here so rewards-fast can reproduce the same count; it
+        // carries no amount, only the resolved "composite" event does.
+        out.push_back(RewardIndexEvent{
+            record->integer, record->height, "composite-seen", 0,
+            "composite-provider", record->proof.provider_address, 0});
+        pending.push_back({record->proof.provider_address, record->integer});
+        return true;
+    }
+
+    const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+    if (!record.has_value()) return false;
+    const auto fees = transactionFees(record->transactions);
+    if (fees != 0) {
+        out.push_back(RewardIndexEvent{
+            record->integer, record->height, "fee", fees,
+            "record-provider", record->proof.provider_address, 0});
+    }
+
+    const bool validator_rewards_active = record->version != 0 && record->height != 0;
+    if (pending.empty()) {
+        out.push_back(RewardIndexEvent{
+            record->integer, record->height, "prime",
+            primeMinerRewardMicroUnits(validator_rewards_active, false, 0),
+            "prime-miner", record->proof.provider_address, 0});
+    } else {
+        const std::uint64_t composite_pool = compositeRewardPoolMicroUnits(validator_rewards_active);
+        const std::uint64_t per_composite = composite_pool / pending.size();
+        const std::uint64_t remainder = composite_pool % pending.size();
+        out.push_back(RewardIndexEvent{
+            record->integer, record->height, "prime",
+            primeMinerRewardMicroUnits(validator_rewards_active, true, remainder),
+            "prime-miner", record->proof.provider_address, 0});
+        for (const auto& provider : pending) {
+            out.push_back(RewardIndexEvent{
+                record->integer, record->height, "composite", per_composite,
+                "composite-provider", provider.provider, provider.source_integer});
+        }
+    }
+    pending.clear();
+    return true;
 }
 
 std::vector<primechain::protocol::TransactionV0> parseMempoolTransactions(
@@ -3132,6 +3264,354 @@ int addressIndexStatus(int argc, char** argv) {
     return 0;
 }
 
+bool readRewardIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue& checkpoint_integer,
+    std::string& checkpoint_hash_hex,
+    std::uint64_t& event_count,
+    bool& present) {
+    const auto path = rewardIndexMetaPath(workdir);
+    checkpoint_integer = 0;
+    checkpoint_hash_hex.clear();
+    event_count = 0;
+    present = false;
+    if (!pathExists(path)) return true;
+    const auto values = readKeyValueFile(path);
+    const auto version = values.find("version");
+    if (version == values.end() || version->second != "primechain-reward-index-v2") {
+        return false;
+    }
+    if (values.count("checkpoint_integer")) checkpoint_integer = std::stoull(values.at("checkpoint_integer"));
+    if (values.count("checkpoint_hash")) checkpoint_hash_hex = values.at("checkpoint_hash");
+    if (values.count("event_count")) event_count = std::stoull(values.at("event_count"));
+    present = true;
+    return true;
+}
+
+bool writeRewardIndexMeta(
+    const std::string& workdir,
+    primechain::PrimeValue checkpoint_integer,
+    const std::string& checkpoint_hash_hex,
+    std::uint64_t event_count) {
+    std::map<std::string, std::string> values;
+    values["version"] = "primechain-reward-index-v2";
+    values["checkpoint_integer"] = std::to_string(checkpoint_integer);
+    values["checkpoint_hash"] = checkpoint_hash_hex;
+    values["event_count"] = std::to_string(event_count);
+    return writeKeyValueFile(rewardIndexMetaPath(workdir), values);
+}
+
+// The pending-composite-providers list is small (bounded by how many
+// composite records can land between two prime records) and always
+// rewritten in full -- unlike the append-only event log, there is no
+// "only the new part" to append, so a plain truncate+rewrite (same
+// atomic-rename pattern as writeProofIndexFile) is the right tool here.
+std::vector<PendingRewardProvider> readRewardIndexPending(const std::string& workdir) {
+    std::vector<PendingRewardProvider> pending;
+    std::ifstream in(rewardIndexPendingPath(workdir));
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("PENDING ", 0) != 0) continue;
+        std::istringstream parts(line);
+        std::string tag;
+        parts >> tag;
+        PendingRewardProvider entry;
+        std::string token;
+        while (parts >> token) {
+            const auto eq = token.find('=');
+            if (eq == std::string::npos) continue;
+            const auto key = token.substr(0, eq);
+            const auto value = token.substr(eq + 1);
+            if (key == "provider") entry.provider = value;
+            else if (key == "source_integer") entry.source_integer = std::stoull(value);
+        }
+        pending.push_back(entry);
+    }
+    return pending;
+}
+
+bool writeRewardIndexPending(const std::string& workdir, const std::vector<PendingRewardProvider>& pending) {
+    const auto path = rewardIndexPendingPath(workdir);
+    if (!ensureDirectory(directoryName(path))) return false;
+    const std::string tmp_path = path + ".tmp";
+    {
+        std::ofstream out(tmp_path, std::ios::trunc);
+        if (!out) return false;
+        for (const auto& entry : pending) {
+            out << "PENDING provider=" << entry.provider
+                << " source_integer=" << entry.source_integer << "\n";
+        }
+        if (!out) return false;
+    }
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+        unlink(tmp_path.c_str());
+        return false;
+    }
+    return true;
+}
+
+// Incrementally extends the reward index up to the workdir's current
+// frontier. Same (integer, record_hash) anchoring and full-rebuild-on-
+// divergence behavior as updateAddressIndex; additionally carries the
+// pending-composite-providers list across the checkpoint boundary (see
+// PendingRewardProvider) so an incremental run picks up mid-split
+// correctly instead of losing track of composites indexed previously.
+int updateRewardIndex(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!ensureWorkdirLayout(workdir)) return 1;
+
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return 1;
+    }
+    if (!latest.has_value()) {
+        std::cout << "REWARD_INDEX_UPDATED " << workdir << " from=0 to=0 new_events=0 rebuilt=0\n";
+        return 0;
+    }
+    const auto frontier = latest->integer;
+
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool meta_present = false;
+    bool diverged = !readRewardIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, meta_present);
+    if (meta_present && !diverged && checkpoint_integer > 0) {
+        const auto checkpoint_record = store.findByInteger(checkpoint_integer, error);
+        if (!error.empty()) {
+            std::cerr << "could not verify reward index checkpoint: " << error << "\n";
+            return 1;
+        }
+        if (!checkpoint_record.has_value() ||
+            primechain::crypto::toHex(checkpoint_record->record_hash) != checkpoint_hash_hex) {
+            diverged = true;
+        }
+    }
+
+    primechain::PrimeValue start = checkpoint_integer + 1;
+    const auto reported_from = checkpoint_integer;
+    std::vector<PendingRewardProvider> pending;
+    if (!meta_present || diverged) {
+        unlink(rewardIndexEventsPath(workdir).c_str());
+        unlink(rewardIndexMetaPath(workdir).c_str());
+        unlink(rewardIndexPendingPath(workdir).c_str());
+        event_count = 0;
+        start = 0;
+    } else {
+        pending = readRewardIndexPending(workdir);
+    }
+
+    if (meta_present && !diverged && start > frontier) {
+        std::cout << "REWARD_INDEX_UPDATED " << workdir
+                  << " from=" << reported_from << " to=" << frontier
+                  << " new_events=0 rebuilt=0\n";
+        return 0;
+    }
+
+    const auto new_records = start == 0 ? store.loadAll(error) : store.findRange(start, frontier, error);
+    if (!error.empty()) {
+        std::cerr << "could not load new records: " << error << "\n";
+        return 1;
+    }
+
+    std::vector<RewardIndexEvent> new_events;
+    for (const auto& stored : new_records) {
+        if (!extractRewardIndexEvents(stored, pending, new_events, error)) {
+            std::cerr << "could not decode record " << stored.integer << ": " << error << "\n";
+            return 1;
+        }
+    }
+
+    if (!ensureDirectory(indexesDir(workdir))) return 1;
+    {
+        std::ofstream out(rewardIndexEventsPath(workdir), std::ios::app);
+        if (!out) {
+            std::cerr << "could not open reward index for append\n";
+            return 1;
+        }
+        for (const auto& event : new_events) {
+            out << formatRewardIndexEventLine(event) << "\n";
+        }
+        if (!out) {
+            std::cerr << "could not write reward index events\n";
+            return 1;
+        }
+    }
+    if (!writeRewardIndexPending(workdir, pending)) {
+        std::cerr << "could not write reward index pending state\n";
+        return 1;
+    }
+
+    event_count += new_events.size();
+    if (!writeRewardIndexMeta(workdir, frontier, primechain::crypto::toHex(latest->record_hash), event_count)) {
+        std::cerr << "could not write reward index checkpoint\n";
+        return 1;
+    }
+
+    std::cout << "REWARD_INDEX_UPDATED " << workdir
+              << " from=" << (start == 0 ? primechain::PrimeValue{0} : reported_from) << " to=" << frontier
+              << " new_events=" << new_events.size()
+              << " rebuilt=" << (diverged ? 1 : 0) << "\n";
+    return 0;
+}
+
+int rewardIndexStatus(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto events_path = rewardIndexEventsPath(workdir);
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool present = false;
+    if (!readRewardIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present)) {
+        std::cout << "REWARD_INDEX_INVALID " << workdir << "\n";
+        return 1;
+    }
+    if (!present) {
+        std::cout << "REWARD_INDEX_MISSING " << workdir << " path=" << events_path << "\n";
+        return 0;
+    }
+    const auto pending = readRewardIndexPending(workdir);
+    std::cout << "REWARD_INDEX_STATUS " << workdir
+              << " checkpoint_integer=" << checkpoint_integer
+              << " checkpoint_hash=" << checkpoint_hash_hex
+              << " events=" << event_count
+              << " pending=" << pending.size()
+              << " path=" << events_path << "\n";
+    return 0;
+}
+
+std::optional<primechain::PrimeValue> requireFreshRewardIndex(const std::string& workdir) {
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t event_count = 0;
+    bool present = false;
+    if (!readRewardIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, event_count, present) || !present) {
+        std::cerr << "reward index is missing; run update-reward-index\n";
+        return std::nullopt;
+    }
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto latest = store.latest(error);
+    if (!error.empty()) {
+        std::cerr << "could not read workdir chain: " << error << "\n";
+        return std::nullopt;
+    }
+    const auto frontier = latest.has_value() ? latest->integer : primechain::PrimeValue{0};
+    if (!latest.has_value() || checkpoint_integer != frontier ||
+        primechain::crypto::toHex(latest->record_hash) != checkpoint_hash_hex) {
+        std::cerr << "reward index is stale; run update-reward-index\n";
+        return std::nullopt;
+    }
+    return frontier;
+}
+
+// Fast rewards/reward-history: reads REWARD lines from the reward index
+// instead of decoding and signature-verifying every record. Output is
+// exactly the original rewardsWorkdir/rewardHistoryWorkdir format, just
+// sourced from the index; matches its FEE_REWARDS quirk too (rewards'
+// fee total is never actually accumulated in the original -- it's always
+// printed as 0 -- and this preserves that rather than "fixing" it, since
+// changing behavior is out of scope for a caching layer).
+int rewardsWorkdirFast(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    const auto prime_address = loadMinerAddress(primeWalletPath(workdir));
+    const auto composite_address = loadMinerAddress(compositeWalletPath(workdir));
+    if (!prime_address.has_value() || !composite_address.has_value()) return 1;
+
+    if (!requireFreshRewardIndex(workdir).has_value()) return 1;
+
+    std::ifstream in(rewardIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open reward index events file\n";
+        return 1;
+    }
+    RewardSummary summary;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseRewardIndexEventLine(line);
+        if (!parsed.has_value()) continue;
+        if (parsed->kind == "composite-seen" && parsed->provider == *composite_address) {
+            ++summary.composite_records;
+        } else if (parsed->kind == "composite" && parsed->provider == *composite_address) {
+            summary.composite_micro_units += parsed->amount;
+        } else if (parsed->kind == "prime" && parsed->provider == *prime_address) {
+            ++summary.prime_records;
+            summary.prime_micro_units += parsed->amount;
+        }
+    }
+
+    const auto pending = readRewardIndexPending(workdir);
+    std::cout << "REWARDS " << workdir << "\n";
+    std::cout << "PRIME_WALLET " << *prime_address << " records=" << summary.prime_records
+              << " reward_micro_units=" << summary.prime_micro_units << "\n";
+    std::cout << "COMPOSITE_WALLET " << *composite_address << " records=" << summary.composite_records
+              << " reward_micro_units=" << summary.composite_micro_units << "\n";
+    std::cout << "FEE_REWARDS micro_units=" << summary.fee_micro_units << "\n";
+    std::cout << "PENDING_COMPOSITE_RECORDS " << pending.size() << "\n";
+    return 0;
+}
+
+int rewardHistoryWorkdirFast(int argc, char** argv) {
+    if (argc != 3 && argc != 5) return 1;
+    const std::string workdir = argv[2];
+    std::optional<std::size_t> last;
+    if (argc == 5) {
+        if (std::string(argv[3]) != "--last") return 1;
+        last = static_cast<std::size_t>(std::stoull(argv[4]));
+    }
+    const auto prime_address = loadMinerAddress(primeWalletPath(workdir));
+    const auto composite_address = loadMinerAddress(compositeWalletPath(workdir));
+    if (!prime_address.has_value() || !composite_address.has_value()) return 1;
+
+    if (!requireFreshRewardIndex(workdir).has_value()) return 1;
+
+    std::ifstream in(rewardIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open reward index events file\n";
+        return 1;
+    }
+    std::vector<std::string> events;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseRewardIndexEventLine(line);
+        if (!parsed.has_value()) continue;
+        const bool matches =
+            (parsed->kind == "fee" && parsed->provider == *prime_address) ||
+            (parsed->kind == "prime" && parsed->provider == *prime_address) ||
+            (parsed->kind == "composite" && parsed->provider == *composite_address);
+        if (!matches) continue;
+
+        std::ostringstream event;
+        if (parsed->kind == "fee") {
+            event << "REWARD fee integer=" << parsed->integer << " amount=" << parsed->amount
+                  << " role=record-provider record_height=" << parsed->height;
+        } else if (parsed->kind == "prime") {
+            event << "REWARD prime integer=" << parsed->integer << " amount=" << parsed->amount
+                  << " role=prime-miner record_height=" << parsed->height;
+        } else {
+            event << "REWARD composite integer=" << parsed->integer << " amount=" << parsed->amount
+                  << " role=composite-provider source=" << parsed->source_integer
+                  << " record_height=" << parsed->height;
+        }
+        events.push_back(event.str());
+    }
+
+    std::size_t start = 0;
+    if (last.has_value() && *last < events.size()) start = events.size() - *last;
+    std::cout << "REWARD_HISTORY " << workdir << " events=" << (events.size() - start) << "\n";
+    for (std::size_t i = start; i < events.size(); ++i) {
+        std::cout << events[i] << "\n";
+    }
+    const auto pending = readRewardIndexPending(workdir);
+    std::cout << "PENDING_COMPOSITE_RECORDS " << pending.size() << "\n";
+    return 0;
+}
+
 // Fast wallet-history: reads events from the address index instead of
 // decoding and signature-verifying every record in the chain. Requires the
 // index to be present and caught up to the workdir's current frontier
@@ -3808,6 +4288,10 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " balances <workdir>\n"
               << "  " << argv0 << " rewards <workdir>\n"
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
+              << "  " << argv0 << " update-reward-index <workdir>\n"
+              << "  " << argv0 << " reward-index-status <workdir>\n"
+              << "  " << argv0 << " rewards-fast <workdir>\n"
+              << "  " << argv0 << " reward-history-fast <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " launch-report <record-store>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
@@ -3904,6 +4388,22 @@ int main(int argc, char** argv) {
     if (command == "reward-history") {
         if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
         return rewardHistoryWorkdir(argc, argv);
+    }
+    if (command == "update-reward-index") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return updateRewardIndex(argc, argv);
+    }
+    if (command == "reward-index-status") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return rewardIndexStatus(argc, argv);
+    }
+    if (command == "rewards-fast") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return rewardsWorkdirFast(argc, argv);
+    }
+    if (command == "reward-history-fast") {
+        if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
+        return rewardHistoryWorkdirFast(argc, argv);
     }
     if (command == "board-report") {
         if (argc != 7) { printUsage(argv[0]); return 1; }

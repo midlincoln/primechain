@@ -588,6 +588,17 @@ add_test(
 )
 
 add_test(
+    NAME reward_index_workdir_smoke
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/reward_index_smoke.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-wallet>
+        $<TARGET_FILE:primechain-sequential>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/reward-index-smoke
+)
+
+add_test(
     NAME composite_lottery_allows_winning_composites
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_smoke.sh
