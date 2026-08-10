@@ -6,6 +6,7 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -35,6 +36,15 @@ constexpr const char* kDefaultHost = "127.0.0.1";
 constexpr int kDefaultPort = 18889;
 constexpr primechain::PrimeValue kDefaultLimit = 20;
 constexpr std::size_t kMaxStatusProbeValidators = 5;
+// The sync server caps concurrent connections per remote IP
+// (kMaxActiveRemoteConnectionsPerIp = 8 in sync_server.cpp). Firing every
+// sampled probe at once is fine for a single miner process, but multiple
+// workdirs mining concurrently from the same machine share one IP and can
+// blow past that cap together, turning into "connection limit exceeded"
+// churn. Cap how many connections any one parallel-probes batch opens at
+// once so a handful of concurrent local workdirs stays comfortably under
+// the server-side limit.
+constexpr std::size_t kMaxConcurrentProbeConnections = 2;
 constexpr const char* kDefaultPrimeMiner = "pcdev1_prime_miner";
 constexpr const char* kDefaultCompositeMiner = "pcdev1_composite_miner";
 
@@ -546,7 +556,7 @@ std::size_t remoteValidatorCount(const std::string& host, int port) {
     return count;
 }
 
-std::vector<PeerEndpoint> quorumEndpoints(
+std::vector<PeerEndpoint> quorumEndpointsUncached(
     const std::string& host,
     int port,
     const std::vector<PeerEndpoint>& configured_validator_endpoints,
@@ -576,6 +586,30 @@ std::vector<PeerEndpoint> quorumEndpoints(
         }
     }
     return peers;
+}
+
+// PERF: the frontier miner's main loop calls this once per integer it tries
+// to mine. The validator/peer set changes rarely (only on epoch rotation),
+// so re-running two network round trips on every single attempt is wasted
+// latency. Cache the result for a short window and reuse it across
+// consecutive attempts within the same process.
+std::vector<PeerEndpoint> quorumEndpoints(
+    const std::string& host,
+    int port,
+    const std::vector<PeerEndpoint>& configured_validator_endpoints,
+    bool parallel_probes) {
+    static std::vector<PeerEndpoint> cached_peers;
+    static std::chrono::steady_clock::time_point cached_at{};
+    static std::mutex cache_mutex;
+    constexpr auto kCacheTtl = std::chrono::seconds(10);
+
+    const std::lock_guard<std::mutex> lock(cache_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (cached_peers.empty() || now - cached_at > kCacheTtl) {
+        cached_peers = quorumEndpointsUncached(host, port, configured_validator_endpoints, parallel_probes);
+        cached_at = now;
+    }
+    return cached_peers;
 }
 
 CommitPhaseState parseCommitPhaseState(const std::string& state) {
@@ -778,16 +812,19 @@ std::optional<PeerStatus> freshestPeerStatus(
     const auto peers = sampledStatusProbePeers(host, port, configured_validator_endpoints, parallel_probes);
     std::optional<PeerStatus> best;
     if (parallel_probes) {
-        std::vector<std::future<std::optional<Status>>> futures;
-        futures.reserve(peers.size());
-        for (const auto& peer : peers) {
-            futures.push_back(std::async(std::launch::async, getStatus, peer.host, peer.port));
-        }
-        for (std::size_t i = 0; i < peers.size(); ++i) {
-            const auto status = futures[i].get();
-            if (!status.has_value()) continue;
-            if (!best.has_value() || status->frontier > best->status.frontier) {
-                best = PeerStatus{peers[i], *status};
+        for (std::size_t start = 0; start < peers.size(); start += kMaxConcurrentProbeConnections) {
+            const std::size_t end = std::min(start + kMaxConcurrentProbeConnections, peers.size());
+            std::vector<std::future<std::optional<Status>>> futures;
+            futures.reserve(end - start);
+            for (std::size_t i = start; i < end; ++i) {
+                futures.push_back(std::async(std::launch::async, getStatus, peers[i].host, peers[i].port));
+            }
+            for (std::size_t i = start; i < end; ++i) {
+                const auto status = futures[i - start].get();
+                if (!status.has_value()) continue;
+                if (!best.has_value() || status->frontier > best->status.frontier) {
+                    best = PeerStatus{peers[i], *status};
+                }
             }
         }
     } else {
@@ -1013,20 +1050,33 @@ bool commitAcceptedOrDuplicate(const std::string& response) {
            response.rfind("COMMIT_DUPLICATE ", 0) == 0;
 }
 
+// PERF: fan the commit out to every peer concurrently instead of one at a
+// time -- each requestLine() is a fresh TCP round trip, so a quorum of N
+// peers went from N sequential round trips to ~1.
 void warmQuorumCommitments(
     const std::vector<PeerEndpoint>& peers,
     const std::string& commit_request) {
-    for (const auto& peer : peers) {
-        const auto response = requestLine(peer.host, peer.port, commit_request);
-        if (!response.has_value()) {
-            std::cerr << "commit propagation warmup warning from " << peer.host << ":"
-                      << peer.port << ": no response\n";
-            continue;
+    for (std::size_t start = 0; start < peers.size(); start += kMaxConcurrentProbeConnections) {
+        const std::size_t end = std::min(start + kMaxConcurrentProbeConnections, peers.size());
+        std::vector<std::future<std::optional<std::string>>> futures;
+        futures.reserve(end - start);
+        for (std::size_t i = start; i < end; ++i) {
+            futures.push_back(std::async(
+                std::launch::async, requestLine, peers[i].host, peers[i].port, commit_request));
         }
-        if (!commitAcceptedOrDuplicate(*response) &&
-            response->find("commit phase is closing or closed") == std::string::npos) {
-            std::cerr << "commit propagation warmup warning from " << peer.host << ":"
-                      << peer.port << ": " << *response << "\n";
+        for (std::size_t i = start; i < end; ++i) {
+            const auto& peer = peers[i];
+            const auto response = futures[i - start].get();
+            if (!response.has_value()) {
+                std::cerr << "commit propagation warmup warning from " << peer.host << ":"
+                          << peer.port << ": no response\n";
+                continue;
+            }
+            if (!commitAcceptedOrDuplicate(*response) &&
+                response->find("commit phase is closing or closed") == std::string::npos) {
+                std::cerr << "commit propagation warmup warning from " << peer.host << ":"
+                          << peer.port << ": " << *response << "\n";
+            }
         }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -1113,6 +1163,17 @@ int main(int argc, char** argv) {
     }
     std::size_t submitted = 0;
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
+    // PERF: set whenever a submission for a given integer comes back
+    // "provider is in winner cooldown" -- that rejection is structural (see
+    // providerCooldownSatisfied() in sync_server.cpp: it fires whenever the
+    // current frontier record's winner has the same address as us), so it
+    // cannot resolve by us retrying the identical submission; it only
+    // resolves once a *different* provider wins that record. Constructing
+    // and submitting a doomed-to-fail proof again just burns a full status
+    // probe + submit round trip. Once we've seen this rejection for a given
+    // integer, skip straight to a cheap status-only re-check until the
+    // frontier actually moves.
+    std::optional<primechain::PrimeValue> known_cooldown_for;
 
     while (true) {
         const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints, parallel_probes);
@@ -1139,6 +1200,26 @@ int main(int argc, char** argv) {
         }
 
         const primechain::PrimeValue next = effective_frontier + 1;
+
+        if (known_cooldown_for.has_value() && *known_cooldown_for == next) {
+            // BUGFIX: this must share the same 5-attempt cap as
+            // retryCurrentInteger below, or a single miner with no
+            // competing provider (cooldown can only clear when a
+            // *different* address wins the record) spins here forever.
+            // Still the same integer we're locked out of; nothing to submit
+            // yet, so wait briefly and re-probe status only instead of
+            // re-submitting a doomed-to-fail proof.
+            auto& attempts = retry_counts[next];
+            if (attempts >= 5) {
+                std::cerr << "retry limit reached for " << next
+                          << ": provider is in winner cooldown for next record\n";
+                return 1;
+            }
+            ++attempts;
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            continue;
+        }
+        known_cooldown_for.reset();
         if (!configured_validator_endpoints.empty()) {
             const auto proposer = requestFinalizationProposer(active_peer, next);
             if (proposer.has_value()) {
@@ -1168,7 +1249,14 @@ int main(int argc, char** argv) {
             ++attempts;
             std::cerr << "frontier changed while mining " << next << "; retrying: "
                       << reason << "\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            // PERF: "must target next integer N" is the validator telling us
+            // exactly what happened (our probe was already stale by the
+            // time we submitted) -- there's nothing to wait out, so retry
+            // immediately instead of sleeping. Every other stale/transient
+            // reason still gets the backoff.
+            if (reason.find("must target next integer") == std::string::npos) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
             return true;
         };
         std::string request;
@@ -1329,6 +1417,9 @@ int main(int argc, char** argv) {
             }
             if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {
                 clearPendingComposite(pending_composite_path);
+            }
+            if (last_rejection.find("provider is in winner cooldown") != std::string::npos) {
+                known_cooldown_for = next;
             }
             if (staleOrTransient(last_rejection) && retryCurrentInteger(last_rejection)) continue;
             return 1;
