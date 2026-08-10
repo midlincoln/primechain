@@ -1130,7 +1130,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        if (proof_store_frontier.has_value() && effective_frontier > *proof_store_frontier) {
+        if (status.has_genesis && proof_store_frontier.has_value() && effective_frontier > *proof_store_frontier) {
             std::cerr << "local proof store behind validator frontier; sync required"
                       << " local_frontier=" << *proof_store_frontier
                       << " validator=" << active_peer.host << ":" << active_peer.port
