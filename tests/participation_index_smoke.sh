@@ -22,6 +22,19 @@ trap cleanup EXIT INT TERM
 
 export PRIMECHAIN_WALLET_PASSPHRASE="participation-index-smoke-test"
 
+# Real, signature-capable wallets for the populated-genesis fixture used
+# near the end of this script -- primechain-sequential's --validator-set
+# requires every address in it to pass isProtocolSignatureAddress(), so
+# placeholder strings like "pcdev1_validator_x" don't qualify here (unlike
+# the dev-bootstrap addresses that show up automatically as finalization
+# voters elsewhere in this fixture).
+"$wallet" new-miner "$base/reg-val-a.wallet" > /dev/null
+"$wallet" new-miner "$base/reg-val-b.wallet" > /dev/null
+"$wallet" new-miner "$base/reg-val-c.wallet" > /dev/null
+reg_val_a=$("$wallet" address "$base/reg-val-a.wallet")
+reg_val_b=$("$wallet" address "$base/reg-val-b.wallet")
+reg_val_c=$("$wallet" address "$base/reg-val-c.wallet")
+
 "$client" init-workdir "$base/work" 127.0.0.1 19346 > "$base/init.out"
 prime_addr=$("$wallet" address "$base/work/wallets/prime.wallet")
 
@@ -81,11 +94,24 @@ bootstrap_rep_fast=$("$client" validator-reputation-fast "$base/work" pcdev1_val
 [ "$bootstrap_rep_direct" = "$bootstrap_rep_fast" ]
 echo "$bootstrap_rep_fast" | grep -qE '^VALIDATOR_PARTICIPATION finalization_votes=[1-9][0-9]* '
 
+# validator-registry-fast: reconstructs the same genesis/epoch-transition
+# state loadValidatorRegistry() would, by replaying registry-genesis
+# events out of this index instead of calling that core-library function.
+# This fixture's genesis has no formal validator_set (only --prime-miner
+# was given to primechain-sequential), so this exercises the empty-
+# registry path; a real populated genesis is covered separately below.
+direct_registry=$("$client" validator-registry "$base/work/data/chain.dat")
+fast_registry=$("$client" validator-registry-fast "$base/work")
+direct_registry_body=$(echo "$direct_registry" | tail -n +2)
+fast_registry_body=$(echo "$fast_registry" | tail -n +2)
+[ "$direct_registry_body" = "$fast_registry_body" ]
+echo "$fast_registry" | grep -q '^VALIDATOR_REGISTRY .* has_genesis=0 current_epoch=0 active_validators=0 events=0$'
+
 # Staleness: advance the chain without updating the index, verify every
 # fast command refuses rather than serving outdated data.
 "$client" query 127.0.0.1 19346 ADVANCE_TO 9 "$prime_addr" pcdev1_participation_composite 4 > /dev/null
 "$client" sync-peer "$base/work" > /dev/null
-for cmd in validator-endpoints-fast economic-policy-fast fee-distribution-status-fast validator-reward-distribution-status-fast
+for cmd in validator-endpoints-fast economic-policy-fast fee-distribution-status-fast validator-reward-distribution-status-fast validator-registry-fast
 do
     if "$client" $cmd "$base/work" > "$base/stale-$cmd.out" 2>&1; then
         echo "expected $cmd to refuse a stale index" >&2
@@ -112,7 +138,8 @@ for pair in \
     "validator-endpoints:validator-endpoints-fast" \
     "economic-policy:economic-policy-fast" \
     "fee-distribution-status:fee-distribution-status-fast" \
-    "validator-reward-distribution-status:validator-reward-distribution-status-fast"
+    "validator-reward-distribution-status:validator-reward-distribution-status-fast" \
+    "validator-registry:validator-registry-fast"
 do
     orig=${pair%%:*}
     fast=${pair##*:}
@@ -132,3 +159,33 @@ echo "$rebuild_out" | grep -q '^PARTICIPATION_INDEX_UPDATED .* from=0 .* rebuilt
 
 rebuilt_bootstrap=$("$client" validator-reputation-fast "$base/work" pcdev1_validator_a)
 [ "$rebuilt_bootstrap" = "$("$client" validator-reputation "$base/work/data/chain.dat" pcdev1_validator_a)" ]
+
+rebuilt_registry=$("$client" validator-registry-fast "$base/work")
+[ "$rebuilt_registry" = "$("$client" validator-registry "$base/work/data/chain.dat" | sed "s#$base/work/data/chain.dat#$base/work#")" ]
+
+# validator-registry-fast with an actual populated genesis: the fixture
+# above never exercises the has_genesis=1 / active_validators>0 path,
+# since it only passed --prime-miner to primechain-sequential. Build a
+# second, separate chain with a real 3-validator genesis config to cover
+# appendRegistryGenesisEvent's non-trivial branch.
+"$sequential" 3 "$base/registry-seed.log" "$base/registry-seed.dat" \
+    --prime-miner pcdev1_prime_miner \
+    --validator-set "$reg_val_a" "$reg_val_b" "$reg_val_c" \
+    --validator-identities "$base/reg-val-a.wallet" "$base/reg-val-b.wallet" \
+    > /dev/null
+
+"$server" 19347 "$base/registry-seed.dat" --enable-advance > "$base/registry-server.log" 2>&1 &
+echo $! > "$base/registry-server.pid"
+sleep 0.3
+
+"$client" init-workdir "$base/registry-work" 127.0.0.1 19347 > "$base/registry-init.out"
+"$client" sync-peer "$base/registry-work" > "$base/registry-sync.out"
+"$client" update-participation-index "$base/registry-work" > /dev/null
+
+direct_genesis=$("$client" validator-registry "$base/registry-work/data/chain.dat")
+fast_genesis=$("$client" validator-registry-fast "$base/registry-work")
+direct_genesis_body=$(echo "$direct_genesis" | tail -n +2)
+fast_genesis_body=$(echo "$fast_genesis" | tail -n +2)
+[ "$direct_genesis_body" = "$fast_genesis_body" ]
+echo "$fast_genesis" | grep -q '^VALIDATOR_REGISTRY .* has_genesis=1 current_epoch=0 active_validators=3 events=1$'
+echo "$fast_genesis" | grep -q '^VALIDATOR_REGISTRY_EVENT GENESIS height=0 integer=2 epoch=0 activation_integer=2 validators=3 '

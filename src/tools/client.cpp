@@ -1016,7 +1016,28 @@ struct ParticipationEvent {
     std::uint64_t amount{0};
     std::uint64_t recipients{0};
     std::uint64_t prime_count{0};
+    std::vector<primechain::Address> validator_set;   // registry-genesis / registry-epoch-transition only
 };
+
+std::string joinAddresses(const std::vector<primechain::Address>& addresses) {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < addresses.size(); ++i) {
+        if (i != 0) out << ",";
+        out << addresses[i];
+    }
+    return out.str();
+}
+
+std::vector<primechain::Address> splitAddresses(const std::string& joined) {
+    std::vector<primechain::Address> out;
+    if (joined.empty() || joined == "-") return out;
+    std::istringstream in(joined);
+    std::string item;
+    while (std::getline(in, item, ',')) {
+        if (!item.empty()) out.push_back(item);
+    }
+    return out;
+}
 
 std::string formatParticipationEventLine(const ParticipationEvent& event) {
     std::ostringstream out;
@@ -1035,7 +1056,8 @@ std::string formatParticipationEventLine(const ParticipationEvent& event) {
         << " prime=" << event.prime
         << " amount=" << event.amount
         << " recipients=" << event.recipients
-        << " prime_count=" << event.prime_count;
+        << " prime_count=" << event.prime_count
+        << " validator_set=" << (event.validator_set.empty() ? std::string("-") : joinAddresses(event.validator_set));
     return out.str();
 }
 
@@ -1067,6 +1089,7 @@ std::optional<ParticipationEvent> parseParticipationEventLine(const std::string&
         else if (key == "amount") event.amount = std::stoull(value);
         else if (key == "recipients") event.recipients = std::stoull(value);
         else if (key == "prime_count") event.prime_count = std::stoull(value);
+        else if (key == "validator_set") event.validator_set = splitAddresses(value);
     }
     return event;
 }
@@ -1115,6 +1138,53 @@ void appendEpochVoteEvents(
         event.validator = vote.validator_address;
         out.push_back(event);
     }
+}
+
+// Mirrors applyGenesis()/applyTransition() in
+// src/node/validator_registry.cpp (loadValidatorRegistry's genesis and
+// epoch-transition detection) so validator-registry-fast can be served
+// from this index instead of that core-library call. This is the one
+// place in the whole index thread that duplicates core logic rather than
+// just caching client.cpp's own computation -- flagged here and in the
+// commit message rather than done quietly, since it carries a real
+// drift risk if the canonical version in validator_registry.cpp ever
+// changes and this copy doesn't get updated to match.
+bool hasEpochTransition(const primechain::protocol::ValidatorEpochTransitionV1& transition) {
+    return transition.epoch != 0 ||
+           transition.activation_integer != 0 ||
+           !transition.next_validator_set.empty() ||
+           !transition.votes.empty();
+}
+
+void appendRegistryGenesisEvent(
+    std::vector<ParticipationEvent>& out,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    const primechain::protocol::GenesisConfigV1& genesis_config) {
+    if (height != 0 || genesis_config.validator_set.empty()) return;
+    ParticipationEvent event;
+    event.integer = integer;
+    event.height = height;
+    event.kind = "registry-genesis";
+    event.effective_integer = integer;
+    event.validator_set = genesis_config.validator_set;
+    out.push_back(event);
+}
+
+void appendRegistryTransitionEvent(
+    std::vector<ParticipationEvent>& out,
+    primechain::PrimeValue integer,
+    std::uint64_t height,
+    const primechain::protocol::ValidatorEpochTransitionV1& transition) {
+    if (!hasEpochTransition(transition)) return;
+    ParticipationEvent event;
+    event.integer = integer;
+    event.height = height;
+    event.kind = "registry-epoch-transition";
+    event.epoch = transition.epoch;
+    event.effective_integer = transition.activation_integer;
+    event.validator_set = transition.next_validator_set;
+    out.push_back(event);
 }
 
 // A transaction with sender "pcpool_<label>_epoch_N..." and a leading
@@ -1207,6 +1277,7 @@ bool extractParticipationEvents(
             appendDistributionEvent(out, "reward-distribution", kRewardPrefix, 5,
                 record->integer, record->height, prime_record_count, tx);
         }
+        appendRegistryTransitionEvent(out, record->integer, record->height, record->validator_epoch);
         return true;
     }
 
@@ -1247,6 +1318,8 @@ bool extractParticipationEvents(
         appendDistributionEvent(out, "reward-distribution", kRewardPrefix, 5,
             record->integer, record->height, prime_record_count, tx);
     }
+    appendRegistryGenesisEvent(out, record->integer, record->height, record->genesis_config);
+    appendRegistryTransitionEvent(out, record->integer, record->height, record->validator_epoch);
     return true;
 }
 
@@ -3793,7 +3866,7 @@ bool readParticipationIndexMeta(
     if (!pathExists(path)) return true;
     const auto values = readKeyValueFile(path);
     const auto version = values.find("version");
-    if (version == values.end() || version->second != "primechain-participation-index-v1") {
+    if (version == values.end() || version->second != "primechain-participation-index-v2") {
         return false;
     }
     if (values.count("checkpoint_integer")) checkpoint_integer = std::stoull(values.at("checkpoint_integer"));
@@ -3811,7 +3884,7 @@ bool writeParticipationIndexMeta(
     std::uint64_t event_count,
     std::uint64_t prime_record_count) {
     std::map<std::string, std::string> values;
-    values["version"] = "primechain-participation-index-v1";
+    values["version"] = "primechain-participation-index-v2";
     values["checkpoint_integer"] = std::to_string(checkpoint_integer);
     values["checkpoint_hash"] = checkpoint_hash_hex;
     values["event_count"] = std::to_string(event_count);
@@ -3981,6 +4054,72 @@ std::optional<std::uint64_t> requireFreshParticipationIndex(const std::string& w
 
 // Fast validator-endpoints: dedupe latest-per-validator over PEVENT
 // kind=endpoint lines instead of decoding every record.
+// Fast validator-registry: reconstructs the same genesis + latest-epoch-
+// transition state as primechain::node::loadValidatorRegistry() by
+// replaying this index's registry-genesis/registry-epoch-transition
+// events (see appendRegistryGenesisEvent/appendRegistryTransitionEvent),
+// instead of calling that core-library function directly. This is the
+// one place in the whole thread that duplicates core logic rather than
+// caching client.cpp's own computation -- see the comment on those two
+// functions for the drift-risk tradeoff.
+int validatorRegistryWorkdirFast(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    std::ifstream in(participationIndexEventsPath(workdir));
+    if (!in) {
+        std::cerr << "could not open participation index events file\n";
+        return 1;
+    }
+    bool has_genesis = false;
+    std::uint64_t current_epoch = 0;
+    std::vector<primechain::Address> active_validators;
+    std::vector<std::string> event_lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto parsed = parseParticipationEventLine(line);
+        if (!parsed.has_value()) continue;
+        if (parsed->kind == "registry-genesis") {
+            has_genesis = true;
+            current_epoch = 0;
+            active_validators = parsed->validator_set;
+            std::ostringstream event;
+            event << "VALIDATOR_REGISTRY_EVENT GENESIS"
+                  << " height=" << parsed->height
+                  << " integer=" << parsed->integer
+                  << " epoch=0"
+                  << " activation_integer=" << parsed->effective_integer
+                  << " validators=" << parsed->validator_set.size();
+            for (const auto& validator : parsed->validator_set) event << " " << validator;
+            event_lines.push_back(event.str());
+        } else if (parsed->kind == "registry-epoch-transition") {
+            current_epoch = parsed->epoch;
+            active_validators = parsed->validator_set;
+            std::ostringstream event;
+            event << "VALIDATOR_REGISTRY_EVENT EPOCH_TRANSITION"
+                  << " height=" << parsed->height
+                  << " integer=" << parsed->integer
+                  << " epoch=" << parsed->epoch
+                  << " activation_integer=" << parsed->effective_integer
+                  << " validators=" << parsed->validator_set.size();
+            for (const auto& validator : parsed->validator_set) event << " " << validator;
+            event_lines.push_back(event.str());
+        }
+    }
+
+    std::cout << "VALIDATOR_REGISTRY " << workdir
+              << " has_genesis=" << (has_genesis ? 1 : 0)
+              << " current_epoch=" << current_epoch
+              << " active_validators=" << active_validators.size()
+              << " events=" << event_lines.size() << "\n";
+    std::cout << "ACTIVE_VALIDATORS";
+    for (const auto& validator : active_validators) std::cout << " " << validator;
+    std::cout << "\n";
+    for (const auto& event_line : event_lines) std::cout << event_line << "\n";
+    return 0;
+}
+
 int validatorEndpointsWorkdirFast(int argc, char** argv) {
     if (argc != 3) return 1;
     const std::string workdir = argv[2];
@@ -5297,6 +5436,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units|auto> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-reserve <record-store> <validator-address>\n"
               << "  " << argv0 << " validator-registry <record-store>\n"
+              << "  " << argv0 << " validator-registry-fast <workdir>\n"
               << "  " << argv0 << " validator-endpoints <record-store>\n"
               << "  " << argv0 << " economic-policy <record-store>\n"
               << "  " << argv0 << " fee-pool <record-store> [epoch]\n"
@@ -5438,6 +5578,10 @@ int main(int argc, char** argv) {
     if (command == "validator-registry") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return validatorRegistry(argc, argv);
+    }
+    if (command == "validator-registry-fast") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return validatorRegistryWorkdirFast(argc, argv);
     }
     if (command == "validator-endpoints") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
