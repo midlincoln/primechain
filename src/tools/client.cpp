@@ -4323,6 +4323,172 @@ int validatorReputationWorkdirFast(int argc, char** argv) {
     return 0;
 }
 
+// Fast board-report: the in-range record/transaction/fee/validator-evidence
+// counts only need records inside [from, to], so they come from a bounded
+// RecordStore::findRange(from, to) instead of a full chain replay -- the
+// window size the caller picks, not total chain length, drives the cost.
+//
+// discovery_micro_units per miner and pending_composites_after_range are
+// different: a composite record's reward resolves at the *next* prime
+// record, which can be arbitrarily far before `from`, so those genuinely
+// need history outside the window. The reward index already resolved that
+// correctly for the whole chain, so this reads it as a filtered scan
+// (cheap: text parsing, no decode/signature-verify) rather than
+// re-deriving pending-provider state by replaying from genesis.
+//
+// active_validators still goes through
+// primechain::node::loadValidatorRegistry() -- core library code, not a
+// client.cpp-local helper, so (as with board-report/launch-report/
+// validator-registry elsewhere in this thread) that one piece stays a
+// full replay rather than being folded into a client-side index.
+int boardReportWorkdirFast(int argc, char** argv) {
+    if (argc != 7 || std::string(argv[3]) != "--from" || std::string(argv[5]) != "--to") return 1;
+    const std::string workdir = argv[2];
+    const auto from = static_cast<primechain::PrimeValue>(std::stoull(argv[4]));
+    const auto to = static_cast<primechain::PrimeValue>(std::stoull(argv[6]));
+    if (from < 2 || to < from) {
+        std::cerr << "invalid report range\n";
+        return 1;
+    }
+
+    primechain::PrimeValue checkpoint_integer = 0;
+    std::string checkpoint_hash_hex;
+    std::uint64_t reward_event_count = 0;
+    bool reward_present = false;
+    if (!readRewardIndexMeta(workdir, checkpoint_integer, checkpoint_hash_hex, reward_event_count, reward_present) ||
+        !reward_present) {
+        std::cerr << "reward index is missing; run update-reward-index\n";
+        return 1;
+    }
+    if (checkpoint_integer < to) {
+        std::cerr << "reward index is behind the requested range; run update-reward-index\n";
+        return 1;
+    }
+    primechain::storage::RecordStore store(chainPath(workdir));
+    std::string error;
+    const auto checkpoint_record = store.findByInteger(checkpoint_integer, error);
+    if (!error.empty()) {
+        std::cerr << "could not verify reward index checkpoint: " << error << "\n";
+        return 1;
+    }
+    if (!checkpoint_record.has_value() ||
+        primechain::crypto::toHex(checkpoint_record->record_hash) != checkpoint_hash_hex) {
+        std::cerr << "reward index is stale; run update-reward-index\n";
+        return 1;
+    }
+
+    BoardReportStats stats;
+    stats.from = from;
+    stats.to = to;
+
+    const auto records = store.findRange(from, to, error);
+    if (!error.empty()) {
+        std::cerr << "could not load report range: " << error << "\n";
+        return 1;
+    }
+    for (const auto& stored : records) {
+        if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+            const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode composite record: " << error << "\n";
+                return 1;
+            }
+            ++stats.records;
+            ++stats.composite_records;
+            ++stats.miners[record->proof.provider_address].composite_records;
+            stats.transaction_count += record->transactions.size();
+            const auto fees = transactionFees(record->transactions);
+            if (fees != 0) addFeeReward(stats, record->proof.provider_address, fees);
+            addValidatorEvidence(stats, record->commit_phase, record->finalized_by);
+        } else {
+            const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+            if (!record.has_value()) {
+                std::cerr << "could not decode prime record: " << error << "\n";
+                return 1;
+            }
+            ++stats.records;
+            ++stats.prime_records;
+            ++stats.miners[record->proof.provider_address].prime_records;
+            stats.transaction_count += record->transactions.size();
+            const auto fees = transactionFees(record->transactions);
+            if (fees != 0) addFeeReward(stats, record->proof.provider_address, fees);
+            addValidatorEvidence(stats, primechain::protocol::CommitPhaseCertificateV1{}, record->finalized_by);
+        }
+    }
+
+    {
+        std::ifstream in(rewardIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open reward index events file\n";
+            return 1;
+        }
+        std::uint64_t running_pending = 0;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseRewardIndexEventLine(line);
+            if (!parsed.has_value()) continue;
+            if (parsed->integer > to) break;
+            if (parsed->integer >= from && (parsed->kind == "prime" || parsed->kind == "composite")) {
+                addDiscoveryReward(stats, parsed->provider, parsed->amount);
+            }
+            if (parsed->kind == "prime") {
+                running_pending = 0;
+            } else if (parsed->kind == "composite-seen") {
+                ++running_pending;
+            }
+        }
+        stats.pending_composites_after_range = running_pending;
+    }
+
+    std::uint64_t discovery_total = 0;
+    std::uint64_t unique_miners = 0;
+    for (const auto& entry : stats.miners) {
+        const auto record_count = entry.second.prime_records + entry.second.composite_records;
+        const auto reward_total = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (record_count != 0 || reward_total != 0) ++unique_miners;
+        discovery_total += entry.second.discovery_micro_units;
+    }
+
+    std::cout << "BOARD_REPORT " << workdir << " from=" << stats.from << " to=" << stats.to << "\n";
+    std::cout << "RECORDS total=" << stats.records
+              << " prime=" << stats.prime_records
+              << " composite=" << stats.composite_records
+              << " transactions=" << stats.transaction_count << "\n";
+    std::cout << "REWARDS discovery_micro_units=" << discovery_total
+              << " fee_micro_units=" << stats.fee_micro_units
+              << " unique_miners=" << unique_miners << "\n";
+    std::cout << "PENDING_COMPOSITES_AFTER_RANGE " << stats.pending_composites_after_range << "\n";
+
+    for (const auto& entry : sortedMinerStats(stats.miners)) {
+        const auto records_total = entry.second.prime_records + entry.second.composite_records;
+        const auto rewards_total = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (records_total == 0 && rewards_total == 0) continue;
+        std::cout << "MINER " << entry.first
+                  << " prime_records=" << entry.second.prime_records
+                  << " composite_records=" << entry.second.composite_records
+                  << " discovery_micro_units=" << entry.second.discovery_micro_units
+                  << " fee_micro_units=" << entry.second.fee_micro_units << "\n";
+    }
+
+    primechain::node::ValidatorRegistryState registry;
+    const std::vector<primechain::Address> active_validators =
+        primechain::node::loadValidatorRegistry(chainPath(workdir), registry, error)
+            ? registry.active_validators
+            : std::vector<primechain::Address>{};
+    const auto validator_summary = summarizeValidatorEvidence(stats.validators, active_validators);
+    std::cout << "VALIDATOR_EVIDENCE_SUMMARY active=" << validator_summary.active
+              << " historical=" << validator_summary.historical
+              << " bootstrap_dev=" << validator_summary.bootstrap_dev << "\n";
+    for (const auto& entry : sortedValidatorStats(stats.validators)) {
+        std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " class=" << validatorEvidenceClass(entry.first, active_validators)
+                  << " finalization_votes=" << entry.second.finalization_votes
+                  << " commit_phase_votes=" << entry.second.commit_phase_votes
+                  << " round_change_votes=" << entry.second.round_change_votes << "\n";
+    }
+    return 0;
+}
+
 // Fast rewards/reward-history: reads REWARD lines from the reward index
 // instead of decoding and signature-verifying every record. Output is
 // exactly the original rewardsWorkdir/rewardHistoryWorkdir format, just
@@ -5125,6 +5291,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " rewards-fast <workdir>\n"
               << "  " << argv0 << " reward-history-fast <workdir> [--last count]\n"
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
+              << "  " << argv0 << " board-report-workdir <workdir> --from <integer> --to <integer>\n"
               << "  " << argv0 << " launch-report <record-store>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units|auto> --observed <ok> --total <count>\n"
@@ -5247,6 +5414,10 @@ int main(int argc, char** argv) {
     if (command == "board-report") {
         if (argc != 7) { printUsage(argv[0]); return 1; }
         return boardReport(argc, argv);
+    }
+    if (command == "board-report-workdir") {
+        if (argc != 7) { printUsage(argv[0]); return 1; }
+        return boardReportWorkdirFast(argc, argv);
     }
     if (command == "launch-report") {
         if (argc != 3) { printUsage(argv[0]); return 1; }

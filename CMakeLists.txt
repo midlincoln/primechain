@@ -610,6 +610,17 @@ add_test(
 )
 
 add_test(
+    NAME board_report_index_smoke
+    COMMAND
+        /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/board_report_index_smoke.sh
+        $<TARGET_FILE:primechain-client>
+        $<TARGET_FILE:primechain-wallet>
+        $<TARGET_FILE:primechain-sequential>
+        $<TARGET_FILE:primechain-sync-server>
+        ${CMAKE_CURRENT_BINARY_DIR}/board-report-index-smoke
+)
+
+add_test(
     NAME composite_lottery_allows_winning_composites
     COMMAND
         /bin/sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/composite_lottery_smoke.sh
