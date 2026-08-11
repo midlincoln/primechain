@@ -1065,6 +1065,14 @@ int main(int argc, char** argv) {
     }
     std::size_t submitted = 0;
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
+    // PERF (twin-prime lookahead): primes carry no lottery/cooldown --
+    // whoever submits first wins -- so when we're about to submit a prime
+    // p and p+2 is also prime, we precompute p+2's Pratt proof right away
+    // instead of waiting to build it reactively once the frontier reaches
+    // p+1. See the isPrime(next) branch below for how these get filled
+    // and consumed.
+    std::optional<primechain::PrimeValue> precomputed_prime_target;
+    std::optional<primechain::math::PrattProof> precomputed_prime_proof;
 
     while (true) {
         const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints, parallel_probes);
@@ -1110,7 +1118,20 @@ int main(int argc, char** argv) {
         bool skip_commit_request = false;
         bool mining_composite = false;
         if (primechain::math::isPrime(next)) {
-            const auto proof = primechain::math::makePrattProof(next, proofs);
+            std::optional<primechain::math::PrattProof> proof;
+            if (precomputed_prime_target.has_value() && *precomputed_prime_target == next) {
+                // Already built (and verified) this one ahead of time when
+                // we submitted next-2 below -- reuse it instead of paying
+                // for the witness search again. This is exactly the
+                // latency this lookahead exists to shave off, since prime
+                // submission is a pure race with no fairness cooldown to
+                // fall back on.
+                proof = precomputed_prime_proof;
+            } else {
+                proof = primechain::math::makePrattProof(next, proofs);
+            }
+            precomputed_prime_target.reset();
+            precomputed_prime_proof.reset();
             if (!proof.has_value() || !primechain::math::verifyPrattProof(*proof)) {
                 std::cerr << "could not construct Pratt proof for " << next
                           << "; start from a fresh node or add proof-index bootstrap\n";
@@ -1138,6 +1159,32 @@ int main(int argc, char** argv) {
                 request = primeSubmission(*proof, prime_miner);
             }
             proof_summary = prattProofSummary(*proof);
+
+            // Twin-prime lookahead: next+1 is always even here (next is an
+            // odd prime, or next == 2 in which case next+2 == 4 is never
+            // prime and isPrime() below short-circuits this whole block),
+            // so it's a trivially factorable composite (divisor 2). If
+            // next+2 is also prime, build its Pratt proof now. The bridge
+            // composite's factorization doesn't need to be confirmed on
+            // chain first -- it's injected into a scratch copy of the
+            // proof index (never proofs itself, never proof_store) purely
+            // so factorizeFromProofIndex can see it, mirroring the
+            // existing pattern of adding our own composite proof to
+            // `proofs` immediately after construction, before submission
+            // or confirmation (see below in the composite branch).
+            const primechain::PrimeValue twin_candidate = next + 2;
+            if (primechain::math::isPrime(twin_candidate)) {
+                MapProofIndex lookahead_proofs = proofs;
+                const auto bridge = primechain::math::makeCompositeProof(next + 1, composite_miner);
+                if (bridge.has_value() && primechain::math::verifyCompositeProof(*bridge)) {
+                    lookahead_proofs.add(*bridge);
+                    auto twin_proof = primechain::math::makePrattProof(twin_candidate, lookahead_proofs);
+                    if (twin_proof.has_value() && primechain::math::verifyPrattProof(*twin_proof)) {
+                        precomputed_prime_target = twin_candidate;
+                        precomputed_prime_proof = std::move(twin_proof);
+                    }
+                }
+            }
         } else {
             mining_composite = true;
             auto proof = primechain::math::makeCompositeProof(next, composite_miner);
