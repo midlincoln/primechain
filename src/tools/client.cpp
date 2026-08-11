@@ -5549,6 +5549,22 @@ int runJobs(const char* argv0, int argc, char** argv) {
 
     int stagnant_attempts = 0;
     constexpr int kMaxStagnantAttempts = 30;
+    // Race-stall stagnation (sync succeeds, the frontier just hasn't
+    // moved yet -- normal on a validator quorum that's temporarily slow
+    // to finalize) is bounded by wall-clock time instead of attempt
+    // count, and given a lot more patience than the sync-failure cap
+    // above: run-jobs is meant to run unattended (typically launched with
+    // an effectively-unreachable target so it mines indefinitely), and a
+    // network that's merely slow -- even many minutes per record, as
+    // observed on the live chain during a degraded validator quorum --
+    // must not make it give up and silently stop mining until a human
+    // notices JOB_STATUS=failed and restarts it by hand. This still needs
+    // *some* bound, though: a structurally stuck position (e.g. a single-
+    // miner fixture that can never satisfy the composite winner-cooldown
+    // rule because there's no second provider to ever break it) would
+    // otherwise retry forever with no way out at all.
+    auto last_progress_at = std::chrono::steady_clock::now();
+    constexpr auto kMaxStagnationDuration = std::chrono::minutes(5);
     while (true) {
         const auto before_mine = loadLocalStatus(chainPath(workdir));
         std::vector<std::string> miner_args{
@@ -5605,11 +5621,20 @@ int runJobs(const char* argv0, int argc, char** argv) {
             }
         }
         if (sync_rc != 0 || local.frontier <= before_mine.frontier) {
-            ++stagnant_attempts;
-            if (stagnant_attempts >= kMaxStagnantAttempts) {
+            if (sync_rc != 0) {
+                ++stagnant_attempts;
+            } else {
+                stagnant_attempts = 0;
+            }
+            const bool sync_failure_cap_hit =
+                sync_rc != 0 && stagnant_attempts >= kMaxStagnantAttempts;
+            const bool stagnation_timed_out =
+                std::chrono::steady_clock::now() - last_progress_at >= kMaxStagnationDuration;
+            if (sync_failure_cap_hit || stagnation_timed_out) {
                 state["status"] = "failed";
                 state["updated_at"] = nowSeconds();
-                state["last_result"] = sync_rc != 0 ? "sync-after-miner-failed" : "miner-failed";
+                state["last_result"] =
+                    sync_failure_cap_hit ? "sync-after-miner-failed" : "stagnant-timeout";
                 writeMineState(workdir, state);
                 return rc;
             }
@@ -5624,6 +5649,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
             continue;
         }
         stagnant_attempts = 0;
+        last_progress_at = std::chrono::steady_clock::now();
         if (local.frontier >= *target) {
             state["status"] = "complete";
             state["updated_at"] = nowSeconds();
