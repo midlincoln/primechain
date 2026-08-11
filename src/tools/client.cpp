@@ -1227,6 +1227,7 @@ void appendDistributionEvent(
 bool extractParticipationEvents(
     const primechain::storage::StoredRecord& stored,
     std::uint64_t& prime_record_count,
+    std::uint64_t& total_transaction_count,
     std::vector<ParticipationEvent>& out,
     std::string& error) {
     static const std::string kFeePrefix = "pcpool_validator_fees_epoch_";
@@ -1235,6 +1236,7 @@ bool extractParticipationEvents(
     if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
         const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
         if (!record.has_value()) return false;
+        total_transaction_count += record->transactions.size();
         for (const auto& update : record->validator_endpoints) {
             ParticipationEvent event;
             event.integer = record->integer;
@@ -1284,6 +1286,7 @@ bool extractParticipationEvents(
     const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
     if (!record.has_value()) return false;
     ++prime_record_count;
+    total_transaction_count += record->transactions.size();
     for (const auto& update : record->validator_endpoints) {
         ParticipationEvent event;
         event.integer = record->integer;
@@ -3856,23 +3859,26 @@ bool readParticipationIndexMeta(
     std::string& checkpoint_hash_hex,
     std::uint64_t& event_count,
     std::uint64_t& prime_record_count,
+    std::uint64_t& total_transaction_count,
     bool& present) {
     const auto path = participationIndexMetaPath(workdir);
     checkpoint_integer = 0;
     checkpoint_hash_hex.clear();
     event_count = 0;
     prime_record_count = 0;
+    total_transaction_count = 0;
     present = false;
     if (!pathExists(path)) return true;
     const auto values = readKeyValueFile(path);
     const auto version = values.find("version");
-    if (version == values.end() || version->second != "primechain-participation-index-v2") {
+    if (version == values.end() || version->second != "primechain-participation-index-v3") {
         return false;
     }
     if (values.count("checkpoint_integer")) checkpoint_integer = std::stoull(values.at("checkpoint_integer"));
     if (values.count("checkpoint_hash")) checkpoint_hash_hex = values.at("checkpoint_hash");
     if (values.count("event_count")) event_count = std::stoull(values.at("event_count"));
     if (values.count("prime_record_count")) prime_record_count = std::stoull(values.at("prime_record_count"));
+    if (values.count("total_transaction_count")) total_transaction_count = std::stoull(values.at("total_transaction_count"));
     present = true;
     return true;
 }
@@ -3882,13 +3888,15 @@ bool writeParticipationIndexMeta(
     primechain::PrimeValue checkpoint_integer,
     const std::string& checkpoint_hash_hex,
     std::uint64_t event_count,
-    std::uint64_t prime_record_count) {
+    std::uint64_t prime_record_count,
+    std::uint64_t total_transaction_count) {
     std::map<std::string, std::string> values;
-    values["version"] = "primechain-participation-index-v2";
+    values["version"] = "primechain-participation-index-v3";
     values["checkpoint_integer"] = std::to_string(checkpoint_integer);
     values["checkpoint_hash"] = checkpoint_hash_hex;
     values["event_count"] = std::to_string(event_count);
     values["prime_record_count"] = std::to_string(prime_record_count);
+    values["total_transaction_count"] = std::to_string(total_transaction_count);
     return writeKeyValueFile(participationIndexMetaPath(workdir), values);
 }
 
@@ -3918,9 +3926,11 @@ int updateParticipationIndex(int argc, char** argv) {
     std::string checkpoint_hash_hex;
     std::uint64_t event_count = 0;
     std::uint64_t prime_record_count = 0;
+    std::uint64_t total_transaction_count = 0;
     bool meta_present = false;
     bool diverged = !readParticipationIndexMeta(
-        workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, meta_present);
+        workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count,
+        total_transaction_count, meta_present);
     if (meta_present && !diverged && checkpoint_integer > 0) {
         const auto checkpoint_record = store.findByInteger(checkpoint_integer, error);
         if (!error.empty()) {
@@ -3940,6 +3950,7 @@ int updateParticipationIndex(int argc, char** argv) {
         unlink(participationIndexMetaPath(workdir).c_str());
         event_count = 0;
         prime_record_count = 0;
+        total_transaction_count = 0;
         start = 0;
     }
 
@@ -3958,7 +3969,7 @@ int updateParticipationIndex(int argc, char** argv) {
 
     std::vector<ParticipationEvent> new_events;
     for (const auto& stored : new_records) {
-        if (!extractParticipationEvents(stored, prime_record_count, new_events, error)) {
+        if (!extractParticipationEvents(stored, prime_record_count, total_transaction_count, new_events, error)) {
             std::cerr << "could not decode record " << stored.integer << ": " << error << "\n";
             return 1;
         }
@@ -3982,7 +3993,8 @@ int updateParticipationIndex(int argc, char** argv) {
 
     event_count += new_events.size();
     if (!writeParticipationIndexMeta(
-            workdir, frontier, primechain::crypto::toHex(latest->record_hash), event_count, prime_record_count)) {
+            workdir, frontier, primechain::crypto::toHex(latest->record_hash), event_count, prime_record_count,
+            total_transaction_count)) {
         std::cerr << "could not write participation index checkpoint\n";
         return 1;
     }
@@ -4002,9 +4014,11 @@ int participationIndexStatus(int argc, char** argv) {
     std::string checkpoint_hash_hex;
     std::uint64_t event_count = 0;
     std::uint64_t prime_record_count = 0;
+    std::uint64_t total_transaction_count = 0;
     bool present = false;
     if (!readParticipationIndexMeta(
-            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, present)) {
+            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count,
+            total_transaction_count, present)) {
         std::cout << "PARTICIPATION_INDEX_INVALID " << workdir << "\n";
         return 1;
     }
@@ -4017,6 +4031,7 @@ int participationIndexStatus(int argc, char** argv) {
               << " checkpoint_hash=" << checkpoint_hash_hex
               << " events=" << event_count
               << " prime_record_count=" << prime_record_count
+              << " total_transaction_count=" << total_transaction_count
               << " path=" << events_path << "\n";
     return 0;
 }
@@ -4029,9 +4044,11 @@ std::optional<std::uint64_t> requireFreshParticipationIndex(const std::string& w
     std::string checkpoint_hash_hex;
     std::uint64_t event_count = 0;
     std::uint64_t prime_record_count = 0;
+    std::uint64_t total_transaction_count = 0;
     bool present = false;
     if (!readParticipationIndexMeta(
-            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count, present) ||
+            workdir, checkpoint_integer, checkpoint_hash_hex, event_count, prime_record_count,
+            total_transaction_count, present) ||
         !present) {
         std::cerr << "participation index is missing; run update-participation-index\n";
         return std::nullopt;
@@ -4621,6 +4638,267 @@ int boardReportWorkdirFast(int argc, char** argv) {
     for (const auto& entry : sortedValidatorStats(stats.validators)) {
         std::cout << "VALIDATOR_EVIDENCE " << entry.first
                   << " class=" << validatorEvidenceClass(entry.first, active_validators)
+                  << " finalization_votes=" << entry.second.finalization_votes
+                  << " commit_phase_votes=" << entry.second.commit_phase_votes
+                  << " round_change_votes=" << entry.second.round_change_votes << "\n";
+    }
+    return 0;
+}
+
+// Fast launch-report: unlike board-report-workdir, this needs no bounded
+// findRange decode at all. launch-report always asks about the *whole*
+// chain (2 to the current frontier), so a bounded range wouldn't save
+// anything over the original's full loadAll() -- but every piece of that
+// full-range data is already sitting in the reward and participation
+// indexes from building them, so this reads both as full scans (cheap:
+// text parsing, no decode/signature-verify) instead of decoding a single
+// record. registry state comes from the same event replay as
+// validator-registry-fast. Holdings/reserve/pool queries still go through
+// SequentialNode (ledger state, not a log of past events).
+int launchReportWorkdirFast(int argc, char** argv) {
+    if (argc != 3) return 1;
+    const std::string workdir = argv[2];
+
+    const auto reward_frontier_opt = requireFreshRewardIndex(workdir);
+    if (!reward_frontier_opt.has_value()) return 1;
+    if (!requireFreshParticipationIndex(workdir).has_value()) return 1;
+
+    primechain::PrimeValue participation_checkpoint = 0;
+    std::string participation_hash;
+    std::uint64_t participation_event_count = 0;
+    std::uint64_t prime_record_count = 0;
+    std::uint64_t total_transaction_count = 0;
+    bool participation_present = false;
+    readParticipationIndexMeta(workdir, participation_checkpoint, participation_hash,
+        participation_event_count, prime_record_count, total_transaction_count, participation_present);
+
+    std::string error;
+    primechain::node::SequentialNode node(chainPath(workdir));
+    if (!node.load(error)) {
+        std::cerr << "launch_report_error: " << error << "\n";
+        return 1;
+    }
+    const auto status = node.status();
+    const auto frontier = status.has_genesis ? status.frontier_integer : primechain::PrimeValue{0};
+    const auto total_records = frontier >= 2 ? static_cast<std::uint64_t>(frontier - 1) : 0;
+    const auto composite_records_total = total_records >= prime_record_count ? total_records - prime_record_count : 0;
+
+    // Registry state: same event replay as validator-registry-fast.
+    primechain::node::ValidatorRegistryState registry;
+    std::vector<primechain::Address> genesis_validators;
+    {
+        std::ifstream in(participationIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open participation index events file\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseParticipationEventLine(line);
+            if (!parsed.has_value()) continue;
+            if (parsed->kind == "registry-genesis") {
+                registry.has_genesis = true;
+                registry.current_epoch = 0;
+                registry.current_activation_integer = parsed->effective_integer;
+                registry.active_validators = parsed->validator_set;
+                registry.events.push_back({
+                    primechain::node::ValidatorRegistryEventType::Genesis,
+                    parsed->height, parsed->integer, primechain::Hash256{}, 0,
+                    parsed->effective_integer, parsed->validator_set});
+                genesis_validators = parsed->validator_set;
+            } else if (parsed->kind == "registry-epoch-transition") {
+                registry.current_epoch = parsed->epoch;
+                registry.current_activation_integer = parsed->effective_integer;
+                registry.active_validators = parsed->validator_set;
+                registry.events.push_back({
+                    primechain::node::ValidatorRegistryEventType::EpochTransition,
+                    parsed->height, parsed->integer, primechain::Hash256{}, parsed->epoch,
+                    parsed->effective_integer, parsed->validator_set});
+            }
+        }
+    }
+
+    // Endpoints (latest per validator) and economic policy events.
+    std::map<primechain::Address, ParticipationEvent> endpoints;
+    std::uint64_t endpoint_event_count = 0;
+    EconomicPolicyReport policy;
+    BoardReportStats board;
+    board.from = 2;
+    board.to = frontier;
+    {
+        std::ifstream in(participationIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open participation index events file\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseParticipationEventLine(line);
+            if (!parsed.has_value()) continue;
+            if (parsed->kind == "endpoint") {
+                endpoints[parsed->validator] = *parsed;
+                ++endpoint_event_count;
+            } else if (parsed->kind == "policy") {
+                primechain::protocol::EconomicPolicyUpdateV1 update;
+                update.transfer_fee_micro_units = parsed->transfer_fee;
+                update.validator_min_reserve_micro_units = parsed->min_reserve;
+                update.effective_integer = parsed->effective_integer;
+                update.sequence = parsed->sequence;
+                update.votes.resize(parsed->votes);
+                policy.events.push_back({parsed->integer, update});
+            } else if (parsed->kind == "vote-finalization") {
+                ++board.validators[parsed->validator].finalization_votes;
+            } else if (parsed->kind == "vote-commit-phase") {
+                ++board.validators[parsed->validator].commit_phase_votes;
+            } else if (parsed->kind == "vote-round-change") {
+                ++board.validators[parsed->validator].round_change_votes;
+            }
+        }
+    }
+
+    // Per-miner record counts, discovery rewards, and the chain-wide fee
+    // total (board-report's fee_micro_units has never actually been
+    // attributed per miner -- addFeeReward() discards the address it's
+    // given and only adds to the top-level total -- so MINER lines below
+    // reproduce that as fee_micro_units=0, matching the original exactly).
+    {
+        std::ifstream in(rewardIndexEventsPath(workdir));
+        if (!in) {
+            std::cerr << "could not open reward index events file\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto parsed = parseRewardIndexEventLine(line);
+            if (!parsed.has_value()) continue;
+            if (parsed->kind == "prime") {
+                ++board.miners[parsed->provider].prime_records;
+                board.miners[parsed->provider].discovery_micro_units += parsed->amount;
+            } else if (parsed->kind == "composite-seen") {
+                ++board.miners[parsed->provider].composite_records;
+            } else if (parsed->kind == "composite") {
+                board.miners[parsed->provider].discovery_micro_units += parsed->amount;
+            } else if (parsed->kind == "fee") {
+                board.fee_micro_units += parsed->amount;
+            }
+        }
+    }
+    board.records = total_records;
+    board.prime_records = prime_record_count;
+    board.composite_records = composite_records_total;
+    board.transaction_count = total_transaction_count;
+    board.pending_composites_after_range = readRewardIndexPending(workdir).size();
+
+    std::uint64_t discovery_total = 0;
+    std::uint64_t unique_miners = 0;
+    for (const auto& entry : board.miners) {
+        const auto record_count = entry.second.prime_records + entry.second.composite_records;
+        const auto reward_total = entry.second.discovery_micro_units + entry.second.fee_micro_units;
+        if (record_count != 0 || reward_total != 0) ++unique_miners;
+        discovery_total += entry.second.discovery_micro_units;
+    }
+
+    const auto fee_pool_address = node.validatorFeePoolAddress();
+    const auto fee_pool_holdings = node.holdingsForAddress(fee_pool_address);
+    std::uint64_t fee_pool_total = 0;
+    for (const auto& holding : fee_pool_holdings) fee_pool_total += holding.second;
+    const auto reward_pool_address = node.validatorRewardPoolAddress();
+    const auto reward_pool_holdings = node.holdingsForAddress(reward_pool_address);
+    std::uint64_t reward_pool_total = 0;
+    for (const auto& holding : reward_pool_holdings) reward_pool_total += holding.second;
+    const auto validator_summary = summarizeValidatorEvidence(board.validators, registry.active_validators);
+
+    std::cout << "LAUNCH_REPORT " << workdir << "\n";
+    std::cout << "CHAIN has_genesis=" << (status.has_genesis ? 1 : 0)
+              << " height=" << status.height
+              << " frontier=" << status.frontier_integer
+              << " latest_hash=" << primechain::crypto::toHex(status.latest_record_hash)
+              << " records=" << total_records
+              << " prime_records=" << prime_record_count
+              << " composite_records=" << composite_records_total
+              << " transactions=" << total_transaction_count << "\n";
+    std::cout << "VALIDATOR_STATE epoch=" << node.validatorEpoch()
+              << " active_validators=" << registry.active_validators.size()
+              << " registry_events=" << registry.events.size()
+              << " endpoint_events=" << endpoint_event_count
+              << " active_endpoints=" << endpoints.size()
+              << " transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits() << "\n";
+    std::cout << "VALIDATOR_EVIDENCE_SUMMARY active=" << validator_summary.active
+              << " historical=" << validator_summary.historical
+              << " bootstrap_dev=" << validator_summary.bootstrap_dev << "\n";
+    std::cout << "ACTIVE_VALIDATORS";
+    for (const auto& validator : registry.active_validators) std::cout << " " << validator;
+    std::cout << "\n";
+    for (const auto& event : registry.events) {
+        std::cout << "VALIDATOR_REGISTRY_EVENT "
+                  << primechain::node::validatorRegistryEventTypeName(event.type)
+                  << " height=" << event.height
+                  << " integer=" << event.record_integer
+                  << " epoch=" << event.epoch
+                  << " activation_integer=" << event.activation_integer
+                  << " validators=" << event.validator_set.size();
+        for (const auto& validator : event.validator_set) std::cout << " " << validator;
+        std::cout << "\n";
+    }
+    for (const auto& entry : endpoints) {
+        const auto& update = entry.second;
+        std::cout << "VALIDATOR_ENDPOINT " << update.validator
+                  << " host=" << update.host
+                  << " port=" << update.port
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence << "\n";
+    }
+    for (const auto& validator : registry.active_validators) {
+        const auto reserve_address = primechain::protocol::validatorReserveAddress(validator);
+        const auto reserve_holdings = node.holdingsForAddress(reserve_address);
+        const auto admission = containsAddress(genesis_validators, validator) ? "genesis" : "reserve";
+        std::cout << "VALIDATOR_RESERVE_SUMMARY " << validator
+                  << " admission=" << admission
+                  << " holdings=" << reserve_holdings.size()
+                  << " total_micro_units=" << node.lockedValidatorReserveMicroUnits(validator) << "\n";
+    }
+    std::cout << "ECONOMIC_POLICY active_transfer_fee_micro_units=" << node.transferFeeMicroUnits()
+              << " active_validator_min_reserve_micro_units=" << node.validatorMinReserveMicroUnits()
+              << " events=" << policy.events.size() << "\n";
+    for (const auto& entry : policy.events) {
+        const auto& update = entry.second;
+        std::cout << "ECONOMIC_POLICY_EVENT integer=" << entry.first
+                  << " transfer_fee_micro_units=" << update.transfer_fee_micro_units
+                  << " validator_min_reserve_micro_units=" << update.validator_min_reserve_micro_units
+                  << " effective_integer=" << update.effective_integer
+                  << " sequence=" << update.sequence
+                  << " votes=" << update.votes.size() << "\n";
+    }
+    std::cout << "VALIDATOR_FEE_POOL epoch=" << node.validatorEpoch()
+              << " address=" << fee_pool_address
+              << " holdings=" << fee_pool_holdings.size()
+              << " total_micro_units=" << fee_pool_total << "\n";
+    for (const auto& holding : fee_pool_holdings) {
+        std::cout << "FEE_POOL_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    std::cout << "VALIDATOR_REWARD_POOL epoch=" << node.validatorEpoch()
+              << " address=" << reward_pool_address
+              << " holdings=" << reward_pool_holdings.size()
+              << " total_micro_units=" << reward_pool_total << "\n";
+    for (const auto& holding : reward_pool_holdings) {
+        std::cout << "VALIDATOR_REWARD_HOLDING epoch=" << node.validatorEpoch()
+                  << " prime=" << holding.first
+                  << " micro_units=" << holding.second << "\n";
+    }
+    std::cout << "BOARD records=" << board.records
+              << " prime=" << board.prime_records
+              << " composite=" << board.composite_records
+              << " transactions=" << board.transaction_count
+              << " discovery_micro_units=" << discovery_total
+              << " fee_micro_units=" << board.fee_micro_units
+              << " unique_miners=" << unique_miners
+              << " pending_composites_after_range=" << board.pending_composites_after_range << "\n";
+    for (const auto& entry : sortedValidatorStats(board.validators)) {
+        std::cout << "VALIDATOR_EVIDENCE " << entry.first
+                  << " class=" << validatorEvidenceClass(entry.first, registry.active_validators)
                   << " finalization_votes=" << entry.second.finalization_votes
                   << " commit_phase_votes=" << entry.second.commit_phase_votes
                   << " round_change_votes=" << entry.second.round_change_votes << "\n";
@@ -5414,6 +5692,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " board-report <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " board-report-workdir <workdir> --from <integer> --to <integer>\n"
               << "  " << argv0 << " launch-report <record-store>\n"
+              << "  " << argv0 << " launch-report-workdir <workdir>\n"
               << "  " << argv0 << " validator-reputation <record-store> <address>\n"
               << "  " << argv0 << " validator-eligibility <record-store> <address> --reserve <micro-units|auto> --observed <ok> --total <count>\n"
               << "  " << argv0 << " validator-reserve <record-store> <validator-address>\n"
@@ -5544,6 +5823,10 @@ int main(int argc, char** argv) {
     if (command == "launch-report") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return launchReport(argc, argv);
+    }
+    if (command == "launch-report-workdir") {
+        if (argc != 3) { printUsage(argv[0]); return 1; }
+        return launchReportWorkdirFast(argc, argv);
     }
     if (command == "validator-reputation") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
