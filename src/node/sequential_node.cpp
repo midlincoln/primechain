@@ -665,23 +665,29 @@ bool SequentialNode::load(std::string& error) {
         if (!error.empty()) return false;
     }
 
+    auto replayFailure = [&]() {
+        if (!loaded_from_snapshot_) return false;
+        snapshot_store_.discard();
+        return load(error);
+    };
+
     for (const auto& record : records) {
         if (record.height != expected_height) {
             error = "stored record height is not sequential";
-            return false;
+            return replayFailure();
         }
         if (record.integer != expected_integer) {
             error = "stored record integer is not sequential";
-            return false;
+            return replayFailure();
         }
         if (record.height == 0 && record.kind != storage::StoredRecordKind::Prime) {
             error = "genesis record must be prime";
-            return false;
+            return replayFailure();
         }
         if (record.kind == storage::StoredRecordKind::Composite) {
             if (!validateStoredCompositePayload(record, expected_previous_hash, validator_set_, error)) {
                 prefixReplayError(record, error);
-                return false;
+                return replayFailure();
             }
             const auto decoded = protocol::deserializeCompositeRecord(record.payload, error);
             if (decoded.has_value() &&
@@ -689,7 +695,7 @@ bool SequentialNode::load(std::string& error) {
                  (decoded->version < 1 ||
                   (decoded->version <= kValidatorRewardRecordVersion && decoded->commit_phase.validator_set != validator_set_)))) {
                 error = "stored composite certificate validator set is not authorized by genesis";
-                return false;
+                return replayFailure();
             }
             if (!decoded.has_value() ||
                 !validateRecordMetadataVersion(decoded->version, decoded->validator_epoch, decoded->validator_endpoints, decoded->economic_policy, decoded->validator_applications, decoded->validator_work_bindings, error) ||
@@ -708,12 +714,12 @@ bool SequentialNode::load(std::string& error) {
                 !protocol::verifyValidatorWorkBindings(
                     decoded->validator_work_bindings,
                     decoded->previous_record_hash, decoded->integer, error)) {
-                return false;
+                return replayFailure();
             }
             if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
                 !applyCompositeLedger(*decoded, error)) {
-                return false;
+                return replayFailure();
             }
             const bool reset_fee_participants =
                 hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
@@ -729,12 +735,12 @@ bool SequentialNode::load(std::string& error) {
                 validator_epoch_ = decoded->validator_epoch.epoch;
             }
             if (hasEconomicPolicyUpdate(decoded->economic_policy)) {
-                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return false;
+                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return replayFailure();
             }
         } else {
             if (!validateStoredPrimePayload(record, expected_previous_hash, validator_set_, error)) {
                 prefixReplayError(record, error);
-                return false;
+                return replayFailure();
             }
             const auto decoded = protocol::deserializePrimeRecord(record.payload, error);
             if (decoded.has_value() && record.height == 0) {
@@ -757,12 +763,12 @@ bool SequentialNode::load(std::string& error) {
                 !protocol::verifyValidatorWorkBindings(
                     decoded->validator_work_bindings,
                     decoded->previous_record_hash, decoded->integer, error)) {
-                return false;
+                return replayFailure();
             }
             if (!decoded.has_value() ||
                 !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
                 !applyPrimeLedger(*decoded, error)) {
-                return false;
+                return replayFailure();
             }
             const bool reset_fee_participants =
                 hasFeePoolDistributionV1(decoded->transactions, validatorFeePoolAddress()) ||
@@ -778,7 +784,7 @@ bool SequentialNode::load(std::string& error) {
                 validator_epoch_ = decoded->validator_epoch.epoch;
             }
             if (hasEconomicPolicyUpdate(decoded->economic_policy)) {
-                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return false;
+                if (!applyEconomicPolicy(decoded->economic_policy, decoded->integer, error)) return replayFailure();
             }
         }
 
