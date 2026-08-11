@@ -3740,6 +3740,12 @@ private:
         const primechain::protocol::RoundChangeVoteV1& vote,
         std::string& error) {
         if (!verifyRoundChangeVote(vote, error)) return false;
+        return acceptVerifiedRoundChangeVote(vote, error);
+    }
+
+    bool acceptVerifiedRoundChangeVote(
+        const primechain::protocol::RoundChangeVoteV1& vote,
+        std::string& error) {
         const auto key = std::make_tuple(vote.integer, vote.new_round, vote.validator_address);
         const auto existing = round_changes_.find(key);
         if (existing != round_changes_.end()) {
@@ -3754,6 +3760,38 @@ private:
         round_changes_[key] = vote;
         if (!persistRoundChanges(error)) {
             round_changes_.erase(key);
+            return false;
+        }
+        return true;
+    }
+
+    bool importCertifiedRoundChanges(
+        const primechain::protocol::FinalizationProofV0& proof,
+        std::string& error) {
+        if (proof.round_changes.empty()) return true;
+        bool changed = false;
+        std::vector<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>> inserted;
+        for (const auto& change : proof.round_changes) {
+            const auto key = std::make_tuple(change.integer, change.new_round, change.validator_address);
+            const auto existing = round_changes_.find(key);
+            if (existing != round_changes_.end()) {
+                if (existing->second.public_key == change.public_key &&
+                    existing->second.locked_round == change.locked_round &&
+                    existing->second.locked_candidate_kind == change.locked_candidate_kind &&
+                    existing->second.locked_candidate_hash == change.locked_candidate_hash &&
+                    existing->second.locked_candidate_payload == change.locked_candidate_payload) {
+                    continue;
+                }
+                error = "conflicting certified round-change vote";
+                return false;
+            }
+            round_changes_[key] = change;
+            inserted.push_back(key);
+            changed = true;
+        }
+        if (!changed) return true;
+        if (!persistRoundChanges(error)) {
+            for (const auto& key : inserted) round_changes_.erase(key);
             return false;
         }
         return true;
@@ -3983,6 +4021,8 @@ private:
         std::uint64_t round = 0;
         if (!primechain::protocol::verifyRoundChangeCertificate(
                 proof, previous_hash, integer, validator_set_, round, error)) return false;
+        error.clear();
+        if (!importCertifiedRoundChanges(proof, error)) return false;
         error.clear();
         const auto vote_target_hash = finalizationVoteTargetHashFromPayload(kind, candidate_payload, proof, error);
         if (!vote_target_hash.has_value()) return false;
