@@ -1,6 +1,6 @@
 # Primechain Protocol Gap Analysis
 
-Status: living document, second pass (first pass covered types/tx/proof formats and record fields structurally; this pass traces §8/§8.1 finalization and round-change logic specifically, the largest gap flagged by the first pass). Analysis and documentation only -- **nothing in the source tree was changed while writing this**, and no finding below has been acted on. Scope: `docs/protocol-formats-v0.md` (both repos are `kaito-zero/primechain`'s `docs/protocol-gap-analysis` branch, based on `upstream/main` @ `1134489`) checked against the actual C++ implementation.
+Status: living document, third pass (first pass: types/tx/proof formats and record fields, structurally; second pass: §8/§8.1 finalization and round-change logic, traced in detail; this pass: §10/§10.1-10.3 commit-phase quorum, genesis anchor, and epoch transitions). Analysis and documentation only -- **nothing in the source tree was changed while writing this**, and no finding below has been acted on. Scope: `docs/protocol-formats-v0.md` (both repos are `kaito-zero/primechain`'s `docs/protocol-gap-analysis` branch, based on `upstream/main` @ `1134489`) checked against the actual C++ implementation.
 
 Purpose, per [[primechain-engineering-roadmap]] Phase B: determine whether an independent engineer could reproduce current Primechain behavior from `protocol-formats-v0.md` alone, without reading the C++. This is explicitly **not** a redesign exercise, and finding a mismatch here is not itself a decision to change anything -- see the classification scheme below.
 
@@ -98,6 +98,56 @@ Every code path that advances past round 1 (the initial attempt, the timeout-tri
 - **Confirmed matching the spec in the same pass** (so this isn't a wholesale rejection of §8): the core per-vote validation rules in `verifyRecordFinalization` were traced line-by-line and do match the document precisely -- quorum vote count check, public-key-derives-claimed-address check (`vote.validator_address != crypto::addressFromProtocolPublicKey(vote.public_key)`), vote target (record hash + round) check, and strict-ascending validator-address ordering (stronger than the doc's plain "sorted," since it also rejects duplicates). The signing payload's field order (record hash, round, validator address) also matches; the exact domain-separator string itself was not independently re-read against `crypto::recordFinalizationVoteSigningPayload`'s source this pass.
 - **Action:** none taken -- **REQUIRES MAINTAINER DECISION** (at minimum on updating the document to describe v4 and the lock mechanism; possibly also on whether v3's continued acceptance-without-production is intentional or itself worth deprecating explicitly).
 
+## Headline finding 4: three different quorum-threshold answers for the same three-validator network, across three sources
+
+While tracing §10.2/§10.3, checking §8's repeated claim that the active validator set contains "exactly three" addresses led to `core::validValidatorSetSize()`:
+
+```cpp
+bool validValidatorSetSize(std::size_t validator_count) {
+    return validator_count >= 1;
+}
+```
+
+This does **not** enforce "exactly three" -- any validator set size of 1 or more passes. That part turns out to be intentional and already documented, just not in `protocol-formats-v0.md`: `docs/validator-economics.md`'s "Quorum Formula" section explicitly says quorum is "formula-based, not hardcoded to two of three" and gives:
+
+```text
+required_quorum = floor(2n / 3) + 1
+```
+
+So far this is just another instance of Headline Finding 2's pattern (real behavior documented in `validator-economics.md` but absent from `protocol-formats-v0.md`). But checking that formula against what the code actually computes (`requiredValidatorQuorum()` in `src/core/consensus.cpp`):
+
+```cpp
+std::size_t requiredValidatorQuorum(std::size_t validator_count) {
+    if (validator_count == 0) return 0;
+    if (validator_count == 1) return 1;
+    return (validator_count * 2 + 2) / 3;
+}
+```
+
+**These two formulas disagree, and they disagree specifically at `n = 3` -- the validator count of the network actually running today:**
+
+| n | `validator-economics.md`'s `floor(2n/3)+1` | actual code's `(2n+2)/3` |
+|---|---|---|
+| 1 | 1 | 1 |
+| 2 | 2 | 2 |
+| **3** | **3** | **2** |
+| 4 | 3 | 3 |
+| 5 | 4 | 4 |
+| **6** | **5** | **4** |
+| 7 | 5 | 5 |
+
+They match at every `n` checked except multiples of 3, where the documented formula is exactly one vote higher than what the code requires. For the live 3-validator network, `validator-economics.md` says finalizing a record should require all three validators to sign; the actual code accepts two. (Confirmed by hand: `floor(2*3/3)+1 = floor(2)+1 = 3`; `(3*2+2)/3 = 8/3 = 2` under C++ integer truncation.)
+
+`protocol-formats-v0.md` §8 itself doesn't give a formula -- it just says "two or three distinct active validators sign," which happens to match what the *code* actually does for n=3, even though it directly contradicts its own "exactly three" validator-set-size claim elsewhere in the same section (the code allows other sizes) and doesn't mention the general formula at all.
+
+- **Document section:** `docs/validator-economics.md` "Quorum Formula" (not `protocol-formats-v0.md`, which has no formula to check against here -- this finding is specifically a cross-doc-vs-code mismatch rather than a formats-doc gap like the others).
+- **Implementation:** `requiredValidatorQuorum()`, `src/core/consensus.cpp:31`. Used by `hasQuorumVoteCount()` (`records.cpp:41`), which gates `verifyRecordFinalization`, `verifyValidatorEpochTransition`, and (via `validatorQuorumRequired()`/`phaseClosed()`) the commit-phase CLOSED transition -- i.e. this one formula is the actual safety threshold for essentially every quorum decision in the system.
+- **Tests:** not searched this pass for one that would catch this specifically (would need a validator-count-6-or-9 style fixture, or a fixture that checks the *exact* vote count required rather than just "enough votes eventually arrive").
+- **Status:** **DOCUMENTATION BUG** in `validator-economics.md` (states a formula the code doesn't implement) -- or, alternatively framed, **the code doesn't implement the documented policy**, which is the more serious reading given this is a safety threshold, not a formatting detail. Genuinely ambiguous which side is "wrong" without maintainer input on which formula was actually intended.
+- **Consensus-visible:** yes -- this is about as consensus-critical as anything in the system: how many validator signatures are actually required to finalize a record, transition an epoch, or close a commit-phase round.
+- **Conformance vector:** missing.
+- **Action:** none taken -- **REQUIRES MAINTAINER DECISION**, and given the severity (a live 3-validator network's actual safety margin is at stake, not just a wording nit), this is the single finding in this document most worth resolving first.
+
 ## Section-by-section status (first pass -- see confidence notes per row)
 
 | §formats-v0 | Topic | Match status | Implementation | Confidence this pass |
@@ -111,19 +161,20 @@ Every code path that advances past round 1 (the initial attempt, the timeout-tri
 | §8 / §8.1 | Finalization proof (2-of-3 voting, round rules, round-change certificates, `.rounds`/`.finalization` sidecars) | **Traced in this pass (second pass), superseding the first pass's note below.** Round-1 behavior and the per-vote validation rules (quorum count, address-derives-from-pubkey, vote-target match, strict-ascending sort) all confirmed matching the document exactly, line-by-line in `verifyRecordFinalization`. But: see Headline Finding 3 -- the document's "later rounds use v3" claim is out of date (code always uses a v4 rule with an undocumented cross-round-lock mechanism instead; correcting my own first-pass note above, which incorrectly assumed the doc's §8.1 prose already covered the `locked_*` fields -- it does not, confirmed via a direct grep for "lock" in the document). The `.rounds`/`.finalization` sidecar-clearing claim and the `--finalization-timeout-ms` retry-then-round-change behavior were structurally confirmed present (`finalizeRecordCandidate`'s timeout/retry loop matches the doc's description reasonably closely) but not verified field-by-field. | `sync_server.cpp:4737` (`finalizeRecordCandidate`, the propose/round-change/timeout loop), `records.cpp:1560-1701` (verification) | Partial -- core vote validation and round-1 behavior verified in detail; v3-vs-v4 discrepancy verified in detail (Finding 3); sidecar file behavior and exact timeout/retry semantics only structurally checked; the commit-phase state machine in §10/§10.1-10.3 still not traced |
 | §9 | Record hashing (candidate hash vs. finalized hash separation) | `candidateRecordHash`/`finalizedRecordHash`/`legacyCandidateRecordHashWithoutFinalization` all confirmed present as distinct functions in `records.hpp`, consistent with the doc's candidate-vs-finalized hash distinction. Byte-level field-ordering-matches-document claim not verified this pass. | `records.cpp` | Structural only |
 | §9.1 | ML-DSA-65 composite contributor auth (address = pcpq1 + first 20 bytes of hash(pubkey), domain-separated commit/reveal payloads) | Address-derivation helper (`developmentAddressFromPublicKey`) exists but is named for the *development* address scheme (§2's `pcdev1_`), not obviously the authenticated `pcpq1_` one -- the authenticated derivation likely lives elsewhere (not traced this pass). Commit/reveal domain strings referenced in `sync_server.cpp` (`SUBMIT_COMPOSITE_REVEAL` handling) but not diffed against the doc's exact domain strings this pass. | `sync_server.cpp`, `wallet/miner_identity.cpp` (likely) | Structural only, address-derivation function location genuinely unclear this pass -- flag as **UNCLEAR**, worth a dedicated look |
-| §10 / §10.1 / §10.2 / §10.3 | Commit-reveal, controlled commit-phase quorum state machine, genesis validator anchor, signed epoch transitions | All corresponding structs (`CommitCertificateEntryV1`, `CommitPhaseCertificateV1`, `GenesisConfigV1`, `ValidatorEpochTransitionV1`) and verify functions (`verifyCommitPhaseCertificate`, `verifyGenesisConfig`, `verifyValidatorEpochTransition`) confirmed present. The commit-phase OPEN→CLOSING→CLOSED→FINALIZED/TIMED_OUT state machine's actual transition logic lives in `sync_server.cpp` and was **not traced this pass**. | `sync_server.cpp`, `records.cpp` | Structural only |
+| §10 / §10.1 / §10.2 / §10.3 | Commit-reveal, controlled commit-phase quorum state machine, genesis validator anchor, signed epoch transitions | **Traced in this pass (third pass), superseding the note below.** §10.1's state determination matches exactly: `GET_COMMIT_PHASE`/`GET_MINING_VIEW` compute CLOSED (`phaseVoteCount >= quorum`), CLOSING (`phaseVoteCount != 0` but below quorum), OPEN (neither) -- precisely the doc's OPEN→CLOSING→CLOSED description. Winner selection (`selectedCommitment()`) matches the "lexicographically smallest `(commitment_hash, provider_address)`" rule exactly, field-for-field. The `TIMED_OUT(N→N+1)` recovery transition is present (`CommitPhaseTimeoutVote`, `commitPhaseTimeoutCertified()` requiring `validatorQuorumRequired()` matching votes, `activeCommitPhaseRound()` walking forward through certified timeouts) and structurally matches, though the doc's wording "nodes clear only that round's temporary commitments/votes" implies deletion while the code appears to just advance which round is considered active without necessarily deleting the old round's stored data -- functionally equivalent (old-round data is never consulted again since every lookup is keyed by the now-current round) but not byte-identical to the doc's phrasing, not chased further this pass. §10.2 (genesis anchor) and §10.3 (epoch transitions) both verified matching closely: `verifyGenesisConfig`'s version/height gating and `verifyValidatorEpochTransition`'s epoch-plus-one/activation-plus-one/quorum/canonical-sort checks all line up with the document precisely. **But see Headline Finding 4**, found while checking §10.2's "exactly three validators" claim: the actual validator-set-size check only requires `>= 1` (matches `validator-economics.md`'s explicit non-3-hardcoded design, not `protocol-formats-v0.md`'s "exactly three" wording), and the quorum-count formula that decision depends on disagrees with `validator-economics.md`'s own documented formula specifically at the currently-deployed validator count of 3. The `SUBMIT_PHASE_VOTE_BUNDLE`/`SUBMIT_PHASE_VOTE_PEER`/`SUBMIT_PHASE_VOTE_BUNDLE_PEER` wire commands exist in code with no mention in the doc (which only lists plain `SUBMIT_PHASE_VOTE`) -- not investigated further this pass, likely a peer-propagation/batching optimization rather than a new consensus rule, but unconfirmed. | `sync_server.cpp` (state machine, `4110-5436` region), `records.cpp` (`verifyGenesisConfig:1339`, `verifyValidatorEpochTransition:1366`), `core/consensus.cpp` (quorum formula) | Detailed -- core state machine and both sub-sections traced; timeout sidecar-clearing semantics and the bundle/peer wire commands not fully chased |
 | §11 | Bitcoin mirror payload | Self-declared "future optional" by the document itself. No `BitcoinMirror`-named struct found in `records.hpp`. | none found | Consistent -- doc correctly says this isn't built yet. **PLANNED**, not a gap. |
 | §12 | Open items | Self-declared "intentionally unresolved" by the document itself (production address encoding, production signature scheme, real SHA3-256 integration, UTXO representation, reward allocation format, state-root construction, permissionless consensus, DoS limits). Worth noting: "real SHA3-256 integration" as an open item is confusing given `crypto::sha3_256` is called directly throughout `records.cpp` -- possibly stale wording (may mean "a from-scratch/audited implementation" vs. a library) rather than "SHA3-256 isn't used yet." Not resolved this pass -- **UNCLEAR, worth asking**. | n/a | Consistent with self-declaration; one wording item flagged |
 
 ## What this pass did NOT cover (explicitly, so the next pass knows where to start)
 
-- §8/§8.1's finalization/round-change logic is now traced (this pass) -- see Headline Finding 3 and the updated §8/§8.1 table row. **§10's commit-phase quorum state machine (OPEN→CLOSING→CLOSED→FINALIZED/TIMED_OUT) is a separate mechanism and is still untraced** -- it's the natural next candidate for "the largest remaining gap," now that §8 is done.
+- §8/§8.1 (finalization/round-change) and §10/§10.1-10.3 (commit-phase quorum, genesis anchor, epoch transitions) are now both traced -- see Headline Findings 3 and 4 and the updated table rows. **What's left that's still purely structural, not traced:** §9.1's authenticated address derivation, §3's transaction validation rules beyond "the code exists somewhere," and byte-level serialization/domain-string verification everywhere.
 - No verification of exact byte-level field ordering for any serialized structure against the document's field lists.
-- No verification of exact domain-separation strings (e.g. `"primechain-transaction-signature-mldsa65-v2"`, and the finalization-vote signing domain specifically) against what's actually hashed/signed in code.
+- No verification of exact domain-separation strings (e.g. `"primechain-transaction-signature-mldsa65-v2"`, the finalization-vote signing domain, the commit-phase-vote domain) against what's actually hashed/signed in code.
 - No check of §3's transaction validation rules (nonce start/increment, overflow rejection, balance sufficiency) beyond confirming validation code exists somewhere.
 - No check of §9.1's authenticated (`pcpq1_`) address derivation function location/correctness.
-- No search yet for a test that actually forces a round change and asserts on the resulting rule/lock behavior (flagged in Finding 3).
+- No search yet for a test that actually forces a round change and asserts on the resulting rule/lock behavior (Finding 3), or that exercises a validator count other than 3 to observe the quorum-formula discrepancy directly (Finding 4).
+- The `SUBMIT_PHASE_VOTE_BUNDLE`/`*_PEER` wire commands (found while tracing §10.1) were not investigated -- likely peer-propagation plumbing, not confirmed.
 
 ## Recommended next task
 
-Given what's left, the next reasonably-bounded task is one of: (a) trace §10's commit-phase quorum state machine specifically (now the largest remaining consensus-critical gap, following the same pattern as this pass's §8 trace), or (b) take Headline Findings 1 and 3 to the maintainer for a decision, since both are now fully diagnosed with specific file/line evidence and just need a call on documentation-vs-code direction, or (c) extend `protocol-formats-v0.md` itself to document Finding 2's five mechanisms and Finding 3's v4/lock mechanism (pure documentation, no approval needed, doesn't require finishing the rest of this analysis first).
+Four headline findings are now fully diagnosed with specific file/line evidence and don't need more tracing -- they need a maintainer decision. Given Finding 4's severity (the actual safety margin of the live 3-validator network, not a wording nit), **the recommended next step is (b): take Findings 1, 3, and 4 to the maintainer**, rather than continuing to trace further sections (§3's transaction rules, §9.1's address derivation) whose findings, if any, are unlikely to outweigh getting a decision on Finding 4 specifically. Extending `protocol-formats-v0.md` itself (documenting Finding 2's five mechanisms and Finding 3's v4/lock mechanism) remains available as parallel, lower-stakes, no-approval-needed work whenever convenient.
