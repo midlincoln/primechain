@@ -44,8 +44,8 @@ prime_addr=$("$wallet" address "$base/work/wallets/prime.wallet")
 echo $! > "$base/server.pid"
 sleep 0.3
 
-"$client" sync-peer "$base/work" > "$base/sync.out"
-grep -q '^SYNCED 2 8$' "$base/sync.out"
+"$client" sync-peer "$base/work" > "$base/sync.out" 2>&1
+grep -qE 'Synced.*start=2 end=8$' "$base/sync.out"
 
 # Fresh build. validator-reputation-fast also reads the reward index (for
 # MINING_HISTORY), so keep both current throughout this test.

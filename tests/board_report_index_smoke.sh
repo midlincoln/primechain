@@ -31,8 +31,8 @@ prime_addr=$("$wallet" address "$base/work/wallets/prime.wallet")
 echo $! > "$base/server.pid"
 sleep 0.3
 
-"$client" sync-peer "$base/work" > "$base/sync.out"
-grep -q '^SYNCED 2 20$' "$base/sync.out"
+"$client" sync-peer "$base/work" > "$base/sync.out" 2>&1
+grep -qE 'Synced.*start=2 end=20$' "$base/sync.out"
 
 # board-report-workdir requires the reward index to cover at least the
 # requested range (not necessarily caught up to the current frontier --

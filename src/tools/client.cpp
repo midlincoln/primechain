@@ -27,6 +27,7 @@
 #include "primechain/protocol/records.hpp"
 #include "primechain/protocol/validator_governance.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/util/log.hpp"
 #include "primechain/version.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
@@ -431,6 +432,20 @@ std::optional<primechain::PrimeValue> stateTarget(const std::map<std::string, st
 bool writeMineState(const std::string& workdir, std::map<std::string, std::string> state) {
     state["version"] = "primechain-mine-job-v1";
     return writeKeyValueFile(mineStatePath(workdir), state);
+}
+
+// For run-jobs specifically: this file only exists so `job-status` has
+// something current to report -- it's not consensus state and nothing
+// downstream depends on it being written successfully. A transient
+// filesystem hiccup writing it (disk pressure, a permissions blip) must
+// not be a reason to kill an otherwise-healthy mining/syncing process;
+// that would be exactly the "died silently, needs a human to notice and
+// restart it by hand" failure mode this whole function already goes out
+// of its way to avoid for network/sync problems. Warn and keep going.
+void writeMineStateBestEffort(const std::string& workdir, const std::map<std::string, std::string>& state) {
+    if (!writeMineState(workdir, state)) {
+        primechain::log::warn("Miner", "Could not write job state file").field("workdir", workdir);
+    }
 }
 
 
@@ -5380,7 +5395,14 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
     const auto& remote = remote_peer->second;
     const primechain::PrimeValue start = local.has_genesis ? local.frontier + 1 : 2;
     if (remote.frontier < start) {
-        std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
+        // Nothing external greps this exact text (verified: primechain-ops
+        // only checks sync-peer's exit code, never its stdout content), so
+        // unlike SYNCED below this is free to move to the structured
+        // facility. This is also the line run-jobs' polling loop prints
+        // every single time it checks and finds nothing new -- the
+        // single most repeated line in a typical session -- so tagging it
+        // verboseOnly() keeps the default view to actual state changes.
+        primechain::log::info("Sync", "Up to date").field("frontier", local.frontier).verboseOnly();
         return 0;
     }
     const int rc = runTool(argv0, "primechain-sync-download", {
@@ -5391,7 +5413,11 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
         chainPath(workdir),
     });
     if (rc != 0) return rc;
-    std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
+    // Moved to the structured (stderr) facility, unlike SYNC_UP_TO_DATE's
+    // sibling case above this isn't test-format-frozen on its own -- but
+    // tests that grep for this event capture combined output (2>&1) and
+    // match on the start=/end= fields rather than the exact old text.
+    primechain::log::info("Sync", "Synced").field("start", start).field("end", remote.frontier);
     return 0;
 }
 
@@ -5460,13 +5486,20 @@ int jobStatus(int argc, char** argv) {
 }
 
 int addMineJob(int argc, char** argv) {
-    if ((argc != 5 && argc != 6) || std::string(argv[3]) != "--target") return 1;
+    if (argc < 5 || std::string(argv[3]) != "--target") return 1;
     const std::string workdir = argv[2];
     const std::string target = argv[4];
     bool parallel_probes = false;
-    if (argc == 6) {
-        if (std::string(argv[5]) != "--parallel-probes") return 1;
-        parallel_probes = true;
+    bool verbose = false;
+    for (int i = 5; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--parallel-probes") {
+            parallel_probes = true;
+        } else if (option == "--verbose") {
+            verbose = true;
+        } else {
+            return 1;
+        }
     }
     if (!ensureWorkdirLayout(workdir)) return 1;
     std::map<std::string, std::string> state;
@@ -5476,13 +5509,15 @@ int addMineJob(int argc, char** argv) {
     state["updated_at"] = state["created_at"];
     state["last_result"] = "created";
     if (parallel_probes) state["parallel_probes"] = "1";
+    if (verbose) state["verbose"] = "1";
     if (!writeMineState(workdir, state)) return 1;
     // Existing tests match this line's target=<N> as the exact end of
     // string (e.g. "target=6$") -- keep that case byte-for-byte
-    // unchanged and only append anything when the new flag is actually
+    // unchanged and only append anything when a new flag is actually
     // set, so the common/default path stays compatible.
     std::cout << "MINE_JOB_ADDED " << workdir << " target=" << target;
     if (parallel_probes) std::cout << " parallel_probes=1";
+    if (verbose) std::cout << " verbose=1";
     std::cout << "\n";
     return 0;
 }
@@ -5515,20 +5550,43 @@ int runJobs(const char* argv0, int argc, char** argv) {
         std::cerr << "no mine job configured; run add-mine-job first\n";
         return 1;
     }
+    const auto verbose = state.find("verbose");
+    if (verbose != state.end() && verbose->second == "1") {
+        primechain::log::setVerbose(true);
+    }
+    primechain::log::banner(
+        "MINING STARTED", "workdir=" + workdir + " target=" + std::to_string(*target));
 
     if (state.find("started_at") == state.end()) state["started_at"] = nowSeconds();
     state["status"] = "syncing";
     state["updated_at"] = nowSeconds();
     state["last_result"] = "syncing-before-mine";
-    if (!writeMineState(workdir, state)) return 1;
+    writeMineStateBestEffort(workdir, state);
 
-    int rc = syncWorkdir(argv0, workdir, *peer);
-    if (rc != 0) {
-        state["status"] = "failed";
+    // A failure here (most often the local store being corrupted and
+    // needing an external chain-recover, occasionally just a peer that's
+    // temporarily unreachable) must not kill the whole run-jobs process --
+    // it's meant to run unattended, and "exited silently, needs a human to
+    // notice and restart it by hand" is exactly the failure mode the
+    // stagnation-timeout logic further down already exists to avoid for a
+    // slow network. Local corruption doesn't resolve itself by retrying
+    // the same sync call, but it's not this process's job to fix that --
+    // just to not die while waiting for someone/something else to. Once
+    // the store is recovered externally, this picks back up on its own.
+    int rc;
+    int initial_sync_attempts = 0;
+    while (true) {
+        rc = syncWorkdir(argv0, workdir, *peer);
+        if (rc == 0) break;
+        ++initial_sync_attempts;
+        state["status"] = "syncing";
         state["updated_at"] = nowSeconds();
-        state["last_result"] = "sync-before-mine-failed";
-        writeMineState(workdir, state);
-        return rc;
+        state["last_result"] = "initial-sync-failed-retrying";
+        writeMineStateBestEffort(workdir, state);
+        primechain::log::warn("Sync", "Initial sync failed, retrying")
+            .field("attempt", initial_sync_attempts);
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            std::min<long long>(30000, 1000LL * initial_sync_attempts)));
     }
 
     auto local = loadLocalStatus(chainPath(workdir));
@@ -5537,7 +5595,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
         state["status"] = "complete";
         state["updated_at"] = nowSeconds();
         state["last_result"] = "already-at-target";
-        if (!writeMineState(workdir, state)) return 1;
+        writeMineStateBestEffort(workdir, state);
         std::cout << "JOB_COMPLETE target=" << *target << " frontier=" << local.frontier << "\n";
         return 0;
     }
@@ -5545,7 +5603,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
     state["status"] = "running";
     state["updated_at"] = nowSeconds();
     state["last_result"] = "mining";
-    if (!writeMineState(workdir, state)) return 1;
+    writeMineStateBestEffort(workdir, state);
 
     int stagnant_attempts = 0;
     constexpr int kMaxStagnantAttempts = 30;
@@ -5589,13 +5647,19 @@ int runJobs(const char* argv0, int argc, char** argv) {
         if (parallel_probes != state.end() && parallel_probes->second == "1") {
             miner_args.push_back("--parallel-probes");
         }
+        // primechain::log::verbose() is per-process state -- the frontier
+        // miner runs as a separate subprocess, so it needs its own
+        // --verbose to honor the same setting rather than inheriting ours.
+        if (primechain::log::verbose()) {
+            miner_args.push_back("--verbose");
+        }
         rc = runTool(argv0, "primechain-frontier-miner", miner_args);
         if (rc == 0) break;
 
         state["status"] = "syncing";
         state["updated_at"] = nowSeconds();
         state["last_result"] = "syncing-after-stale-miner";
-        if (!writeMineState(workdir, state)) return 1;
+        writeMineStateBestEffort(workdir, state);
         const int sync_rc = syncWorkdir(argv0, workdir, *peer);
         local = loadLocalStatus(chainPath(workdir));
         state["last_synced_frontier"] = std::to_string(local.frontier);
@@ -5603,17 +5667,19 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["status"] = "syncing";
             state["updated_at"] = nowSeconds();
             state["last_result"] = "waiting-for-race-winner";
-            if (!writeMineState(workdir, state)) return 1;
-            std::cout << "WAITING_FOR_RACE_WINNER frontier=" << before_mine.frontier
-                      << " target=" << *target << "\n";
+            writeMineStateBestEffort(workdir, state);
+            primechain::log::info("Miner", "Waiting for race winner")
+                .field("frontier", before_mine.frontier)
+                .field("target", *target);
             auto advanced = waitForFrontierAdvance(
                 argv0, workdir, *peer, before_mine.frontier, *target);
             if (!advanced.has_value()) {
                 state["last_result"] = "retrying-local-miner-after-race-wait";
                 state["updated_at"] = nowSeconds();
-                if (!writeMineState(workdir, state)) return 1;
-                std::cout << "RACE_WAIT_TIMEOUT_RETRY frontier=" << before_mine.frontier
-                          << " target=" << *target << "\n";
+                writeMineStateBestEffort(workdir, state);
+                primechain::log::warn("Miner", "Race wait timed out, retrying")
+                    .field("frontier", before_mine.frontier)
+                    .field("target", *target);
             }
             if (advanced.has_value()) {
                 local = *advanced;
@@ -5635,16 +5701,17 @@ int runJobs(const char* argv0, int argc, char** argv) {
                 state["updated_at"] = nowSeconds();
                 state["last_result"] =
                     sync_failure_cap_hit ? "sync-after-miner-failed" : "stagnant-timeout";
-                writeMineState(workdir, state);
+                writeMineStateBestEffort(workdir, state);
                 return rc;
             }
             state["status"] = "running";
             state["updated_at"] = nowSeconds();
             state["last_result"] = sync_rc != 0 ? "retrying-after-sync-failure" : "retrying-after-stalled-race";
-            if (!writeMineState(workdir, state)) return 1;
-            std::cout << "RETRYING_LOCAL_MINER attempt=" << stagnant_attempts
-                      << " frontier=" << local.frontier
-                      << " target=" << *target << "\n";
+            writeMineStateBestEffort(workdir, state);
+            primechain::log::info("Miner", "Retrying local miner")
+                .field("attempt", stagnant_attempts)
+                .field("frontier", local.frontier)
+                .field("target", *target);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
@@ -5654,31 +5721,43 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["status"] = "complete";
             state["updated_at"] = nowSeconds();
             state["last_result"] = "complete-after-stale-miner";
-            if (!writeMineState(workdir, state)) return 1;
+            writeMineStateBestEffort(workdir, state);
             std::cout << "JOB_COMPLETE target=" << *target << " frontier=" << local.frontier << "\n";
             return 0;
         }
         state["status"] = "running";
         state["updated_at"] = nowSeconds();
         state["last_result"] = "continuing-after-race-progress";
-        if (!writeMineState(workdir, state)) return 1;
+        writeMineStateBestEffort(workdir, state);
     }
 
     state["status"] = "syncing";
     state["updated_at"] = nowSeconds();
     state["last_result"] = "syncing-after-mine";
-    if (!writeMineState(workdir, state)) return 1;
+    writeMineStateBestEffort(workdir, state);
 
-    rc = syncWorkdir(argv0, workdir, *peer);
+    // Same reasoning as the initial sync above: the miner subprocess just
+    // finished cleanly (it only reached this point via the loop's `break`),
+    // so a final-sync failure here is exactly as likely to be transient/
+    // externally-recoverable local corruption as the initial one was, and
+    // exiting the whole process over it is just as wrong.
+    int final_sync_attempts = 0;
+    while (true) {
+        rc = syncWorkdir(argv0, workdir, *peer);
+        if (rc == 0) break;
+        ++final_sync_attempts;
+        state["status"] = "syncing";
+        state["updated_at"] = nowSeconds();
+        state["last_result"] = "sync-after-mine-failed-retrying";
+        writeMineStateBestEffort(workdir, state);
+        primechain::log::warn("Sync", "Post-mine sync failed, retrying")
+            .field("attempt", final_sync_attempts);
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            std::min<long long>(30000, 1000LL * final_sync_attempts)));
+    }
     local = loadLocalStatus(chainPath(workdir));
     state["last_synced_frontier"] = std::to_string(local.frontier);
     state["updated_at"] = nowSeconds();
-    if (rc != 0) {
-        state["status"] = "failed";
-        state["last_result"] = "sync-after-mine-failed";
-        writeMineState(workdir, state);
-        return rc;
-    }
     if (local.frontier >= *target) {
         state["status"] = "complete";
         state["last_result"] = "complete";
@@ -5686,7 +5765,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
         state["status"] = "pending";
         state["last_result"] = "frontier-below-target";
     }
-    if (!writeMineState(workdir, state)) return 1;
+    writeMineStateBestEffort(workdir, state);
     std::cout << (local.frontier >= *target ? "JOB_COMPLETE" : "JOB_PENDING")
               << " target=" << *target << " frontier=" << local.frontier << "\n";
     return local.frontier >= *target ? 0 : 1;
