@@ -43,8 +43,8 @@ echo "$advance_out"
 echo "$advance_out" | grep -q '^ADVANCED .* included_txs=1 frontier=20$'
 
 "$client" init-workdir "$base/work" 127.0.0.1 19320 > "$base/init.out"
-"$client" sync-peer "$base/work" > "$base/sync.out"
-grep -q '^SYNCED 2 20$' "$base/sync.out"
+"$client" sync-peer "$base/work" > "$base/sync.out" 2>&1
+grep -qE 'Synced.*start=2 end=20$' "$base/sync.out"
 
 # Fresh index: full build from scratch (no checkpoint yet).
 update_out=$("$client" update-address-index "$base/work")

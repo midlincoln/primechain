@@ -154,4 +154,24 @@ inline Entry error(std::string component, std::string message) {
     return Entry(Level::Error, std::move(component), std::move(message));
 }
 
+// A visual break for the start of a long-running unattended session (e.g.
+// run-jobs), so scrolling back through hours of interleaved log output --
+// possibly from more than one invocation in the same terminal/log file --
+// makes it obvious where a given run actually began:
+//
+//   ================================================================
+//     MINING STARTED   workdir=/path/to/workdir  target=999999999
+//   ================================================================
+//
+// Stderr, like everything else in this facility. Title is short/plain
+// (e.g. "MINING STARTED"); fields is pre-joined "key=value key=value" text
+// (build it the same way Entry::field does, or just interpolate directly).
+inline void banner(const std::string& title, const std::string& fields = "") {
+    constexpr std::size_t kWidth = 64;
+    const std::string rule(kWidth, '=');
+    std::cerr << rule << "\n  " << title;
+    if (!fields.empty()) std::cerr << "   " << fields;
+    std::cerr << "\n" << rule << "\n";
+}
+
 }  // namespace primechain::log

@@ -35,8 +35,8 @@ composite_addr=$("$wallet" address "$base/work/wallets/composite.wallet")
 echo $! > "$base/server.pid"
 sleep 0.3
 
-"$client" sync-peer "$base/work" > "$base/sync.out"
-grep -q '^SYNCED 2 8$' "$base/sync.out"
+"$client" sync-peer "$base/work" > "$base/sync.out" 2>&1
+grep -qE 'Synced.*start=2 end=8$' "$base/sync.out"
 
 # Fresh reward index: full build from scratch. The seed ends on a composite
 # record with no following prime record yet, so it should land with an

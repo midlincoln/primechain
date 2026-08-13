@@ -5399,7 +5399,11 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
         chainPath(workdir),
     });
     if (rc != 0) return rc;
-    std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
+    // Moved to the structured (stderr) facility, unlike SYNC_UP_TO_DATE's
+    // sibling case above this isn't test-format-frozen on its own -- but
+    // tests that grep for this event capture combined output (2>&1) and
+    // match on the start=/end= fields rather than the exact old text.
+    primechain::log::info("Sync", "Synced").field("start", start).field("end", remote.frontier);
     return 0;
 }
 
@@ -5536,6 +5540,8 @@ int runJobs(const char* argv0, int argc, char** argv) {
     if (verbose != state.end() && verbose->second == "1") {
         primechain::log::setVerbose(true);
     }
+    primechain::log::banner(
+        "MINING STARTED", "workdir=" + workdir + " target=" + std::to_string(*target));
 
     if (state.find("started_at") == state.end()) state["started_at"] = nowSeconds();
     state["status"] = "syncing";
