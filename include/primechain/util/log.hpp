@@ -59,9 +59,16 @@ constexpr std::size_t kLevelWidth = 8;      // "[INFO]  ", "[WARN]  ", "[ERROR] 
 constexpr std::size_t kComponentWidth = 9;  // "Storage  ", "Sync     ", ...
 constexpr std::size_t kMessageWidth = 24;   // "Response timeout        "
 
+// Pads to `width`, but always appends at least one trailing space even
+// when `text` is already at or past `width` -- otherwise a message that
+// doesn't fit the usual column (e.g. a longer message kept verbatim for
+// backward-compatible substring matching elsewhere) runs directly into
+// whatever follows with zero separation.
 inline std::string padRight(std::string text, std::size_t width) {
     if (text.size() < width) {
         text.append(width - text.size(), ' ');
+    } else {
+        text.push_back(' ');
     }
     return text;
 }
