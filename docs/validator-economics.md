@@ -23,10 +23,10 @@ A prime record has no composite commit phase, so `commit_phase_votes=0` is expec
 Validator quorum is formula-based, not hardcoded to two of three:
 
 ```text
-required_quorum = floor(2n / 3) + 1
+required_quorum = ceil(2n / 3)
 ```
 
-For three active validators this requires three votes. For larger validator sets, the same formula applies. The network should never rely on string literals such as `2-of-3` as the authority for current quorum policy; replay and consensus code decide quorum from the active validator set size.
+The implementation computes this as integer arithmetic equivalent to `(2n + 2) / 3`. For the current three-validator launch network, this requires two votes. For larger validator sets, the same formula applies. The network should never rely on string literals such as `2-of-3` as the authority for current quorum policy; replay and consensus code decide quorum from the active validator set size.
 
 ## Validator Admission
 
