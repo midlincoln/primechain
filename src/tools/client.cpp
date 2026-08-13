@@ -27,6 +27,7 @@
 #include "primechain/protocol/records.hpp"
 #include "primechain/protocol/validator_governance.hpp"
 #include "primechain/storage/record_store.hpp"
+#include "primechain/util/log.hpp"
 #include "primechain/version.hpp"
 #include "primechain/wallet/miner_identity.hpp"
 
@@ -5380,7 +5381,14 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
     const auto& remote = remote_peer->second;
     const primechain::PrimeValue start = local.has_genesis ? local.frontier + 1 : 2;
     if (remote.frontier < start) {
-        std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
+        // Nothing external greps this exact text (verified: primechain-ops
+        // only checks sync-peer's exit code, never its stdout content), so
+        // unlike SYNCED below this is free to move to the structured
+        // facility. This is also the line run-jobs' polling loop prints
+        // every single time it checks and finds nothing new -- the
+        // single most repeated line in a typical session -- so tagging it
+        // verboseOnly() keeps the default view to actual state changes.
+        primechain::log::info("Sync", "Up to date").field("frontier", local.frontier).verboseOnly();
         return 0;
     }
     const int rc = runTool(argv0, "primechain-sync-download", {
@@ -5391,7 +5399,11 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
         chainPath(workdir),
     });
     if (rc != 0) return rc;
-    std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
+    // Moved to the structured (stderr) facility, unlike SYNC_UP_TO_DATE's
+    // sibling case above this isn't test-format-frozen on its own -- but
+    // tests that grep for this event capture combined output (2>&1) and
+    // match on the start=/end= fields rather than the exact old text.
+    primechain::log::info("Sync", "Synced").field("start", start).field("end", remote.frontier);
     return 0;
 }
 
@@ -5460,13 +5472,20 @@ int jobStatus(int argc, char** argv) {
 }
 
 int addMineJob(int argc, char** argv) {
-    if ((argc != 5 && argc != 6) || std::string(argv[3]) != "--target") return 1;
+    if (argc < 5 || std::string(argv[3]) != "--target") return 1;
     const std::string workdir = argv[2];
     const std::string target = argv[4];
     bool parallel_probes = false;
-    if (argc == 6) {
-        if (std::string(argv[5]) != "--parallel-probes") return 1;
-        parallel_probes = true;
+    bool verbose = false;
+    for (int i = 5; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--parallel-probes") {
+            parallel_probes = true;
+        } else if (option == "--verbose") {
+            verbose = true;
+        } else {
+            return 1;
+        }
     }
     if (!ensureWorkdirLayout(workdir)) return 1;
     std::map<std::string, std::string> state;
@@ -5476,13 +5495,15 @@ int addMineJob(int argc, char** argv) {
     state["updated_at"] = state["created_at"];
     state["last_result"] = "created";
     if (parallel_probes) state["parallel_probes"] = "1";
+    if (verbose) state["verbose"] = "1";
     if (!writeMineState(workdir, state)) return 1;
     // Existing tests match this line's target=<N> as the exact end of
     // string (e.g. "target=6$") -- keep that case byte-for-byte
-    // unchanged and only append anything when the new flag is actually
+    // unchanged and only append anything when a new flag is actually
     // set, so the common/default path stays compatible.
     std::cout << "MINE_JOB_ADDED " << workdir << " target=" << target;
     if (parallel_probes) std::cout << " parallel_probes=1";
+    if (verbose) std::cout << " verbose=1";
     std::cout << "\n";
     return 0;
 }
@@ -5515,6 +5536,12 @@ int runJobs(const char* argv0, int argc, char** argv) {
         std::cerr << "no mine job configured; run add-mine-job first\n";
         return 1;
     }
+    const auto verbose = state.find("verbose");
+    if (verbose != state.end() && verbose->second == "1") {
+        primechain::log::setVerbose(true);
+    }
+    primechain::log::banner(
+        "MINING STARTED", "workdir=" + workdir + " target=" + std::to_string(*target));
 
     if (state.find("started_at") == state.end()) state["started_at"] = nowSeconds();
     state["status"] = "syncing";
@@ -5589,6 +5616,12 @@ int runJobs(const char* argv0, int argc, char** argv) {
         if (parallel_probes != state.end() && parallel_probes->second == "1") {
             miner_args.push_back("--parallel-probes");
         }
+        // primechain::log::verbose() is per-process state -- the frontier
+        // miner runs as a separate subprocess, so it needs its own
+        // --verbose to honor the same setting rather than inheriting ours.
+        if (primechain::log::verbose()) {
+            miner_args.push_back("--verbose");
+        }
         rc = runTool(argv0, "primechain-frontier-miner", miner_args);
         if (rc == 0) break;
 
@@ -5604,16 +5637,18 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["updated_at"] = nowSeconds();
             state["last_result"] = "waiting-for-race-winner";
             if (!writeMineState(workdir, state)) return 1;
-            std::cout << "WAITING_FOR_RACE_WINNER frontier=" << before_mine.frontier
-                      << " target=" << *target << "\n";
+            primechain::log::info("Miner", "Waiting for race winner")
+                .field("frontier", before_mine.frontier)
+                .field("target", *target);
             auto advanced = waitForFrontierAdvance(
                 argv0, workdir, *peer, before_mine.frontier, *target);
             if (!advanced.has_value()) {
                 state["last_result"] = "retrying-local-miner-after-race-wait";
                 state["updated_at"] = nowSeconds();
                 if (!writeMineState(workdir, state)) return 1;
-                std::cout << "RACE_WAIT_TIMEOUT_RETRY frontier=" << before_mine.frontier
-                          << " target=" << *target << "\n";
+                primechain::log::warn("Miner", "Race wait timed out, retrying")
+                    .field("frontier", before_mine.frontier)
+                    .field("target", *target);
             }
             if (advanced.has_value()) {
                 local = *advanced;
@@ -5642,9 +5677,10 @@ int runJobs(const char* argv0, int argc, char** argv) {
             state["updated_at"] = nowSeconds();
             state["last_result"] = sync_rc != 0 ? "retrying-after-sync-failure" : "retrying-after-stalled-race";
             if (!writeMineState(workdir, state)) return 1;
-            std::cout << "RETRYING_LOCAL_MINER attempt=" << stagnant_attempts
-                      << " frontier=" << local.frontier
-                      << " target=" << *target << "\n";
+            primechain::log::info("Miner", "Retrying local miner")
+                .field("attempt", stagnant_attempts)
+                .field("frontier", local.frontier)
+                .field("target", *target);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
