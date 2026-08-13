@@ -28,6 +28,7 @@
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/storage/record_store.hpp"
 #include "primechain/types.hpp"
+#include "primechain/util/log.hpp"
 
 namespace {
 
@@ -340,9 +341,13 @@ std::optional<std::string> readRawLine(int fd) {
         const ssize_t received = recv(fd, &ch, 1, 0);
         if (received < 0 && errno == EINTR) continue;
         if (received <= 0) {
-            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                std::cerr << "read timed out waiting for node response\n";
-            }
+            // No message here: this is a low-level per-connection primitive
+            // called for every single request, so it has no idea which
+            // peer/attempt this was or whether a caller-side retry loop is
+            // even in play. Callers that know that context (e.g.
+            // freshestPeerStatus probing candidate validators) are
+            // responsible for logging a structured [WARN] line; a caller
+            // that doesn't care just sees nullopt and moves on quietly.
             return std::nullopt;
         }
         if (ch == '\n') {
@@ -689,7 +694,7 @@ std::optional<Status> getStatus(const std::string& host, int port) {
        >> status.frontier
        >> status.latest_hash;
     if (!in || tag != "STATUS") {
-        std::cerr << "unexpected status response: " << *response << "\n";
+        primechain::log::warn("RPC", "Unexpected response").field("body", *response);
         return std::nullopt;
     }
     status.has_genesis = has_genesis != 0;
@@ -737,15 +742,28 @@ std::optional<PeerStatus> freshestPeerStatus(
         }
         for (std::size_t i = 0; i < peers.size(); ++i) {
             const auto status = futures[i].get();
-            if (!status.has_value()) continue;
+            if (!status.has_value()) {
+                primechain::log::warn("RPC", "Response timeout")
+                    .field("peer", peers[i].host + ":" + std::to_string(peers[i].port))
+                    .field("attempt", std::to_string(i + 1) + "/" + std::to_string(peers.size()))
+                    .verboseOnly();
+                continue;
+            }
             if (!best.has_value() || status->frontier > best->status.frontier) {
                 best = PeerStatus{peers[i], *status};
             }
         }
     } else {
-        for (const auto& peer : peers) {
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            const auto& peer = peers[i];
             const auto status = getStatus(peer.host, peer.port);
-            if (!status.has_value()) continue;
+            if (!status.has_value()) {
+                primechain::log::warn("RPC", "Response timeout")
+                    .field("peer", peer.host + ":" + std::to_string(peer.port))
+                    .field("attempt", std::to_string(i + 1) + "/" + std::to_string(peers.size()))
+                    .verboseOnly();
+                continue;
+            }
             if (!best.has_value() || status->frontier > best->status.frontier) {
                 best = PeerStatus{peer, *status};
             }
@@ -986,9 +1004,12 @@ void warmQuorumCommitments(
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...] [--parallel-probes]\n"
+              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...] [--parallel-probes] [--verbose]\n"
               << "legacy development: " << argv0
-              << " [host] [port] [limit] [prime_miner] [composite_miner]\n";
+              << " [host] [port] [limit] [prime_miner] [composite_miner]\n"
+              << "  --verbose  also print per-attempt diagnostic chatter (e.g. every\n"
+              << "             individual RPC timeout while probing candidate validators)\n"
+              << "             that's normally collapsed into just the outcome\n";
 }
 
 } // namespace
@@ -1021,6 +1042,8 @@ int main(int argc, char** argv) {
             pending_composite_path = argv[argument++];
         } else if (option == "--parallel-probes") {
             parallel_probes = true;
+        } else if (option == "--verbose") {
+            primechain::log::setVerbose(true);
         } else if (option == "--validator-endpoint") {
             if (argument + 1 >= argc) { printUsage(argv[0]); return 1; }
             PeerEndpoint peer;
@@ -1065,28 +1088,61 @@ int main(int argc, char** argv) {
     }
     std::size_t submitted = 0;
     std::map<primechain::PrimeValue, std::size_t> retry_counts;
+    std::optional<primechain::PrimeValue> last_seen_frontier;
+    // True right after this process's own submission just advanced the
+    // frontier by one, so the next loop iteration's "the frontier moved"
+    // check knows to stay quiet about it -- that's just normal forward
+    // progress, not the "someone else won the integer we were mining"
+    // event the line exists to report.
+    bool previous_submission_ok = false;
 
     while (true) {
         const auto peer_status = freshestPeerStatus(host, port, configured_validator_endpoints, parallel_probes);
         if (!peer_status.has_value()) {
-            std::cerr << "could not query any validator status\n";
+            primechain::log::error("RPC", "No reachable validator");
             return 1;
         }
         const auto active_peer = peer_status->peer;
         const auto status = peer_status->status;
         const primechain::PrimeValue effective_frontier =
             status.has_genesis ? status.frontier : 2;
+        // Only worth a line when the frontier actually moved since the last
+        // time we checked -- that's a real event (someone else won a race,
+        // or our own submission landed). Re-confirming the same frontier on
+        // every poll is exactly the kind of repeat noise this format is
+        // trying to avoid.
+        const bool frontier_advanced_by_our_own_submission =
+            previous_submission_ok && last_seen_frontier.has_value() &&
+            effective_frontier == *last_seen_frontier + 1;
+        if (last_seen_frontier.has_value() && *last_seen_frontier != effective_frontier &&
+            !frontier_advanced_by_our_own_submission) {
+            primechain::log::info("Miner", "Frontier changed")
+                .field("old", *last_seen_frontier)
+                .field("new", effective_frontier)
+                .field("action", "restart");
+        }
+        last_seen_frontier = effective_frontier;
+        previous_submission_ok = false;
         if (effective_frontier >= limit) {
+            // Stdout, unchanged: this exact "frontier miner complete
+            // frontier=N submitted=M" text is a stable machine-readable
+            // marker that CMakeLists.txt tests grep verbatim out of a raw
+            // pipe (no 2>&1) -- do not restructure it or move it to the
+            // new log:: facility, which is stderr-only by design.
             std::cout << "frontier miner complete frontier=" << effective_frontier
                       << " submitted=" << submitted << "\n";
             return 0;
         }
 
         if (status.has_genesis && proof_store_frontier.has_value() && effective_frontier > *proof_store_frontier) {
-            std::cerr << "local proof store behind validator frontier; sync required"
-                      << " local_frontier=" << *proof_store_frontier
-                      << " validator=" << active_peer.host << ":" << active_peer.port
-                      << " validator_frontier=" << effective_frontier << "\n";
+            // Message text intentionally keeps the original wording
+            // ("local proof store behind validator frontier") verbatim --
+            // tests/composite_lottery_two_client_bypass.sh greps for that
+            // exact substring in the combined (2>&1) log output.
+            primechain::log::error("Sync", "local proof store behind validator frontier; sync required")
+                .field("local", *proof_store_frontier)
+                .field("validator", active_peer.host + ":" + std::to_string(active_peer.port))
+                .field("validator_frontier", effective_frontier);
             return 1;
         }
 
@@ -1094,12 +1150,54 @@ int main(int argc, char** argv) {
         auto retryCurrentInteger = [&](const std::string& reason) -> bool {
             auto& attempts = retry_counts[next];
             if (attempts >= 5) {
-                std::cerr << "retry limit reached for " << next << ": " << reason << "\n";
+                primechain::log::error("Miner", "Retry limit reached")
+                    .field("height", next)
+                    .field("reason", reason);
                 return false;
             }
             ++attempts;
-            std::cerr << "frontier changed while mining " << next << "; retrying: "
-                      << reason << "\n";
+            const std::string attempt_field = std::to_string(attempts) + "/5";
+            // The old version of this line printed every one of these
+            // distinct situations through the same generic "frontier
+            // changed while mining N; retrying: <reason>" text, whatever
+            // the reason actually was -- including cases (a dropped
+            // connection mid-submit) that have nothing to do with the
+            // frontier at all. Split by what actually happened instead so
+            // "our connection dropped" and "the frontier moved out from
+            // under us" read as the two different events they are; the
+            // latter gets its own dedicated line up above, keyed off an
+            // observed frontier change rather than being inferred from
+            // this reason string.
+            static const std::string kSubmitClosed = "node closed connection while submitting";
+            static const std::string kCommitClosed = "node closed connection while committing";
+            static const std::string kWonBy = "commit phase already won by ";
+            static const std::string kClosingOn = "commit phase is closing on ";
+            if (reason == kSubmitClosed) {
+                primechain::log::warn("Submit", "Connection closed")
+                    .field("height", next)
+                    .field("attempt", attempt_field);
+            } else if (reason == kCommitClosed) {
+                primechain::log::warn("Commit", "Connection closed")
+                    .field("height", next)
+                    .field("attempt", attempt_field);
+            } else if (reason.rfind(kWonBy, 0) == 0) {
+                primechain::log::info("Miner", "Commit phase lost")
+                    .field("winner", reason.substr(kWonBy.size()))
+                    .field("height", next);
+            } else if (reason.rfind(kClosingOn, 0) == 0) {
+                primechain::log::info("Miner", "Commit phase closing")
+                    .field("peer", reason.substr(kClosingOn.size()))
+                    .field("height", next);
+            } else {
+                // Node-side rejection text (e.g. "ERROR SUBMIT_SIGNED_REVEAL
+                // must target next integer ..."): keep it verbatim in a
+                // field rather than trying to further classify it, so
+                // nothing gets lost.
+                primechain::log::info("Miner", "Retrying")
+                    .field("height", next)
+                    .field("attempt", attempt_field)
+                    .field("reason", reason);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             return true;
         };
@@ -1266,6 +1364,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         retry_counts.erase(next);
+        previous_submission_ok = true;
         if (commit_request.has_value()) {
             clearPendingComposite(pending_composite_path);
         }
