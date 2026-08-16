@@ -504,6 +504,21 @@ std::optional<primechain::storage::StoredRecordKind> parseKind(const std::string
     return std::nullopt;
 }
 
+
+std::optional<primechain::Hash256> canonicalRecordHashFromPayload(
+    primechain::storage::StoredRecordKind kind,
+    const std::vector<std::uint8_t>& payload) {
+    std::string error;
+    if (kind == primechain::storage::StoredRecordKind::Composite) {
+        auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return primechain::protocol::canonicalStoredRecordHash(*record);
+    }
+    auto record = primechain::protocol::deserializePrimeRecord(payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return primechain::protocol::canonicalStoredRecordHash(*record);
+}
+
 std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::string& line) {
     std::istringstream in(line);
     std::string tag;
@@ -523,7 +538,11 @@ std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::stri
     if (!kind.has_value() || !hash.has_value() || payload.empty()) {
         return std::nullopt;
     }
-    if (payload.size() != payload_size || primechain::crypto::sha3_256(payload) != *hash) {
+    if (payload.size() != payload_size) {
+        return std::nullopt;
+    }
+    const auto canonical_hash = canonicalRecordHashFromPayload(*kind, payload);
+    if (!canonical_hash.has_value() || *canonical_hash != *hash) {
         return std::nullopt;
     }
 
@@ -592,11 +611,17 @@ std::optional<primechain::Hash256> recordSubjectHashWithoutFinalization(
     if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
         const auto decoded = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
         if (!decoded.has_value()) return std::nullopt;
+        if (decoded->version >= primechain::node::kSubjectHashRecordVersion) {
+            return primechain::protocol::subjectRecordHash(*decoded);
+        }
         return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*decoded);
     }
 
     const auto decoded = primechain::protocol::deserializePrimeRecord(stored.payload, error);
     if (!decoded.has_value()) return std::nullopt;
+    if (decoded->version >= primechain::node::kSubjectHashRecordVersion) {
+        return primechain::protocol::subjectRecordHash(*decoded);
+    }
     return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*decoded);
 }
 
@@ -671,10 +696,16 @@ std::optional<primechain::Hash256> subjectHashFromCandidatePayload(
     if (kind == primechain::storage::StoredRecordKind::Prime) {
         const auto record = primechain::protocol::deserializePrimeRecord(payload, error);
         if (!record.has_value()) return std::nullopt;
+        if (record->version >= primechain::node::kSubjectHashRecordVersion) {
+            return primechain::protocol::subjectRecordHash(*record);
+        }
         return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record);
     }
     const auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
     if (!record.has_value()) return std::nullopt;
+    if (record->version >= primechain::node::kSubjectHashRecordVersion) {
+        return primechain::protocol::subjectRecordHash(*record);
+    }
     return primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record);
 }
 
@@ -3414,9 +3445,11 @@ private:
             if (!record.has_value()) return false;
             proof = record->finalized_by;
             previous_hash = record->previous_record_hash;
-            candidate_hash = record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
-                ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
-                : primechain::protocol::candidateRecordHash(*record);
+            candidate_hash = record->version >= primechain::node::kSubjectHashRecordVersion
+                ? primechain::protocol::subjectRecordHash(*record)
+                : (record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
+                    ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
+                    : primechain::protocol::candidateRecordHash(*record));
             integer = record->integer;
         } else {
             const auto record = primechain::protocol::deserializePrimeRecord(
@@ -3425,9 +3458,11 @@ private:
             if (record->height == 0) return true;
             proof = record->finalized_by;
             previous_hash = record->previous_record_hash;
-            candidate_hash = record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
-                ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
-                : primechain::protocol::candidateRecordHash(*record);
+            candidate_hash = record->version >= primechain::node::kSubjectHashRecordVersion
+                ? primechain::protocol::subjectRecordHash(*record)
+                : (record->finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4"
+                    ? primechain::protocol::legacyCandidateRecordHashWithoutFinalization(*record)
+                    : primechain::protocol::candidateRecordHash(*record));
             integer = record->integer;
         }
 
@@ -3480,18 +3515,6 @@ private:
             writeAll(fd, "ERROR invalid quorum record: " + error + "\n");
             return;
         }
-        error.clear();
-        const auto submitted_provider = recordProviderAddress(*submitted, error);
-        if (!submitted_provider.has_value()) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-        error.clear();
-        if (!providerCooldownSatisfied(store_, node, *submitted_provider, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-
         error.clear();
         if (!appendStoredRecord(node, *submitted, error)) {
             writeAll(fd, "ERROR could not append submitted record: " + error + "\n");
@@ -4003,7 +4026,12 @@ private:
             if (!record.has_value()) return false;
             proof = record->finalized_by;
             if (!record->finalized_by.votes.empty()) { error = "candidate finalization votes must be empty"; return false; }
-            if (!node.validateCompositeCandidate(*record, error)) return false;
+            auto validation_record = *record;
+            if (validation_record.version >= primechain::node::kSubjectHashRecordVersion) {
+                validation_record.version = primechain::node::kDirectCompositeRecordVersion;
+                validation_record.composite_lottery = {};
+            }
+            if (!node.validateCompositeCandidate(validation_record, error)) return false;
             integer = record->integer;
             previous_hash = record->previous_record_hash;
             candidate_hash = primechain::protocol::candidateRecordHash(*record);
@@ -4780,6 +4808,16 @@ private:
             return true;
         };
 
+        auto ensure_lottery_after_recovery = [&]() -> bool {
+            if constexpr (std::is_same_v<Record, primechain::protocol::CompositeRecordV0>) {
+                if (record.version >= primechain::node::kSubjectHashRecordVersion &&
+                    record.composite_lottery.round == 0) {
+                    return ensureCompositeLottery(record, error);
+                }
+            }
+            return true;
+        };
+
         if (round == 1) {
             record.finalized_by.rule = "fixed-2-of-3-mldsa65-v2";
             record.finalized_by.round_changes.clear();
@@ -4787,7 +4825,7 @@ private:
             record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
             record.finalized_by.round_changes = certifiedRoundChanges(record.integer, round);
             record.finalized_by.votes.clear();
-            if (!apply_highest_lock(round)) return false;
+            if (!apply_highest_lock(round) || !ensure_lottery_after_recovery()) return false;
         }
         if (collectFinalizationVotes(record, kind, round, error)) return true;
         if (finalization_timeout_ms_ <= 0) return false;
@@ -4818,7 +4856,7 @@ private:
             record.finalized_by.rule = "fixed-2-of-3-mldsa65-rounds-locks-v4";
             record.finalized_by.round_changes = certifiedRoundChanges(record.integer, next_round);
             record.finalized_by.votes.clear();
-            if (!apply_highest_lock(next_round)) return false;
+            if (!apply_highest_lock(next_round) || !ensure_lottery_after_recovery()) return false;
             std::string round_error;
             if (collectFinalizationVotes(record, kind, next_round, round_error)) return true;
             if (!round_error.empty()) error = round_error;
@@ -6733,9 +6771,10 @@ private:
             }
             observed_round = state.round;
             if (state.decided) {
-                if (state.winning_candidate_hash == candidate_hash) return true;
-                error = "composite lottery selected a different candidate";
-                return false;
+                if (state.winning_candidate_hash != candidate_hash) {
+                    error = "composite lottery selected a different candidate";
+                    return false;
+                }
             }
             observed_round = state.round;
             if (state.candidates.size() >= kMaxCompositeLotteryCandidates &&
@@ -7033,7 +7072,7 @@ private:
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempoolSnapshot();
         record.transactions = included_transactions;
         if (quorumEnabled()) {
-            record.version = primechain::node::kDirectCompositeRecordVersion;
+            record.version = primechain::node::kSubjectHashRecordVersion;
             auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
             if (validator_epoch.epoch != 0) {
                 record.version = std::max<std::uint64_t>(record.version, 2);
@@ -7061,11 +7100,6 @@ private:
             }
             primechain::protocol::updateTransactionBatch(record);
             error.clear();
-            if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
-            error.clear();
             if (!ensureCompositeLottery(record, error)) {
                 writeAll(fd, "ERROR " + error + "\n");
                 return;
@@ -7092,11 +7126,11 @@ private:
             primechain::protocol::applyDevelopmentFinalization(record);
         } else {
             primechain::protocol::updateTransactionBatch(record);
-        }
-        error.clear();
-        if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
+            error.clear();
+            if (!ensureCompositeLottery(record, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
         }
         error.clear();
         if (!node.appendComposite(record, error)) {
@@ -7297,7 +7331,7 @@ private:
             node.status(), proof.p, proof, provider_address, authentication);
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempoolSnapshot();
         record.transactions = included_transactions;
-        if (quorumEnabled()) record.version = primechain::node::kValidatorRewardRecordVersion;
+        if (quorumEnabled()) record.version = primechain::node::kSubjectHashRecordVersion;
         auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
         if (validator_epoch.epoch != 0) {
             record.version = std::max<std::uint64_t>(record.version, 2);
@@ -7325,11 +7359,6 @@ private:
         }
         if (quorumEnabled()) {
             primechain::protocol::updateTransactionBatch(record);
-            error.clear();
-            if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
             if (!finalizeRecordCandidate(
                     record, primechain::storage::StoredRecordKind::Prime, error)) {
                 std::string sync_error;
@@ -7345,11 +7374,6 @@ private:
             primechain::protocol::applyDevelopmentFinalization(record);
         } else {
             primechain::protocol::updateTransactionBatch(record);
-        }
-        error.clear();
-        if (!providerCooldownSatisfied(store_, node, record.proof.provider_address, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
         }
         error.clear();
         if (!node.appendPrime(record, error)) {

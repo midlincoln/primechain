@@ -433,6 +433,7 @@ bool verifyLegacyOpaqueFinalizationTarget(
 }
 
 primechain::Hash256 finalizationVoteTargetHash(const protocol::CompositeRecordV0& record) {
+    if (record.version >= kSubjectHashRecordVersion) return protocol::subjectRecordHash(record);
     if (record.finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
         return protocol::legacyCandidateRecordHashWithoutFinalization(record);
     }
@@ -440,6 +441,7 @@ primechain::Hash256 finalizationVoteTargetHash(const protocol::CompositeRecordV0
 }
 
 primechain::Hash256 finalizationVoteTargetHash(const protocol::PrimeRecordV0& record) {
+    if (record.version >= kSubjectHashRecordVersion) return protocol::subjectRecordHash(record);
     if (record.finalized_by.rule == "fixed-2-of-3-mldsa65-rounds-locks-v4") {
         return protocol::legacyCandidateRecordHashWithoutFinalization(record);
     }
@@ -1499,7 +1501,7 @@ bool SequentialNode::validateCommon(
 
 protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set) {
     protocol::PrimeRecordV0 record;
-    record.version = validator_set.empty() ? 0 : 1;
+    record.version = validator_set.empty() ? 0 : 11;
     record.height = 0;
     record.previous_record_hash = {};
     record.integer = 2;
@@ -1508,6 +1510,10 @@ protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& val
     record.proof.provider_address = "pcdev1_genesis";
     record.genesis_config.validator_set = validator_set;
     std::sort(record.genesis_config.validator_set.begin(), record.genesis_config.validator_set.end());
+    if (!record.genesis_config.validator_set.empty()) {
+        record.genesis_config.genesis_message =
+            "Primechain genesis, 2026-08-16: Primes are real cryptographic assets, given by nature and certified by proof. They remain irregular, pattern-rich, and without a closed formula. This chain turns prime discovery, certification, and mathematical evidence into public work and monetary value.";
+    }
     protocol::applyDevelopmentFinalization(record);
     return record;
 }

@@ -8,6 +8,7 @@
 #include "primechain/crypto/signature.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/protocol/records.hpp"
+#include "primechain/storage/record_store.hpp"
 
 namespace {
 
@@ -383,6 +384,58 @@ int main() {
         return 1;
     }
 
+    auto subject_identity_composite = composite;
+    subject_identity_composite.version = 11;
+    subject_identity_composite.finalized_by = {};
+    subject_identity_composite.composite_lottery = {};
+    updateTransactionBatch(subject_identity_composite);
+    const auto subject_identity_hash = subjectRecordHash(subject_identity_composite);
+    auto subject_identity_ab = subject_identity_composite;
+    subject_identity_ab.finalized_by.rule = "fixed-2-of-3-dev";
+    subject_identity_ab.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_a", subject_identity_hash, 1));
+    subject_identity_ab.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_b", subject_identity_hash, 1));
+    auto subject_identity_ac = subject_identity_composite;
+    subject_identity_ac.finalized_by.rule = "fixed-2-of-3-dev";
+    subject_identity_ac.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_a", subject_identity_hash, 1));
+    subject_identity_ac.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_c", subject_identity_hash, 1));
+    vote_error.clear();
+    if (!expect(verifyDevelopmentFinalization(
+                    subject_identity_ab.finalized_by, subject_identity_hash, vote_error),
+                "valid v11 subject-identity AB finalization")) {
+        std::cerr << vote_error << "\n";
+        return 1;
+    }
+    vote_error.clear();
+    if (!expect(verifyDevelopmentFinalization(
+                    subject_identity_ac.finalized_by, subject_identity_hash, vote_error),
+                "valid v11 subject-identity AC finalization")) {
+        std::cerr << vote_error << "\n";
+        return 1;
+    }
+    if (!expect(finalizedRecordHash(subject_identity_ab) != finalizedRecordHash(subject_identity_ac),
+                "v11 finalized payload hashes can differ by certificate")) {
+        return 1;
+    }
+    if (!expect(candidateRecordHash(subject_identity_ab) == subject_identity_hash &&
+                    candidateRecordHash(subject_identity_ac) == subject_identity_hash,
+                "v11 candidate hash is stable subject hash")) {
+        return 1;
+    }
+    if (!expect(canonicalStoredRecordHash(subject_identity_ab) ==
+                    canonicalStoredRecordHash(subject_identity_ac),
+                "v11 canonical stored hash ignores certificate variants")) {
+        return 1;
+    }
+    if (!expect(primechain::storage::makeStoredRecord(subject_identity_ab).record_hash ==
+                    primechain::storage::makeStoredRecord(subject_identity_ac).record_hash,
+                "v11 stored envelope hash is stable across certificate variants")) {
+        return 1;
+    }
+
     const auto prime = makePrimeRecord();
     if (!expect(candidateRecordHash(prime) == candidateRecordHash(prime), "prime candidate hash is deterministic")) {
         return 1;
@@ -445,7 +498,9 @@ int main() {
         serializePrimeRecord(anchored_genesis), genesis_error);
     if (!expect(decoded_genesis.has_value() &&
                     decoded_genesis->genesis_config.validator_set ==
-                        anchored_genesis.genesis_config.validator_set,
+                        anchored_genesis.genesis_config.validator_set &&
+                    decoded_genesis->genesis_config.genesis_message ==
+                        anchored_genesis.genesis_config.genesis_message,
                 "anchored genesis round trip")) {
         std::cerr << genesis_error << "\n";
         return 1;
@@ -458,6 +513,41 @@ int main() {
     genesis_error.clear();
     if (!expect(!verifyGenesisConfig(duplicate_genesis, genesis_error),
                 "reject duplicate genesis validator")) {
+        return 1;
+    }
+
+    auto missing_message_genesis = anchored_genesis;
+    missing_message_genesis.genesis_config.genesis_message.clear();
+    genesis_error.clear();
+    if (!expect(!verifyGenesisConfig(missing_message_genesis, genesis_error),
+                "reject message-less v11 genesis")) {
+        return 1;
+    }
+
+    auto subject_identity_prime = prime;
+    subject_identity_prime.version = 11;
+    subject_identity_prime.finalized_by = {};
+    updateTransactionBatch(subject_identity_prime);
+    const auto prime_subject_hash = subjectRecordHash(subject_identity_prime);
+    auto prime_subject_ab = subject_identity_prime;
+    prime_subject_ab.finalized_by.rule = "fixed-2-of-3-dev";
+    prime_subject_ab.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_a", prime_subject_hash, 1));
+    prime_subject_ab.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_b", prime_subject_hash, 1));
+    auto prime_subject_ac = subject_identity_prime;
+    prime_subject_ac.finalized_by.rule = "fixed-2-of-3-dev";
+    prime_subject_ac.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_a", prime_subject_hash, 1));
+    prime_subject_ac.finalized_by.votes.push_back(
+        makeDevelopmentVote("pcdev1_validator_c", prime_subject_hash, 1));
+    if (!expect(finalizedRecordHash(prime_subject_ab) != finalizedRecordHash(prime_subject_ac),
+                "v11 prime finalized payload hashes can differ by certificate")) {
+        return 1;
+    }
+    if (!expect(canonicalStoredRecordHash(prime_subject_ab) ==
+                    canonicalStoredRecordHash(prime_subject_ac),
+                "v11 prime canonical stored hash ignores certificate variants")) {
         return 1;
     }
 

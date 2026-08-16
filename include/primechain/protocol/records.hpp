@@ -128,6 +128,7 @@ struct CompositeLotteryProofV1 {
 
 struct GenesisConfigV1 {
     std::vector<Address> validator_set;
+    std::string genesis_message;
 };
 
 struct ValidatorEpochVoteV1 {
@@ -256,6 +257,10 @@ bool verifyCompositeLotteryProof(
     const CompositeRecordV0& record,
     const std::vector<Address>& validator_set,
     std::string& error);
+Hash256 subjectRecordHash(const CompositeRecordV0& record);
+Hash256 subjectRecordHash(const PrimeRecordV0& record);
+Hash256 canonicalStoredRecordHash(const CompositeRecordV0& record);
+Hash256 canonicalStoredRecordHash(const PrimeRecordV0& record);
 Hash256 candidateRecordHash(const CompositeRecordV0& record);
 Hash256 candidateRecordHash(const PrimeRecordV0& record);
 Hash256 legacyCandidateRecordHashWithoutFinalization(const CompositeRecordV0& record);

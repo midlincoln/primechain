@@ -270,7 +270,8 @@ int main(int argc, char** argv) {
     }
     error.clear();
     store.loadAll(error);
-    if (!expect(error.find("payload hash mismatch") != std::string::npos,
+    if (!expect(error.find("payload hash mismatch") != std::string::npos ||
+                    error.find("payload identity mismatch") != std::string::npos,
             "detect interior payload corruption")) return 1;
 
     std::cout << "record store tests passed\n";

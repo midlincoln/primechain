@@ -15,6 +15,8 @@ namespace primechain::protocol {
 
 namespace {
 
+constexpr std::uint64_t kGenesisMessageRecordVersion = 11;
+
 constexpr std::uint64_t kCompositeRecordTag = 1;
 constexpr std::uint64_t kPrimeRecordTag = 2;
 constexpr std::string_view kDevelopmentFinalizationRule = "fixed-2-of-3-dev";
@@ -306,9 +308,11 @@ void appendCommitPhaseCertificate(
 
 void appendGenesisConfig(
     std::vector<std::uint8_t>& out,
-    const GenesisConfigV1& config) {
+    const GenesisConfigV1& config,
+    std::uint64_t record_version) {
     appendUint64(out, config.validator_set.size());
     for (const auto& validator : config.validator_set) appendAddress(out, validator);
+    if (record_version >= kGenesisMessageRecordVersion) appendString(out, config.genesis_message);
 }
 
 void appendValidatorEpochTransition(
@@ -503,14 +507,19 @@ bool readCommitPhaseCertificate(ByteReader& reader, CommitPhaseCertificateV1& ce
     return true;
 }
 
-bool readGenesisConfig(ByteReader& reader, GenesisConfigV1& config) {
+bool readGenesisConfig(ByteReader& reader, GenesisConfigV1& config, std::uint64_t record_version) {
     std::uint64_t validator_count = 0;
     if (!reader.readUint64(validator_count) || validator_count > 16) return false;
     config.validator_set.clear();
+    config.genesis_message.clear();
     for (std::uint64_t i = 0; i < validator_count; ++i) {
         Address validator;
         if (!reader.readString(validator)) return false;
         config.validator_set.push_back(std::move(validator));
+    }
+    if (record_version >= kGenesisMessageRecordVersion &&
+        !reader.readString(config.genesis_message)) {
+        return false;
     }
     return true;
 }
@@ -767,7 +776,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
-    if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
+    if (record.height == 0) appendGenesisConfig(out, record.genesis_config, record.version);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
@@ -959,27 +968,20 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
     record.economic_policy = {};
     record.validator_applications.clear();
     record.validator_work_bindings.clear();
-    if (record.version >= 3 && !readValidatorEndpointUpdates(reader, record.validator_endpoints)) {
-        error = "truncated composite record payload";
-        return std::nullopt;
-    }
-    if (record.version >= 4 && !readEconomicPolicyUpdate(reader, record.economic_policy, record.version)) {
-        error = "truncated composite record payload";
-        return std::nullopt;
-    }
-    if (record.version >= 5 && !readValidatorApplications(reader, record.validator_applications)) {
-        error = "truncated composite record payload";
-        return std::nullopt;
-    }
-    if (record.version >= 6 && !readValidatorWorkBindings(reader, record.validator_work_bindings)) {
-        error = "truncated composite record payload";
-        return std::nullopt;
-    }
-    if (record.version >= 10 && !readCompositeLotteryProof(reader, record.composite_lottery)) {
-        error = "truncated composite record payload";
-        return std::nullopt;
-    }
-    if (!readFinalizationProof(reader, record.finalized_by)) {
+    if (record.version >= 10) {
+        if (!readValidatorEndpointUpdates(reader, record.validator_endpoints) ||
+            !readEconomicPolicyUpdate(reader, record.economic_policy, record.version) ||
+            !readValidatorApplications(reader, record.validator_applications) ||
+            !readValidatorWorkBindings(reader, record.validator_work_bindings) ||
+            !readCompositeLotteryProof(reader, record.composite_lottery) ||
+            !readFinalizationProof(reader, record.finalized_by)) {
+            error = "truncated composite record payload";
+            return std::nullopt;
+        }
+    } else if (!readOptionalMetadataAndFinalization(
+                   reader, record.version, record.validator_endpoints,
+                   record.economic_policy, record.validator_applications,
+                   record.validator_work_bindings, record.finalized_by)) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -1019,7 +1021,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
         record.validator_applications.clear();
         record.validator_work_bindings.clear();
         record.finalized_by = {};
-        if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config)) {
+        if (read_genesis_config && !readGenesisConfig(candidate_reader, record.genesis_config, record.version)) {
             return false;
         }
         if (record.version >= 2 &&
@@ -1113,7 +1115,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     appendTransactionBatch(out, record.tx_batch);
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
-    if (record.height == 0) appendGenesisConfig(out, record.genesis_config);
+    if (record.height == 0) appendGenesisConfig(out, record.genesis_config, record.version);
     if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
@@ -1130,11 +1132,33 @@ Hash256 legacyCandidateRecordHashWithoutFinalization(const PrimeRecordV0& record
     return crypto::sha3_256(serializePrimeRecordWithoutFinalization(record));
 }
 
-Hash256 compositeLotterySubjectHash(const CompositeRecordV0& record) {
+Hash256 subjectRecordHash(const CompositeRecordV0& record) {
     CompositeRecordV0 subject = record;
     subject.composite_lottery = {};
     subject.finalized_by = {};
-    return crypto::sha3_256(serializeCompositeRecordInternal(subject, false));
+    return crypto::sha3_256(serializeCompositeRecordWithoutFinalization(subject));
+}
+
+Hash256 subjectRecordHash(const PrimeRecordV0& record) {
+    PrimeRecordV0 subject = record;
+    subject.finalized_by = {};
+    return crypto::sha3_256(serializePrimeRecordWithoutFinalization(subject));
+}
+
+bool usesSubjectRecordIdentity(std::uint64_t version) {
+    return version >= kGenesisMessageRecordVersion;
+}
+
+Hash256 canonicalStoredRecordHash(const CompositeRecordV0& record) {
+    return usesSubjectRecordIdentity(record.version) ? subjectRecordHash(record) : finalizedRecordHash(record);
+}
+
+Hash256 canonicalStoredRecordHash(const PrimeRecordV0& record) {
+    return usesSubjectRecordIdentity(record.version) ? subjectRecordHash(record) : finalizedRecordHash(record);
+}
+
+Hash256 compositeLotterySubjectHash(const CompositeRecordV0& record) {
+    return subjectRecordHash(record);
 }
 
 std::optional<Address> assignedCompositeLotteryValidator(
@@ -1167,6 +1191,13 @@ bool verifyCompositeLotteryProof(
     std::string& error) {
     if (record.version < 10) return true;
     if (record.composite_lottery.round == 0) {
+        if (record.composite_lottery.win_bps == 0 &&
+            isZeroHash(record.composite_lottery.subject_hash) &&
+            record.composite_lottery.assigned_validator.empty() &&
+            record.composite_lottery.public_key.empty() &&
+            record.composite_lottery.signature.empty()) {
+            return true;
+        }
         error = "composite lottery round must be positive";
         return false;
     }
@@ -1206,11 +1237,15 @@ bool verifyCompositeLotteryProof(
 }
 
 Hash256 candidateRecordHash(const CompositeRecordV0& record) {
-    return crypto::sha3_256(serializeCompositeRecordInternal(record, false));
+    return usesSubjectRecordIdentity(record.version)
+        ? subjectRecordHash(record)
+        : crypto::sha3_256(serializeCompositeRecordInternal(record, false));
 }
 
 Hash256 candidateRecordHash(const PrimeRecordV0& record) {
-    return crypto::sha3_256(serializePrimeRecordInternal(record, false));
+    return usesSubjectRecordIdentity(record.version)
+        ? subjectRecordHash(record)
+        : crypto::sha3_256(serializePrimeRecordInternal(record, false));
 }
 
 Hash256 finalizedRecordHash(const CompositeRecordV0& record) {
@@ -1351,8 +1386,16 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
         }
         return true;
     }
-    if (record.version != 1) {
+    if (record.version != 1 && record.version != kGenesisMessageRecordVersion) {
         error = "unsupported genesis record version";
+        return false;
+    }
+    if (record.version == 1 && !record.genesis_config.genesis_message.empty()) {
+        error = "legacy anchored genesis cannot contain a genesis message";
+        return false;
+    }
+    if (record.version == kGenesisMessageRecordVersion && record.genesis_config.genesis_message.empty()) {
+        error = "genesis message is required";
         return false;
     }
     const auto& validators = record.genesis_config.validator_set;
@@ -1599,12 +1642,16 @@ bool verifyRoundChangeCertificate(
                     auto locked = deserializePrimeRecord(change.locked_candidate_payload, candidate_error);
                     if (!locked.has_value() || locked->height == 0 || locked->previous_record_hash != previous_record_hash ||
                         locked->integer != integer) { error = "invalid locked prime candidate"; return false; }
-                    computed_hash = legacyCandidateRecordHashWithoutFinalization(*locked);
+                    computed_hash = locked->version >= kGenesisMessageRecordVersion
+                        ? subjectRecordHash(*locked)
+                        : legacyCandidateRecordHashWithoutFinalization(*locked);
                 } else {
                     auto locked = deserializeCompositeRecord(change.locked_candidate_payload, candidate_error);
                     if (!locked.has_value() || locked->previous_record_hash != previous_record_hash ||
                         locked->integer != integer) { error = "invalid locked composite candidate"; return false; }
-                    computed_hash = legacyCandidateRecordHashWithoutFinalization(*locked);
+                    computed_hash = locked->version >= kGenesisMessageRecordVersion
+                        ? subjectRecordHash(*locked)
+                        : legacyCandidateRecordHashWithoutFinalization(*locked);
                 }
                 if (computed_hash != change.locked_candidate_hash) {
                     error = "round-change lock candidate hash mismatch"; return false;

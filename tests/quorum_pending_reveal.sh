@@ -33,22 +33,32 @@ miner=$(new_miner "$base/miner.wallet")
     --validator-set "$a" "$b" "$c" \
     --validator-identities "$base/a.wallet" "$base/b.wallet" >/dev/null
 cp "$base/a.dat" "$base/b.dat"
+cp "$base/a.dat" "$base/c.dat"
 
 "$server" 19141 "$base/a.dat" \
+    --peer 127.0.0.1 19142 \
+    --peer 127.0.0.1 19143 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/a.wallet" \
     > "$base/a.log" 2>&1 &
 echo $! > "$base/a.pid"
 
 "$server" 19142 "$base/b.dat" \
+    --peer 127.0.0.1 19141 \
+    --peer 127.0.0.1 19143 \
     --validator-set "$a" "$b" "$c" \
     --validator-identity "$base/b.wallet" \
     > "$base/b.log" 2>&1 &
 echo $! > "$base/b.pid"
-sleep 0.4
 
-"$client" query 127.0.0.1 19141 ADD_PEER 127.0.0.1 19142 >/dev/null
-"$client" query 127.0.0.1 19142 ADD_PEER 127.0.0.1 19141 >/dev/null
+"$server" 19143 "$base/c.dat" \
+    --peer 127.0.0.1 19141 \
+    --peer 127.0.0.1 19142 \
+    --validator-set "$a" "$b" "$c" \
+    --validator-identity "$base/c.wallet" \
+    > "$base/c.log" 2>&1 &
+echo $! > "$base/c.pid"
+sleep 0.8
 
 reveal=$("$commitment" sign-reveal "$base/miner.wallet" 4 2 2 44)
 

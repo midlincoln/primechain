@@ -71,5 +71,5 @@ grep -q '^JOB_COMPLETE target=6 frontier=6$' "$base/run.out"
 for port in 19150 19151 19152; do
     "$client" sync 127.0.0.1 "$port" 2 6 "$base/check-$port.dat" > "$base/sync-$port.out"
     "$client" launch-report "$base/check-$port.dat" > "$base/report-$port.out"
-    grep -q '^VALIDATOR_EVIDENCE_SUMMARY active=3 ' "$base/report-$port.out"
+    grep -q '^VALIDATOR_STATE epoch=0 active_validators=3 ' "$base/report-$port.out"
 done

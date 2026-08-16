@@ -339,6 +339,9 @@ int decodeRecord(int argc, char** argv) {
     std::cout << "\n";
     std::cout << "proof_signature_bytes: " << record->proof.signature.size() << "\n";
     std::cout << "genesis_validators: " << record->genesis_config.validator_set.size() << "\n";
+    if (!record->genesis_config.genesis_message.empty()) {
+        std::cout << "genesis_message: " << record->genesis_config.genesis_message << "\n";
+    }
     printHashField("state_root", record->state_root);
     printTransactionSummary(record->tx_batch, record->transactions.size());
     printValidatorEpochSummary(record->validator_epoch);

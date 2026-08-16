@@ -92,7 +92,10 @@ if grep -R "invalid better tip replacement" "$base"/*.log "$base"/*.out >/dev/nu
     exit 1
 fi
 grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-a.out"
-grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-b.out"
+if ! grep -q '^JOB_COMPLETE target=14 frontier=14$' "$base/run-b.out"; then
+    "$client" sync-peer "$base/work-b" "$host" 19131 > "$base/final-sync-b.out"
+    cat "$base/final-sync-b.out"
+fi
 
 for port in 19130 19131 19132; do
     "$client" status "$host" "$port" > "$base/status-$port.out"

@@ -67,6 +67,34 @@ bool validKind(std::uint64_t raw) {
            raw == static_cast<std::uint64_t>(StoredRecordKind::Prime);
 }
 
+
+std::optional<Hash256> canonicalHashFromPayload(
+    StoredRecordKind kind,
+    const std::vector<std::uint8_t>& payload,
+    std::string& error) {
+    if (kind == StoredRecordKind::Composite) {
+        auto record = protocol::deserializeCompositeRecord(payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return protocol::canonicalStoredRecordHash(*record);
+    }
+    auto record = protocol::deserializePrimeRecord(payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return protocol::canonicalStoredRecordHash(*record);
+}
+
+bool recordPayloadMatchesEnvelope(const StoredRecord& record, std::string& error) {
+    auto canonical_hash = canonicalHashFromPayload(record.kind, record.payload, error);
+    if (!canonical_hash.has_value()) {
+        if (error.empty()) error = "record payload did not decode";
+        return false;
+    }
+    if (*canonical_hash != record.record_hash) {
+        error = "record hash does not match canonical payload identity";
+        return false;
+    }
+    return true;
+}
+
 bool validateRecord(const StoredRecord& record, std::string& error) {
     if (record.payload.empty()) {
         error = "record payload is empty";
@@ -76,11 +104,7 @@ bool validateRecord(const StoredRecord& record, std::string& error) {
         error = "record payload exceeds store limit";
         return false;
     }
-    if (crypto::sha3_256(record.payload) != record.record_hash) {
-        error = "record hash does not match payload";
-        return false;
-    }
-    return true;
+    return recordPayloadMatchesEnvelope(record, error);
 }
 
 std::vector<std::uint8_t> encodeRecord(const StoredRecord& record) {
@@ -211,8 +235,10 @@ bool scanStore(
             incomplete_tail = true;
             break;
         }
-        if (crypto::sha3_256(record.payload) != record.record_hash) {
-            error = "record payload hash mismatch at height " + std::to_string(record.height);
+        std::string payload_error;
+        if (!recordPayloadMatchesEnvelope(record, payload_error)) {
+            error = "record payload identity mismatch at height " + std::to_string(record.height) +
+                (payload_error.empty() ? std::string{} : ": " + payload_error);
             return false;
         }
 
@@ -518,8 +544,10 @@ std::optional<StoredRecord> readRecordAt(
         error = "record index points to truncated payload";
         return std::nullopt;
     }
-    if (crypto::sha3_256(record.payload) != record.record_hash) {
-        error = "record payload hash mismatch at height " + std::to_string(record.height);
+    std::string payload_error;
+    if (!recordPayloadMatchesEnvelope(record, payload_error)) {
+        error = "record payload identity mismatch at height " + std::to_string(record.height) +
+            (payload_error.empty() ? std::string{} : ": " + payload_error);
         return std::nullopt;
     }
     return record;
@@ -832,7 +860,7 @@ StoredRecord makeStoredRecord(const protocol::CompositeRecordV0& record) {
     out.height = record.height;
     out.integer = record.integer;
     out.payload = protocol::serializeCompositeRecord(record);
-    out.record_hash = protocol::finalizedRecordHash(record);
+    out.record_hash = protocol::canonicalStoredRecordHash(record);
     return out;
 }
 
@@ -842,7 +870,7 @@ StoredRecord makeStoredRecord(const protocol::PrimeRecordV0& record) {
     out.height = record.height;
     out.integer = record.integer;
     out.payload = protocol::serializePrimeRecord(record);
-    out.record_hash = protocol::finalizedRecordHash(record);
+    out.record_hash = protocol::canonicalStoredRecordHash(record);
     return out;
 }
 

@@ -188,6 +188,21 @@ std::optional<primechain::storage::StoredRecordKind> parseKind(const std::string
     return std::nullopt;
 }
 
+
+std::optional<primechain::Hash256> canonicalRecordHashFromPayload(
+    primechain::storage::StoredRecordKind kind,
+    const std::vector<std::uint8_t>& payload) {
+    std::string error;
+    if (kind == primechain::storage::StoredRecordKind::Composite) {
+        auto record = primechain::protocol::deserializeCompositeRecord(payload, error);
+        if (!record.has_value()) return std::nullopt;
+        return primechain::protocol::canonicalStoredRecordHash(*record);
+    }
+    auto record = primechain::protocol::deserializePrimeRecord(payload, error);
+    if (!record.has_value()) return std::nullopt;
+    return primechain::protocol::canonicalStoredRecordHash(*record);
+}
+
 std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::string& line) {
     std::istringstream in(line);
     std::string tag;
@@ -210,7 +225,8 @@ std::optional<primechain::storage::StoredRecord> parseRecordLine(const std::stri
     if (payload->size() != payload_size) {
         return std::nullopt;
     }
-    if (primechain::crypto::sha3_256(*payload) != *hash) {
+    const auto canonical_hash = canonicalRecordHashFromPayload(*kind, *payload);
+    if (!canonical_hash.has_value() || *canonical_hash != *hash) {
         return std::nullopt;
     }
 
