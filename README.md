@@ -8,7 +8,9 @@ The current implementation is a C++17 launch-testnet prototype with authenticate
 
 Implemented and tested in the current public repository:
 
+- protocol version `2`, network `launch-testnet-2`
 - sequential arithmetic records for prime and composite integers
+- protocol-2 subject-hash record identity, where finalization certificates are attached evidence rather than part of the chain-link identity
 - SHA3-256 record hashing and ML-DSA-65 protocol signatures
 - signed Pratt prime submissions with authenticated reward addresses
 - signed composite commit/reveal submissions with factor evidence
@@ -24,9 +26,21 @@ The tested one-validator-to-three-validator launch procedure is documented in [`
 
 Validator quorum uses `required_quorum = ceil(2n / 3)`, so the current three-validator launch network finalizes with two validator votes. Replay-derived validator membership and consensus code are authoritative for the active quorum.
 
+Protocol-2 record identity deliberately separates the stable arithmetic subject from validator certificate bytes. For record version 11 and later, `previous_hash` links to the canonical subject hash: the record content with finalization evidence excluded, and for composite records with lottery evidence excluded. This means two valid certificates for the same candidate, such as signatures `(A,B)` and `(A,C)`, certify the same chain record instead of producing two different chain-link hashes. The finalization certificate remains replay-validated evidence attached to that subject.
+
 Current v0 transaction records use a flat ordered transaction-batch commitment stored in the historical `transaction_merkle_root` field. It is not a binary Merkle tree; full nodes validate by checking the complete transaction list against `SHA3-256(domain || count || tx_hashes...)`. A true Merkle root can be added in a future record version if compact inclusion proofs are needed.
 
 Public validator operators should keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, `--enable-factorization-helper` is not part of the public launch validator profile. Release commit `b6c453e2cfbb` hardens public sync-server command handling around helper factorization, off-frontier prime submission, and composite-lottery signing rate limits; see the validator runbooks for the operator note.
+
+Relevant implementation files for the current protocol path:
+
+- `include/primechain/version.hpp.in` declares the protocol/network version stamped into binaries.
+- `include/primechain/protocol/records.hpp` and `src/protocol/records.cpp` define record serialization, genesis metadata, subject hashes, canonical stored hashes, transaction batch commitments, and legacy/v11 decoding.
+- `src/storage/record_store.cpp` validates append-only record envelopes against the canonical record identity and maintains `.idx` offsets.
+- `src/node/sequential_node.cpp` replays records, rewards, sparse holdings, transactions, validator epochs, and consensus checks.
+- `src/node/sync_server.cpp` implements TCP submission, composite lottery, validator finalization, round changes, peer sync, and record propagation.
+- `src/tools/client.cpp`, `src/tools/sync_download.cpp`, and `src/miner/frontier_main.cpp` provide the launch client, sync/download path, and frontier miner.
+
 
 Still not production-ready:
 
@@ -374,11 +388,11 @@ explicitly opts into helper service for development.
 The current design direction is that every finalized arithmetic record can also carry a transaction batch:
 
 ```text
-CompositeRecord(g = d * e) + transaction_merkle_root
-PrimeRecord(g is prime)    + transaction_merkle_root
+CompositeRecord(g = d * e) + transaction_batch_commitment
+PrimeRecord(g is prime)    + transaction_batch_commitment
 ```
 
-This separates arithmetic progress from transaction throughput. One proof does not need to mean one transaction. A single composite or prime record may commit to many transactions through a Merkle root.
+The on-chain field is still historically named `transaction_merkle_root`, but in v0 it is a flat ordered transaction-batch commitment, not a binary Merkle tree. This separates arithmetic progress from transaction throughput. One proof does not need to mean one transaction. A single composite or prime record may commit to many transactions through that batch commitment.
 
 This matters for the proposed Bitcoin mirror test:
 
@@ -1124,15 +1138,18 @@ During replay, `SequentialNode` currently verifies:
 - transaction signatures match the ML-DSA-65 or explicit offline-development rule
 - transaction inputs equal outputs plus fees per prime asset
 - sender nonces are contiguous and fees are paid to the record proof provider
-- record payloads link to the previous record hash
+- record payloads link to the previous canonical record identity
 - single-node development records satisfy the deterministic development finalization rule
-- quorum records contain two or three canonical ML-DSA-65 validator signatures over the candidate record hash
+- legacy quorum records validate their historical finalized-payload/candidate hash rules
+- protocol-2 quorum records validate ML-DSA-65 signatures over the stable subject hash for record version 11 and later
 - every quorum signer belongs to the replay-derived active validator epoch
 - mining rewards reconstruct into the in-memory ledger state
 
 Startup and continuous peer sync use a temporary store before replacing the local store. If a hostile peer serves records whose payload hashes are correct but whose arithmetic is invalid, the temporary replay fails and the real local store is left unchanged. This prevents partial poisoning of the local chain during sync.
 
-Single-node development stores retain `fixed-2-of-3-dev`. A validator-anchored chain uses `fixed-2-of-3-mldsa65-v2`: the proposing validator signs first, then collects a second signature over the complete candidate record before append and gossip. Each validator persists its pending signed choice in `<record-store>.finalization`, preventing a restart from permitting a second vote for the same integer and round. The sidecar is cleared after the finalized record arrives.
+Single-node development stores retain `fixed-2-of-3-dev`. Validator-anchored legacy records remain replayable under their historical `fixed-2-of-3-mldsa65-v2` and round-change rules. New launch-testnet-2 quorum records use protocol-2 subject-hash identity for record version 11 and later: validators sign the stable arithmetic subject, while the finalization certificate is attached and replay-verified separately.
+
+Each validator persists its signed candidate evidence in `<record-store>.finalization` and round-change evidence in `<record-store>.rounds`. These sidecars are local recovery state, not separate chain records. They prevent restart-driven loss of local signing state and allow later rounds to carry the locked candidate payload forward when recovery is needed. Finalized records remain replayable after these sidecars are removed because the record itself carries the finalization proof needed for chain validation.
 
 Enable controlled round recovery with:
 
@@ -1145,11 +1162,12 @@ Enable controlled round recovery with:
 
 If vote collection stalls, the proposer waits for the configured timeout and
 requests a signed transition to the next round. Two current validators must
-authorize the same frontier hash, integer, and round. The next candidate embeds
-that certificate and may differ from the candidate signed in the abandoned
-round. Temporary votes are stored in `<record-store>.rounds`; finalized records
-remain replayable after `.rounds` and `.finalization` are removed. The default
-timeout is `0`, which preserves fail-fast behavior.
+authorize the same previous record identity, integer, and round. Round-change
+evidence carries the highest locked candidate information, including the locked
+candidate payload for recovery. Later rounds must respect the highest lock: a
+fresh conflicting candidate is rejected, while the locked subject can be
+reproposed and finalized by a later committee. The default timeout is `0`, which
+preserves fail-fast behavior.
 
 This is controlled-testnet finalization, not permissionless Sybil resistance.
 The timeout is a local trigger and is not trusted consensus time. Existing
@@ -1273,9 +1291,10 @@ Completed prototype milestones:
 - genesis-anchored 2-of-3 validator quorum
 - signed validator epoch transitions embedded in version-2 arithmetic records
 - replay-derived active validator set with next-integer activation
-- ML-DSA-65 2-of-3 signatures over complete prime and composite candidate records
-- persistent validator anti-equivocation state in `.finalization` sidecars
-- signed 2-of-3 finalization round changes with embedded replay evidence
+- protocol-2 subject-hash chain identity for version-11 prime and composite records
+- ML-DSA-65 2-of-3 signatures over stable prime and composite subject hashes
+- persistent validator signing/recovery state in `.finalization` sidecars
+- signed 2-of-3 finalization round changes with locked-candidate recovery evidence
 - optional timeout-driven retry through `--finalization-timeout-ms`
 - operational transaction fees, validator fee pools, deterministic pool distribution, and contiguous sender nonces
 - NIST ML-DSA-65 signatures for transactions, miners, validators, epochs, and round changes
