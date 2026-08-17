@@ -4026,12 +4026,7 @@ private:
             if (!record.has_value()) return false;
             proof = record->finalized_by;
             if (!record->finalized_by.votes.empty()) { error = "candidate finalization votes must be empty"; return false; }
-            auto validation_record = *record;
-            if (validation_record.version >= primechain::node::kSubjectHashRecordVersion) {
-                validation_record.version = primechain::node::kDirectCompositeRecordVersion;
-                validation_record.composite_lottery = {};
-            }
-            if (!node.validateCompositeCandidate(validation_record, error)) return false;
+            if (!node.validateCompositeCandidate(*record, error)) return false;
             integer = record->integer;
             previous_hash = record->previous_record_hash;
             candidate_hash = primechain::protocol::candidateRecordHash(*record);
@@ -4533,7 +4528,6 @@ private:
             return;
         }
         auto validation_record = *record;
-        validation_record.version = primechain::node::kDirectCompositeRecordVersion;
         validation_record.composite_lottery = {};
         if (!node.validateCompositeCandidate(validation_record, error)) {
             writeAll(fd, "ERROR " + error + "\n");
@@ -7072,7 +7066,7 @@ private:
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempoolSnapshot();
         record.transactions = included_transactions;
         if (quorumEnabled()) {
-            record.version = primechain::node::kSubjectHashRecordVersion;
+            record.version = primechain::node::kTransactionMerkleRecordVersion;
             auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
             if (validator_epoch.epoch != 0) {
                 record.version = std::max<std::uint64_t>(record.version, 2);
@@ -7331,7 +7325,7 @@ private:
             node.status(), proof.p, proof, provider_address, authentication);
         std::vector<primechain::protocol::TransactionV0> included_transactions = mempoolSnapshot();
         record.transactions = included_transactions;
-        if (quorumEnabled()) record.version = primechain::node::kSubjectHashRecordVersion;
+        if (quorumEnabled()) record.version = primechain::node::kTransactionMerkleRecordVersion;
         auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
         if (validator_epoch.epoch != 0) {
             record.version = std::max<std::uint64_t>(record.version, 2);

@@ -191,12 +191,13 @@ bool validateValidatorPoolDistributionShape(
 bool validateTransactionBatch(
     const protocol::TransactionBatchV0& batch,
     const std::vector<protocol::TransactionV0>& transactions,
+    std::uint64_t record_version,
     std::string& error) {
     if (batch.transaction_count != transactions.size()) {
         error = "transaction batch count mismatch";
         return false;
     }
-    if (batch.transaction_merkle_root != protocol::transactionMerkleRoot(transactions)) {
+    if (batch.transaction_merkle_root != protocol::transactionBatchRoot(transactions, record_version)) {
         error = "transaction batch root mismatch";
         return false;
     }
@@ -535,7 +536,7 @@ bool validateStoredCompositePayload(
         error = "invalid composite payload provider signature: " + error;
         return false;
     }
-    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
+    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, decoded->version, error)) {
         return false;
     }
     if (!protocol::verifyCommitPhaseCertificate(*decoded, error)) {
@@ -589,7 +590,7 @@ bool validateStoredPrimePayload(
         error = "invalid prime payload Pratt proof";
         return false;
     }
-    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, error)) {
+    if (!validateTransactionBatch(decoded->tx_batch, decoded->transactions, decoded->version, error)) {
         return false;
     }
     error.clear();
@@ -843,7 +844,7 @@ bool SequentialNode::validateCompositeCandidate(
     if (!protocol::isProtocolAddress(record.proof.provider_address)) { error = "invalid composite provider address"; return false; }
     if (!math::verifyCompositeProof(toLegacyCompositeProof(record.proof))) { error = "invalid composite proof"; return false; }
     if (!validateCompositeProviderSignature(record.proof, error)) { error = "invalid composite provider signature: " + error; return false; }
-    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, record.version, error)) return false;
     if (!protocol::verifyCommitPhaseCertificate(record, error)) return false;
     if (!protocol::verifyCompositeLotteryProof(record, validator_set_, error)) return false;
     if (validator_set_.empty() ? record.version != 0 :
@@ -894,7 +895,7 @@ bool SequentialNode::validatePrimeCandidate(
         return false;
     }
     if (!math::verifyPrattProof(toMathPrattProof(record.proof))) { error = "invalid Pratt proof"; return false; }
-    if (!validateTransactionBatch(record.tx_batch, record.transactions, error)) return false;
+    if (!validateTransactionBatch(record.tx_batch, record.transactions, record.version, error)) return false;
     if (!protocol::verifyGenesisConfig(record, error)) return false;
     if (!validateRecordMetadataVersion(record.version, record.validator_epoch, record.validator_endpoints, record.economic_policy, record.validator_applications, record.validator_work_bindings, error) ||
         !protocol::verifyValidatorEpochTransition(
@@ -1501,7 +1502,7 @@ bool SequentialNode::validateCommon(
 
 protocol::PrimeRecordV0 makeGenesisPrimeRecordV0(const std::vector<Address>& validator_set) {
     protocol::PrimeRecordV0 record;
-    record.version = validator_set.empty() ? 0 : 11;
+    record.version = validator_set.empty() ? 0 : kTransactionMerkleRecordVersion;
     record.height = 0;
     record.previous_record_hash = {};
     record.integer = 2;

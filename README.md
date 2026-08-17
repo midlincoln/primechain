@@ -8,9 +8,10 @@ The current implementation is a C++17 launch-testnet prototype with authenticate
 
 Implemented and tested in the current public repository:
 
-- protocol version `2`, network `launch-testnet-2`
+- protocol version `3`, network `launch-testnet-3`
 - sequential arithmetic records for prime and composite integers
 - protocol-2 subject-hash record identity, where finalization certificates are attached evidence rather than part of the chain-link identity
+- record version 12 transaction batches use a binary Merkle root with odd-leaf duplication; older records keep the legacy flat batch commitment for replay
 - SHA3-256 record hashing and ML-DSA-65 protocol signatures
 - signed Pratt prime submissions with authenticated reward addresses
 - signed composite commit/reveal submissions with factor evidence
@@ -28,7 +29,7 @@ Validator quorum uses `required_quorum = ceil(2n / 3)`, so the current three-val
 
 Protocol-2 record identity deliberately separates the stable arithmetic subject from validator certificate bytes. For record version 11 and later, `previous_hash` links to the canonical subject hash: the record content with finalization evidence excluded, and for composite records with lottery evidence excluded. This means two valid certificates for the same candidate, such as signatures `(A,B)` and `(A,C)`, certify the same chain record instead of producing two different chain-link hashes. The finalization certificate remains replay-validated evidence attached to that subject.
 
-Current v0 transaction records use a flat ordered transaction-batch commitment stored in the historical `transaction_merkle_root` field. It is not a binary Merkle tree; full nodes validate by checking the complete transaction list against `SHA3-256(domain || count || tx_hashes...)`. A true Merkle root can be added in a future record version if compact inclusion proofs are needed.
+Transaction records are versioned. Records through version 11 keep the legacy flat ordered transaction-batch commitment stored in `transaction_merkle_root` for replay compatibility. Record version 12 and later use a real binary transaction Merkle root over canonical transaction hashes, with odd-leaf duplication at each level and `Hash256{0}` for an empty transaction list.
 
 Public validator operators should keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, `--enable-factorization-helper` is not part of the public launch validator profile. Release commit `b6c453e2cfbb` hardens public sync-server command handling around helper factorization, off-frontier prime submission, and composite-lottery signing rate limits; see the validator runbooks for the operator note.
 
@@ -392,7 +393,7 @@ CompositeRecord(g = d * e) + transaction_batch_commitment
 PrimeRecord(g is prime)    + transaction_batch_commitment
 ```
 
-The on-chain field is still historically named `transaction_merkle_root`, but in v0 it is a flat ordered transaction-batch commitment, not a binary Merkle tree. This separates arithmetic progress from transaction throughput. One proof does not need to mean one transaction. A single composite or prime record may commit to many transactions through that batch commitment.
+The on-chain field is named `transaction_merkle_root`. Legacy records through version 11 use a flat ordered transaction-batch commitment for replay compatibility. Record version 12 and later use a binary transaction Merkle root with odd-leaf duplication. This separates arithmetic progress from transaction throughput. One proof does not need to mean one transaction. A single composite or prime record may commit to many transactions through that batch commitment.
 
 This matters for the proposed Bitcoin mirror test:
 
@@ -1147,7 +1148,7 @@ During replay, `SequentialNode` currently verifies:
 
 Startup and continuous peer sync use a temporary store before replacing the local store. If a hostile peer serves records whose payload hashes are correct but whose arithmetic is invalid, the temporary replay fails and the real local store is left unchanged. This prevents partial poisoning of the local chain during sync.
 
-Single-node development stores retain `fixed-2-of-3-dev`. Validator-anchored legacy records remain replayable under their historical `fixed-2-of-3-mldsa65-v2` and round-change rules. New launch-testnet-2 quorum records use protocol-2 subject-hash identity for record version 11 and later: validators sign the stable arithmetic subject, while the finalization certificate is attached and replay-verified separately.
+Single-node development stores retain `fixed-2-of-3-dev`. Validator-anchored legacy records remain replayable under their historical `fixed-2-of-3-mldsa65-v2` and round-change rules. New launch-testnet-3 quorum records use protocol-2 subject-hash identity for record version 11 and later: validators sign the stable arithmetic subject, while the finalization certificate is attached and replay-verified separately. Record version 12 and later also use the binary transaction Merkle root.
 
 Each validator persists its signed candidate evidence in `<record-store>.finalization` and round-change evidence in `<record-store>.rounds`. These sidecars are local recovery state, not separate chain records. They prevent restart-driven loss of local signing state and allow later rounds to carry the locked candidate payload forward when recovery is needed. Finalized records remain replayable after these sidecars are removed because the record itself carries the finalization proof needed for chain validation.
 
@@ -1291,7 +1292,8 @@ Completed prototype milestones:
 - genesis-anchored 2-of-3 validator quorum
 - signed validator epoch transitions embedded in version-2 arithmetic records
 - replay-derived active validator set with next-integer activation
-- protocol-2 subject-hash chain identity for version-11 prime and composite records
+- protocol-2 subject-hash chain identity for version-11-and-later prime and composite records
+- binary transaction Merkle roots for version-12-and-later records
 - ML-DSA-65 2-of-3 signatures over stable prime and composite subject hashes
 - persistent validator signing/recovery state in `.finalization` sidecars
 - signed 2-of-3 finalization round changes with locked-candidate recovery evidence

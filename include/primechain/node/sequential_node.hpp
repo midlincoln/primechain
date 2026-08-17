@@ -29,6 +29,7 @@ constexpr std::uint64_t kValidatorRewardRecordVersion = 8;
 constexpr std::uint64_t kDirectCompositeRecordVersion = 9;
 constexpr std::uint64_t kCompositeLotteryRecordVersion = 10;
 constexpr std::uint64_t kSubjectHashRecordVersion = 11;
+constexpr std::uint64_t kTransactionMerkleRecordVersion = protocol::kBinaryTransactionMerkleRecordVersion;
 constexpr std::uint64_t kDefaultTransferFeeMicroUnits = 1;
 constexpr std::uint64_t kDefaultValidatorMinReserveMicroUnits = 5'000'000;
 

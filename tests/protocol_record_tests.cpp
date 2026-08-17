@@ -193,6 +193,41 @@ int main() {
         return 1;
     }
 
+    auto tx2 = tx;
+    tx2.nonce = 2;
+    tx2.outputs[0].amount.numerator = 2;
+    tx2.signature = developmentTransactionSignature(tx2);
+    auto tx3 = tx;
+    tx3.nonce = 3;
+    tx3.outputs[0].amount.numerator = 3;
+    tx3.signature = developmentTransactionSignature(tx3);
+    const std::vector<TransactionV0> txs{tx, tx2, tx3};
+    const auto legacy_tx_root = transactionBatchRoot(txs, 11);
+    const auto binary_merkle_root = transactionBatchRoot(txs, kBinaryTransactionMerkleRecordVersion);
+    if (!expect(legacy_tx_root != binary_merkle_root,
+                "v12 transaction Merkle root differs from legacy flat batch commitment")) {
+        return 1;
+    }
+    if (!expect(transactionMerkleRoot(txs) == binary_merkle_root,
+                "transactionMerkleRoot returns binary v12 Merkle root")) {
+        return 1;
+    }
+    auto legacy_tx_record = makeCompositeRecord();
+    legacy_tx_record.version = 11;
+    legacy_tx_record.transactions = txs;
+    updateTransactionBatch(legacy_tx_record);
+    if (!expect(legacy_tx_record.tx_batch.transaction_merkle_root == legacy_tx_root,
+                "v11 record keeps legacy flat transaction batch commitment")) {
+        return 1;
+    }
+    auto merkle_tx_record = legacy_tx_record;
+    merkle_tx_record.version = kBinaryTransactionMerkleRecordVersion;
+    updateTransactionBatch(merkle_tx_record);
+    if (!expect(merkle_tx_record.tx_batch.transaction_merkle_root == binary_merkle_root,
+                "v12 record uses binary transaction Merkle root")) {
+        return 1;
+    }
+
     std::string auth_error;
     const auto account = primechain::crypto::generateProtocolSignatureKeyPair(auth_error);
     if (!expect(account.has_value(), "generate authenticated transaction key")) {

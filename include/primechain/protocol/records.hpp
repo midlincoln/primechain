@@ -11,6 +11,8 @@ namespace primechain::protocol {
 
 using Bytes = std::vector<std::uint8_t>;
 
+constexpr std::uint64_t kBinaryTransactionMerkleRecordVersion = 12;
+
 struct Amount {
     std::uint64_t numerator{0};
     std::uint64_t denominator{1};
@@ -246,6 +248,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
 
 Hash256 transactionHash(const TransactionV0& tx);
 Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions);
+Hash256 transactionBatchRoot(const std::vector<TransactionV0>& transactions, std::uint64_t record_version);
 void updateTransactionBatch(CompositeRecordV0& record);
 void updateTransactionBatch(PrimeRecordV0& record);
 Hash256 compositeLotterySubjectHash(const CompositeRecordV0& record);

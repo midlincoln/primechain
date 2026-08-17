@@ -180,9 +180,9 @@ TransactionBatch {
 }
 ```
 
-The field name is historical. In the current v0 implementation, `transaction_merkle_root` is a flat ordered transaction-batch commitment, not a binary Merkle tree.
+The commitment rule is record-versioned.
 
-Current v0 transaction-batch commitment rule:
+Legacy records through version 11 keep the original flat ordered batch commitment for replay compatibility:
 
 - If `transaction_count == 0`, use `Hash256{0}`.
 - Otherwise, hash each canonical transaction with `transactionHash(tx)`.
@@ -199,7 +199,15 @@ Hash256(tx_hash_n)
 
 - The final commitment is `SHA3-256(payload)`.
 
-The full transaction list may be transmitted with the record or fetched separately. Consensus checks the batch count and commitment. This is sufficient for full-node validation because validators check the complete transaction list. A true Merkle tree may be introduced in a later record version if compact transaction inclusion proofs become necessary for light clients or explorers.
+Records version 12 and later use a binary transaction Merkle root:
+
+- If `transaction_count == 0`, use `Hash256{0}`.
+- Each leaf is `SHA3-256(String("primechain-tx-merkle-leaf-v1") || Hash256(transactionHash(tx)))`.
+- Each internal node is `SHA3-256(String("primechain-tx-merkle-node-v1") || Hash256(left) || Hash256(right))`.
+- At each tree level, an odd final node is duplicated before hashing upward.
+- The final remaining node is stored in `transaction_merkle_root`.
+
+The full transaction list may be transmitted with the record or fetched separately. Consensus checks the batch count and commitment. Version 12 gives light clients and explorers a true Merkle commitment for compact inclusion proofs while retaining replay compatibility for older records.
 
 ## 5. Composite Proof Format
 

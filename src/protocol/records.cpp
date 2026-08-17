@@ -1060,7 +1060,7 @@ Hash256 transactionHash(const TransactionV0& tx) {
     return crypto::sha3_256(serializeTransaction(tx, true));
 }
 
-Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
+Hash256 legacyFlatTransactionBatchRoot(const std::vector<TransactionV0>& transactions) {
     if (transactions.empty()) {
         return {};
     }
@@ -1073,14 +1073,58 @@ Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
     return crypto::sha3_256(payload);
 }
 
+Hash256 merkleLeafHash(const Hash256& tx_hash) {
+    std::vector<std::uint8_t> payload;
+    appendString(payload, "primechain-tx-merkle-leaf-v1");
+    appendHash(payload, tx_hash);
+    return crypto::sha3_256(payload);
+}
+
+Hash256 merkleParentHash(const Hash256& left, const Hash256& right) {
+    std::vector<std::uint8_t> payload;
+    appendString(payload, "primechain-tx-merkle-node-v1");
+    appendHash(payload, left);
+    appendHash(payload, right);
+    return crypto::sha3_256(payload);
+}
+
+Hash256 transactionMerkleRoot(const std::vector<TransactionV0>& transactions) {
+    if (transactions.empty()) {
+        return {};
+    }
+    std::vector<Hash256> level;
+    level.reserve(transactions.size());
+    for (const auto& tx : transactions) {
+        level.push_back(merkleLeafHash(transactionHash(tx)));
+    }
+    while (level.size() > 1) {
+        std::vector<Hash256> next;
+        next.reserve((level.size() + 1) / 2);
+        for (std::size_t i = 0; i < level.size(); i += 2) {
+            const auto& left = level[i];
+            const auto& right = (i + 1 < level.size()) ? level[i + 1] : level[i];
+            next.push_back(merkleParentHash(left, right));
+        }
+        level = std::move(next);
+    }
+    return level.front();
+}
+
+Hash256 transactionBatchRoot(const std::vector<TransactionV0>& transactions, std::uint64_t record_version) {
+    if (record_version >= kBinaryTransactionMerkleRecordVersion) {
+        return transactionMerkleRoot(transactions);
+    }
+    return legacyFlatTransactionBatchRoot(transactions);
+}
+
 void updateTransactionBatch(CompositeRecordV0& record) {
     record.tx_batch.transaction_count = record.transactions.size();
-    record.tx_batch.transaction_merkle_root = transactionMerkleRoot(record.transactions);
+    record.tx_batch.transaction_merkle_root = transactionBatchRoot(record.transactions, record.version);
 }
 
 void updateTransactionBatch(PrimeRecordV0& record) {
     record.tx_batch.transaction_count = record.transactions.size();
-    record.tx_batch.transaction_merkle_root = transactionMerkleRoot(record.transactions);
+    record.tx_batch.transaction_merkle_root = transactionBatchRoot(record.transactions, record.version);
 }
 
 std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const CompositeRecordV0& record) {
@@ -1386,7 +1430,7 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
         }
         return true;
     }
-    if (record.version != 1 && record.version != kGenesisMessageRecordVersion) {
+    if (record.version != 1 && record.version < kGenesisMessageRecordVersion) {
         error = "unsupported genesis record version";
         return false;
     }
@@ -1394,7 +1438,7 @@ bool verifyGenesisConfig(const PrimeRecordV0& record, std::string& error) {
         error = "legacy anchored genesis cannot contain a genesis message";
         return false;
     }
-    if (record.version == kGenesisMessageRecordVersion && record.genesis_config.genesis_message.empty()) {
+    if (record.version >= kGenesisMessageRecordVersion && record.genesis_config.genesis_message.empty()) {
         error = "genesis message is required";
         return false;
     }
