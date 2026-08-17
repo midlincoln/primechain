@@ -6765,7 +6765,8 @@ private:
             }
             observed_round = state.round;
             if (state.decided) {
-                if (state.winning_candidate_hash != candidate_hash) {
+                if (record.version < primechain::protocol::kIntegerCompositeLotteryRecordVersion &&
+                    state.winning_candidate_hash != candidate_hash) {
                     error = "composite lottery selected a different candidate";
                     return false;
                 }
@@ -6825,14 +6826,23 @@ private:
                 return false;
             }
 
-            std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
-            state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
-            std::cerr << "composite lottery winner integer " << record.integer
-                      << " round " << state.round << " candidates " << state.candidates.size()
-                      << " draw " << draw << " win_bps " << composite_lottery_win_bps_
-                      << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
+            if (record.version >= primechain::protocol::kIntegerCompositeLotteryRecordVersion) {
+                state.winning_candidate_hash = {};
+                std::cerr << "composite lottery winner integer " << record.integer
+                          << " round " << state.round << " candidates " << state.candidates.size()
+                          << " draw " << draw << " win_bps " << composite_lottery_win_bps_
+                          << " scope integer\n";
+            } else {
+                std::uniform_int_distribution<std::size_t> pick_dist(0, state.candidates.size() - 1);
+                state.winning_candidate_hash = state.candidates[pick_dist(rng)].candidate_hash;
+                std::cerr << "composite lottery winner integer " << record.integer
+                          << " round " << state.round << " candidates " << state.candidates.size()
+                          << " draw " << draw << " win_bps " << composite_lottery_win_bps_
+                          << " hash " << primechain::crypto::toHex(state.winning_candidate_hash) << "\n";
+            }
         }
-        if (state.winning_candidate_hash != candidate_hash) {
+        if (record.version < primechain::protocol::kIntegerCompositeLotteryRecordVersion &&
+            state.winning_candidate_hash != candidate_hash) {
             error = "composite lottery selected a different candidate";
             return false;
         }
