@@ -1213,12 +1213,18 @@ std::optional<Address> assignedCompositeLotteryValidator(
         error = "composite lottery requires canonical validator set";
         return std::nullopt;
     }
-    const auto subject_hash = compositeLotterySubjectHash(record);
     Bytes payload;
-    appendString(payload, "primechain-composite-lottery-assignment-v1");
-    appendHash(payload, record.previous_record_hash);
-    appendUint64(payload, record.integer);
-    appendHash(payload, subject_hash);
+    if (record.version >= kIntegerCompositeLotteryRecordVersion) {
+        appendString(payload, "primechain-composite-lottery-assignment-v2");
+        appendHash(payload, record.previous_record_hash);
+        appendUint64(payload, record.integer);
+    } else {
+        const auto subject_hash = compositeLotterySubjectHash(record);
+        appendString(payload, "primechain-composite-lottery-assignment-v1");
+        appendHash(payload, record.previous_record_hash);
+        appendUint64(payload, record.integer);
+        appendHash(payload, subject_hash);
+    }
     appendUint64(payload, validator_set.size());
     for (const auto& validator : validator_set) appendString(payload, validator);
     const auto assignment_hash = crypto::sha3_256(payload);

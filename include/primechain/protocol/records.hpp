@@ -12,6 +12,7 @@ namespace primechain::protocol {
 using Bytes = std::vector<std::uint8_t>;
 
 constexpr std::uint64_t kBinaryTransactionMerkleRecordVersion = 12;
+constexpr std::uint64_t kIntegerCompositeLotteryRecordVersion = 13;
 
 struct Amount {
     std::uint64_t numerator{0};

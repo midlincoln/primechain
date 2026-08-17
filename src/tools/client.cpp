@@ -310,6 +310,11 @@ int decodeRecord(int argc, char** argv) {
         std::cout << "divisor: " << record->proof.d << "\n";
         std::cout << "cofactor: " << record->proof.e << "\n";
         std::cout << "proof_signature_bytes: " << record->proof.signature.size() << "\n";
+        std::cout << "composite_lottery_round: " << record->composite_lottery.round << "\n";
+        std::cout << "composite_lottery_win_bps: " << record->composite_lottery.win_bps << "\n";
+        printHashField("composite_lottery_subject_hash", record->composite_lottery.subject_hash);
+        std::cout << "composite_lottery_assigned_validator: " << record->composite_lottery.assigned_validator << "\n";
+        std::cout << "composite_lottery_signature_bytes: " << record->composite_lottery.signature.size() << "\n";
         std::cout << "commit_phase_integer: " << record->commit_phase.integer << "\n";
         std::cout << "commitments: " << record->commit_phase.commitments.size() << "\n";
         std::cout << "commit_phase_votes: " << record->commit_phase.votes.size() << "\n";

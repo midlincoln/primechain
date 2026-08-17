@@ -383,6 +383,41 @@ int main() {
     });
     std::vector<primechain::Address> sorted_validators;
     for (const auto index : order) sorted_validators.push_back(validator_set[index]);
+
+    auto lottery_a = composite;
+    lottery_a.version = kIntegerCompositeLotteryRecordVersion;
+    lottery_a.previous_record_hash = previous_hash;
+    lottery_a.integer = 1631;
+    lottery_a.proof.g = 1631;
+    lottery_a.proof.d = 7;
+    lottery_a.proof.e = 233;
+    lottery_a.proof.provider_address = "pcdev1_lottery_a";
+    auto lottery_b = lottery_a;
+    lottery_b.proof.d = 233;
+    lottery_b.proof.e = 7;
+    lottery_b.proof.provider_address = "pcdev1_lottery_b";
+    std::string lottery_error;
+    const auto assigned_a = assignedCompositeLotteryValidator(
+        lottery_a, sorted_validators, lottery_error);
+    if (!expect(assigned_a.has_value(), "assign v13 composite lottery candidate A")) {
+        std::cerr << lottery_error << "\n";
+        return 1;
+    }
+    lottery_error.clear();
+    const auto assigned_b = assignedCompositeLotteryValidator(
+        lottery_b, sorted_validators, lottery_error);
+    if (!expect(assigned_b.has_value(), "assign v13 composite lottery candidate B")) {
+        std::cerr << lottery_error << "\n";
+        return 1;
+    }
+    if (!expect(subjectRecordHash(lottery_a) != subjectRecordHash(lottery_b),
+                "v13 lottery test candidates have different subject hashes")) {
+        return 1;
+    }
+    if (!expect(*assigned_a == *assigned_b,
+                "v13 composite lottery assignment is stable across candidates")) {
+        return 1;
+    }
     const auto signed_hash = candidateRecordHash(signed_record);
     for (std::size_t i = 0; i < 2; ++i) {
         const auto index = order[i];
