@@ -1853,14 +1853,15 @@ public:
         std::vector<primechain::Address>& validators,
         std::string& error) const {
         primechain::storage::RecordStore source(path);
-        const auto records = source.loadAll(error);
-        if (!error.empty() || records.empty()) return error.empty();
-        if (records.front().kind != primechain::storage::StoredRecordKind::Prime) {
+        const auto record = source.findByInteger(2, error);
+        if (!error.empty()) return false;
+        if (!record.has_value()) return true;
+        if (record->kind != primechain::storage::StoredRecordKind::Prime) {
             error = "genesis record must be prime";
             return false;
         }
         const auto genesis = primechain::protocol::deserializePrimeRecord(
-            records.front().payload, error);
+            record->payload, error);
         if (!genesis.has_value() || !primechain::protocol::verifyGenesisConfig(*genesis, error)) {
             return false;
         }
