@@ -120,6 +120,7 @@ that remain available for tests and protocol development.
 ./build/primechain-client balances ./pc-work
 ./build/primechain-client rewards ./pc-work
 ./build/primechain-client reward-history ./pc-work --last 20
+./build/primechain-client bulk-send ./pc-work ./pc-work/wallets/prime.wallet <receiver-address> <amount-micro-units> --max-tx 24
 ./build/primechain-client board-report ./pc-work/data/chain.dat --from 2 --to 100
 ./build/primechain-client validator-reputation ./pc-work/data/chain.dat <address>
 ./build/primechain-client update-indexes ./pc-work
@@ -521,6 +522,29 @@ address for the active validator epoch, for example
 same `SUBMIT_TX` command. Duplicate hashes and conflicting sender nonces are
 rejected, and stale mempool entries are pruned after record acceptance or
 synchronization.
+
+For operational transfers across many prime-indexed assets,
+`primechain-client bulk-send` automates repeated `primechain-send submit`
+calls:
+
+```bash
+receiver=pcpq1_...
+./build/primechain-client sync-peer ./pc-work 192.81.209.230 8339
+./build/primechain-client bulk-send ./pc-work ./pc-work/wallets/prime.wallet \
+  "$receiver" 358000000 --fee 1 --max-tx 24
+./build/primechain-client bulk-send ./pc-work ./pc-work/wallets/prime.wallet \
+  "$receiver" 358000000 --fee 1 --max-tx 24 --execute
+```
+
+The command is a dry run unless `--execute` is present. It reads spendable
+holdings from the local workdir chain, queries the peer for the sender's next
+nonce, chooses the largest prime-asset holdings first, then signs and submits
+one transaction per selected prime asset. Primechain balances are sparse
+prime-indexed assets, not one fungible account bucket, so sending a large
+amount may require many independent transactions. Keep `--max-tx` below the
+node's per-sender mempool limit, currently `25`, and wait for a batch to
+confirm before sending another batch from the same wallet. Distinct sender
+wallets have distinct nonces and per-sender mempool limits.
 
 Validator fee-pool balances can be inspected and distributed by a protocol
 transaction. The distribution transaction has no wallet signature; replay
