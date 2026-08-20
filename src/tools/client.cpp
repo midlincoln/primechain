@@ -645,6 +645,178 @@ int balancesWorkdir(int argc, char** argv) {
     return 0;
 }
 
+std::optional<std::uint64_t> parseNonceResponse(const std::string& output) {
+    std::istringstream in(output);
+    std::string tag;
+    primechain::Address address;
+    std::uint64_t confirmed = 0;
+    std::uint64_t next = 0;
+    in >> tag >> address >> confirmed >> next;
+    if (!in || tag != "NONCE") return std::nullopt;
+    return next;
+}
+
+std::optional<std::uint64_t> queryNextNonce(
+        const std::string& argv0,
+        const PeerConfig& peer,
+        const primechain::Address& address) {
+    std::string output;
+    if (!captureTool(argv0, "primechain-sync-query",
+            {peer.host, std::to_string(peer.port), "GET_NONCE", address}, output)) {
+        std::cerr << "could not query nonce from " << peer.host << ":" << peer.port << "\n";
+        return std::nullopt;
+    }
+    const auto nonce = parseNonceResponse(output);
+    if (!nonce.has_value()) {
+        std::cerr << "unexpected nonce response: " << output;
+        return std::nullopt;
+    }
+    return nonce;
+}
+
+struct BulkSendItem {
+    primechain::PrimeValue prime{0};
+    std::uint64_t amount{0};
+    std::uint64_t fee{0};
+    std::uint64_t nonce{0};
+};
+
+int bulkSend(int argc, char** argv) {
+    if (argc < 6) return 1;
+    const std::string workdir = argv[2];
+    const std::string wallet_path = argv[3];
+    const primechain::Address receiver = argv[4];
+    std::uint64_t target_micro_units = 0;
+    try {
+        target_micro_units = static_cast<std::uint64_t>(std::stoull(argv[5]));
+    } catch (...) {
+        std::cerr << "amount_micro_units must be a non-negative integer\n";
+        return 1;
+    }
+
+    bool execute = false;
+    std::uint64_t fee = 1;
+    std::uint64_t max_tx = 20;
+    for (int i = 6; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--execute") {
+            execute = true;
+        } else if (arg == "--fee" && i + 1 < argc) {
+            try {
+                fee = static_cast<std::uint64_t>(std::stoull(argv[++i]));
+            } catch (...) {
+                std::cerr << "fee must be a non-negative integer\n";
+                return 1;
+            }
+        } else if (arg == "--max-tx" && i + 1 < argc) {
+            try {
+                max_tx = static_cast<std::uint64_t>(std::stoull(argv[++i]));
+            } catch (...) {
+                std::cerr << "max-tx must be a non-negative integer\n";
+                return 1;
+            }
+        } else {
+            std::cerr << "invalid bulk-send argument: " << arg << "\n";
+            return 1;
+        }
+    }
+    if (!primechain::protocol::isProtocolAddress(receiver) || target_micro_units == 0 || max_tx == 0) {
+        std::cerr << "invalid bulk-send arguments\n";
+        return 1;
+    }
+
+    const auto peer = readPeerConfig(workdir);
+    if (!peer.has_value()) {
+        std::cerr << "workdir has no configured peer; run init-workdir first\n";
+        return 1;
+    }
+    const auto sender = loadMinerAddress(wallet_path);
+    if (!sender.has_value()) return 1;
+
+    primechain::node::SequentialNode node(chainPath(workdir));
+    std::string error;
+    if (!node.load(error)) {
+        std::cerr << "could not load workdir chain: " << error << "\n";
+        return 1;
+    }
+
+    auto holdings = node.holdingsForAddress(*sender);
+    std::sort(holdings.begin(), holdings.end(),
+        [](const auto& a, const auto& b) {
+            if (a.second != b.second) return a.second > b.second;
+            return a.first < b.first;
+        });
+
+    const auto next_nonce = queryNextNonce(argv[0], *peer, *sender);
+    if (!next_nonce.has_value()) return 1;
+
+    std::vector<BulkSendItem> plan;
+    std::uint64_t planned = 0;
+    std::uint64_t total_fees = 0;
+    std::uint64_t nonce = *next_nonce;
+    for (const auto& holding : holdings) {
+        if (planned >= target_micro_units || plan.size() >= max_tx) break;
+        if (holding.second <= fee) continue;
+        const auto spendable = holding.second - fee;
+        const auto remaining = target_micro_units - planned;
+        const auto amount = spendable < remaining ? spendable : remaining;
+        if (amount == 0) continue;
+        plan.push_back({holding.first, amount, fee, nonce++});
+        planned += amount;
+        total_fees += fee;
+    }
+
+    std::cout << "BULK_SEND_PLAN workdir=" << workdir
+              << " sender=" << *sender
+              << " receiver=" << receiver
+              << " requested_micro_units=" << target_micro_units
+              << " planned_micro_units=" << planned
+              << " tx_count=" << plan.size()
+              << " total_fee_micro_units=" << total_fees
+              << " start_nonce=" << *next_nonce
+              << " execute=" << (execute ? 1 : 0) << "\n";
+    for (const auto& item : plan) {
+        std::cout << "BULK_SEND_TX prime=" << item.prime
+                  << " amount=" << item.amount
+                  << " fee=" << item.fee
+                  << " nonce=" << item.nonce << "\n";
+    }
+
+    if (planned == 0) {
+        std::cerr << "bulk_send_error: no selectable holdings in this wallet/batch\n";
+        return 1;
+    }
+    if (planned < target_micro_units) {
+        std::cout << "BULK_SEND_PARTIAL remaining_micro_units="
+                  << (target_micro_units - planned)
+                  << " reason=batch-limit-or-wallet-holdings\n";
+    }
+    if (!execute) {
+        std::cout << "BULK_SEND_DRY_RUN add --execute to submit these transactions\n";
+        return 0;
+    }
+
+    std::uint64_t submitted = 0;
+    for (const auto& item : plan) {
+        const int rc = runTool(argv[0], "primechain-send", {
+            "submit", peer->host, std::to_string(peer->port), wallet_path, receiver,
+            std::to_string(item.prime), std::to_string(item.amount),
+            std::to_string(item.fee), std::to_string(item.nonce)});
+        if (rc != 0) {
+            std::cerr << "bulk_send_error: submit failed at nonce " << item.nonce
+                      << " after_submitted=" << submitted << "\n";
+            return rc;
+        }
+        ++submitted;
+    }
+    std::cout << "BULK_SEND_SUBMITTED tx_count=" << submitted
+              << " micro_units=" << planned
+              << " total_fee_micro_units=" << total_fees
+              << " remaining_micro_units=" << (target_micro_units > planned ? target_micro_units - planned : 0)
+              << "\n";
+    return 0;
+}
+
 std::uint64_t primeMinerRewardMicroUnits(
     bool validator_rewards_active,
     bool has_pending_composites,
@@ -5735,6 +5907,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " clear-job <workdir>\n"
               << "  " << argv0 << " mine-job <workdir> --target <integer>\n"
               << "  " << argv0 << " balances <workdir>\n"
+              << "  " << argv0 << " bulk-send <workdir> <sender-wallet> <receiver-address> <amount-micro-units> [--fee micro-units] [--max-tx count] [--execute]\n"
               << "  " << argv0 << " rewards <workdir>\n"
               << "  " << argv0 << " reward-history <workdir> [--last count]\n"
               << "  " << argv0 << " update-reward-index <workdir>\n"
@@ -5839,6 +6012,10 @@ int main(int argc, char** argv) {
     if (command == "balances") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
         return balancesWorkdir(argc, argv);
+    }
+    if (command == "bulk-send") {
+        if (argc < 6) { printUsage(argv[0]); return 1; }
+        return bulkSend(argc, argv);
     }
     if (command == "rewards") {
         if (argc != 3) { printUsage(argv[0]); return 1; }
