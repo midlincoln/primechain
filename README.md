@@ -21,6 +21,9 @@ Implemented and tested in the current public repository:
 - deterministic validator fee-pool and validator reward-pool distribution
 - crash-recoverable append-only chain store, rebuildable indexes, and replay snapshots
 - TCP peer sync, record propagation, mempool propagation, peer health, and peer state tools
+- memory-bounded peer sync/status paths: range responses stream records, `GET_STATUS`
+  counts record headers without loading payloads, temporary sync sidecars are cleaned up,
+  and genesis-anchor checks read the indexed genesis record instead of replaying the whole store
 - operator tooling for validator service setup, network doctors, release checks, launch summaries, wallet dashboards, transaction lookup, and address reports
 
 The tested one-validator-to-three-validator launch procedure is documented in [`docs/launch-validator-runbook.md`](docs/launch-validator-runbook.md). Mainnet-candidate validator owner onboarding is documented in [`docs/mainnet-validator-onboarding.md`](docs/mainnet-validator-onboarding.md). Validator admission, reserve, quorum, reward, fee, and slashing-status rules are summarized in [`docs/validator-economics.md`](docs/validator-economics.md). The active public-launch and Bitcoin-readiness plan is tracked in [`docs/working-plan.md`](docs/working-plan.md), and the lower-level production backlog is tracked in [`docs/production-roadmap-v0.md`](docs/production-roadmap-v0.md).
@@ -31,13 +34,23 @@ Protocol-2 record identity deliberately separates the stable arithmetic subject 
 
 Transaction records are versioned. Records through version 11 keep the legacy flat ordered transaction-batch commitment stored in `transaction_merkle_root` for replay compatibility. Record version 12 and later use a real binary transaction Merkle root over canonical transaction hashes, with odd-leaf duplication at each level and `Hash256{0}` for an empty transaction list.
 
+The current public validator build includes the August 2026 sync-server memory hardening series:
+
+- `e501f11` reduces peer-sync temporary replay pressure by copying available replay snapshots to downloaded temp stores and cleaning abandoned temp sidecars.
+- `6921d1b` streams `GET_RECORD_RANGE` responses instead of materializing full response ranges in memory.
+- `8218609` serializes record-range serving so concurrent sync clients cannot force multiple full-chain range scans at once.
+- `2d996e0` reads the genesis validator anchor from indexed record `2` instead of replaying the downloaded temp chain.
+- `5dac9e8` serves `GET_STATUS` counts from record headers rather than allocating full payloads.
+
+Together these changes keep validator RSS bounded under normal public sync/status traffic and avoid stale `chain.dat.sync.*`, `.idx.tmp.*`, and `.snapshot.tmp.*` buildup. On very small validator hosts, a modest swap file is still useful operational insurance, but the node should not depend on multi-GB heap growth for routine sync.
+
 Public validator operators should keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, `--enable-factorization-helper` is not part of the public launch validator profile. Release commit `b6c453e2cfbb` hardens public sync-server command handling around helper factorization, off-frontier prime submission, and composite-lottery signing rate limits; see the validator runbooks for the operator note.
 
 Relevant implementation files for the current protocol path:
 
 - `include/primechain/version.hpp.in` declares the protocol/network version stamped into binaries.
 - `include/primechain/protocol/records.hpp` and `src/protocol/records.cpp` define record serialization, genesis metadata, subject hashes, canonical stored hashes, transaction batch commitments, and legacy/v11 decoding.
-- `src/storage/record_store.cpp` validates append-only record envelopes against the canonical record identity and maintains `.idx` offsets.
+- `src/storage/record_store.cpp` validates append-only record envelopes against the canonical record identity, maintains `.idx` offsets, supports streaming range reads, and exposes header-only record-kind counts for lightweight status serving.
 - `src/node/sequential_node.cpp` replays records, rewards, sparse holdings, transactions, validator epochs, and consensus checks.
 - `src/node/sync_server.cpp` implements TCP submission, composite lottery, validator finalization, round changes, peer sync, and record propagation.
 - `src/tools/client.cpp`, `src/tools/sync_download.cpp`, and `src/miner/frontier_main.cpp` provide the launch client, sync/download path, and frontier miner.
