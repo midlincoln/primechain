@@ -834,6 +834,22 @@ bool copyFileOrCreateEmpty(const std::string& source, const std::string& destina
     return true;
 }
 
+void copyReplaySnapshotIfPresent(const std::string& source_store,
+                                 const std::string& destination_store) {
+    std::string ignored;
+    copyFile(source_store + ".snapshot", destination_store + ".snapshot", ignored);
+}
+
+void removeStoreTempArtifacts(const std::string& path) {
+    std::remove(path.c_str());
+    std::remove((path + ".idx").c_str());
+    std::remove((path + ".snapshot").c_str());
+    std::remove((path + ".snapshot.tmp").c_str());
+    std::remove((path + ".finalization").c_str());
+    std::remove((path + ".rounds").c_str());
+    std::remove((path + ".peers").c_str());
+}
+
 std::optional<primechain::storage::StoredRecord> validateTipReplacementCandidate(
     const std::string& store_path,
     const primechain::storage::StoredRecord& local_tip,
@@ -2270,26 +2286,28 @@ public:
         const std::uint64_t sync_id = ++g_peer_sync_counter;
         const std::string temp_path = store_path_ + ".sync." + std::to_string(getpid()) +
             "." + std::to_string(sync_id);
-        std::remove(temp_path.c_str());
+        removeStoreTempArtifacts(temp_path);
         if (!copyFileOrCreateEmpty(store_path_, temp_path, error)) {
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
+        copyReplaySnapshotIfPresent(store_path_, temp_path);
 
         primechain::storage::RecordStore temp_store(temp_path);
         if (!downloadRecordRange(host, port, start, peer_status->frontier_integer, temp_store, error)) {
-            std::remove(temp_path.c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
 
         primechain::node::SequentialNode reloaded(temp_path);
         if (!reloaded.load(error)) {
-            std::remove(temp_path.c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
         if (!reloaded.status().has_genesis ||
             reloaded.status().frontier_integer != peer_status->frontier_integer) {
             error = "auto-sync replay frontier mismatch";
-            std::remove(temp_path.c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
         if (quorumEnabled()) {
@@ -2297,14 +2315,14 @@ public:
             if (!loadGenesisValidatorSet(temp_path, anchored, error) ||
                 anchored != genesis_validator_set_) {
                 if (error.empty()) error = "peer genesis validator set differs from configured validator set";
-                std::remove(temp_path.c_str());
+                removeStoreTempArtifacts(temp_path);
                 return false;
             }
         }
 
         primechain::node::SequentialNode current(store_path_);
         if (!current.load(error)) {
-            std::remove(temp_path.c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
         if (current.status().has_genesis != local.status().has_genesis ||
@@ -2312,22 +2330,19 @@ public:
             current.status().latest_record_hash != local.status().latest_record_hash) {
             if (current.status().has_genesis &&
                 current.status().frontier_integer >= peer_status->frontier_integer) {
-                std::remove(temp_path.c_str());
-                std::remove((temp_path + ".idx").c_str());
+                removeStoreTempArtifacts(temp_path);
                 return true;
             }
             error = "local store changed during peer sync";
-            std::remove(temp_path.c_str());
-            std::remove((temp_path + ".idx").c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
 
         if (!store_.installValidatedStore(temp_path, error)) {
-            std::remove(temp_path.c_str());
-            std::remove((temp_path + ".idx").c_str());
+            removeStoreTempArtifacts(temp_path);
             return false;
         }
-        std::remove((temp_path + ".idx").c_str());
+        removeStoreTempArtifacts(temp_path);
         validator_set_ = reloaded.validatorSet();
         if (use_chain_endpoints_) {
             loadChainEndpointPeers();
@@ -2336,7 +2351,7 @@ public:
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
         revalidateMempool();
-        std::remove(temp_path.c_str());
+        removeStoreTempArtifacts(temp_path);
         return true;
     }
 
