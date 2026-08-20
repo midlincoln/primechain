@@ -873,6 +873,68 @@ bool RecordStore::hasContiguousRange(PrimeValue start, PrimeValue end, std::stri
     return true;
 }
 
+bool RecordStore::countRangeByKind(
+    PrimeValue start,
+    PrimeValue end,
+    RecordKindCounts& counts,
+    std::string& error) const {
+    counts = {};
+    if (start > end) {
+        error = "range start is greater than range end";
+        return false;
+    }
+    std::vector<IndexEntry> entries;
+    std::uint64_t store_size = 0;
+    if (!prepareIndex(path_, entries, store_size, error)) return false;
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) {
+        error = "could not open record store";
+        return false;
+    }
+
+    auto current = std::lower_bound(entries.begin(), entries.end(), start,
+        [](const IndexEntry& entry, PrimeValue value) { return entry.integer < value; });
+    for (PrimeValue expected = start; expected <= end; ++expected, ++current) {
+        if (current == entries.end() || current->integer != expected) {
+            error = "requested record range is incomplete";
+            return false;
+        }
+        in.seekg(static_cast<std::streamoff>(current->offset));
+        std::uint64_t magic = 0;
+        std::uint64_t raw_kind = 0;
+        std::uint64_t height = 0;
+        std::uint64_t integer = 0;
+        Hash256 record_hash{};
+        std::uint64_t payload_size = 0;
+        if (!readUint64(in, magic) || !readUint64(in, raw_kind) ||
+            !readUint64(in, height) || !readUint64(in, integer) ||
+            !readHash(in, record_hash) || !readUint64(in, payload_size)) {
+            error = "could not read record header at offset " + std::to_string(current->offset);
+            return false;
+        }
+        if (magic != kRecordStoreMagic) {
+            error = "invalid record store magic at offset " + std::to_string(current->offset);
+            return false;
+        }
+        if (!validKind(raw_kind)) {
+            error = "invalid record kind at offset " + std::to_string(current->offset);
+            return false;
+        }
+        if (integer != expected) {
+            error = "record index integer mismatch";
+            return false;
+        }
+        ++counts.total;
+        if (static_cast<StoredRecordKind>(raw_kind) == StoredRecordKind::Prime) {
+            ++counts.prime;
+        } else {
+            ++counts.composite;
+        }
+    }
+    return true;
+}
+
 bool RecordStore::forEachRange(
     PrimeValue start,
     PrimeValue end,

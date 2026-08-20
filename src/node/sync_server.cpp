@@ -3106,36 +3106,23 @@ private:
             return;
         }
 
-        std::uint64_t prime_records = 0;
-        std::uint64_t composite_records = 0;
-        std::uint64_t total_records = 0;
+        primechain::storage::RecordKindCounts counts;
         const auto& status = node.status();
         const auto latest = store_.latest(error);
         if (!error.empty()) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        if (latest.has_value()) {
-            if (!store_.forEachRange(2, latest->integer,
-                    [&](const primechain::storage::StoredRecord& record) {
-                        ++total_records;
-                        if (record.kind == primechain::storage::StoredRecordKind::Prime) {
-                            ++prime_records;
-                        } else {
-                            ++composite_records;
-                        }
-                        return true;
-                    }, error)) {
-                writeAll(fd, "ERROR " + error + "\n");
-                return;
-            }
+        if (latest.has_value() && !store_.countRangeByKind(2, latest->integer, counts, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
         }
 
         std::ostringstream out;
         out << "STATUS "
-            << total_records << " "
-            << prime_records << " "
-            << composite_records << " "
+            << counts.total << " "
+            << counts.prime << " "
+            << counts.composite << " "
             << (status.has_genesis ? 1 : 0) << " "
             << status.height << " "
             << status.frontier_integer << " "

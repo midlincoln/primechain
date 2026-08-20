@@ -24,6 +24,12 @@ struct StoredRecord {
     std::vector<std::uint8_t> payload;
 };
 
+struct RecordKindCounts {
+    std::uint64_t total{0};
+    std::uint64_t prime{0};
+    std::uint64_t composite{0};
+};
+
 class RecordStore {
 public:
     explicit RecordStore(std::string path);
@@ -38,6 +44,7 @@ public:
     std::optional<StoredRecord> findByInteger(PrimeValue integer, std::string& error) const;
     std::vector<StoredRecord> findRange(PrimeValue start, PrimeValue end, std::string& error) const;
     bool hasContiguousRange(PrimeValue start, PrimeValue end, std::string& error) const;
+    bool countRangeByKind(PrimeValue start, PrimeValue end, RecordKindCounts& counts, std::string& error) const;
     bool forEachRange(
         PrimeValue start,
         PrimeValue end,
