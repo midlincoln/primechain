@@ -74,6 +74,7 @@ std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
 std::mutex g_peer_sync_mutex;
 std::uint64_t g_peer_sync_counter = 0;
+std::mutex g_record_range_mutex;
 
 void handleSignal(int) {
     g_running = 0;
@@ -3255,10 +3256,9 @@ private:
             return;
         }
 
+        std::lock_guard<std::mutex> range_lock(g_record_range_mutex);
         std::string error;
-        const bool available = store_.forEachRange(start, end,
-            [](const primechain::storage::StoredRecord&) { return true; }, error);
-        if (!available) {
+        if (!store_.hasContiguousRange(start, end, error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }

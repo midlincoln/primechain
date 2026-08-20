@@ -37,6 +37,7 @@ public:
     std::optional<StoredRecord> latest(std::string& error) const;
     std::optional<StoredRecord> findByInteger(PrimeValue integer, std::string& error) const;
     std::vector<StoredRecord> findRange(PrimeValue start, PrimeValue end, std::string& error) const;
+    bool hasContiguousRange(PrimeValue start, PrimeValue end, std::string& error) const;
     bool forEachRange(
         PrimeValue start,
         PrimeValue end,

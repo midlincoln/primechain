@@ -854,6 +854,25 @@ std::vector<StoredRecord> RecordStore::findRange(
     return {};
 }
 
+bool RecordStore::hasContiguousRange(PrimeValue start, PrimeValue end, std::string& error) const {
+    if (start > end) {
+        error = "range start is greater than range end";
+        return false;
+    }
+    std::vector<IndexEntry> entries;
+    std::uint64_t store_size = 0;
+    if (!prepareIndex(path_, entries, store_size, error)) return false;
+    auto current = std::lower_bound(entries.begin(), entries.end(), start,
+        [](const IndexEntry& entry, PrimeValue value) { return entry.integer < value; });
+    for (PrimeValue expected = start; expected <= end; ++expected, ++current) {
+        if (current == entries.end() || current->integer != expected) {
+            error = "requested record range is incomplete";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool RecordStore::forEachRange(
     PrimeValue start,
     PrimeValue end,
