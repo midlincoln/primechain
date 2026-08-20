@@ -854,6 +854,49 @@ std::vector<StoredRecord> RecordStore::findRange(
     return {};
 }
 
+bool RecordStore::forEachRange(
+    PrimeValue start,
+    PrimeValue end,
+    const std::function<bool(const StoredRecord&)>& visitor,
+    std::string& error) const {
+    if (start > end) {
+        error = "range start is greater than range end";
+        return false;
+    }
+    std::vector<IndexEntry> entries;
+    std::uint64_t store_size = 0;
+    if (!prepareIndex(path_, entries, store_size, error)) return false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto current = std::lower_bound(entries.begin(), entries.end(), start,
+            [](const IndexEntry& entry, PrimeValue value) { return entry.integer < value; });
+        PrimeValue expected = start;
+        bool invalid_index = false;
+        while (expected <= end) {
+            if (current == entries.end() || current->integer != expected) {
+                error = "requested record range is incomplete";
+                return false;
+            }
+            auto record = readRecordAt(path_, current->offset, error);
+            if (!record.has_value() || record->integer != current->integer) {
+                invalid_index = true;
+                break;
+            }
+            if (!visitor(*record)) return false;
+            ++current;
+            ++expected;
+        }
+        if (!invalid_index) return true;
+        if (attempt != 0) {
+            if (error.empty()) error = "record index integer mismatch";
+            return false;
+        }
+        std::remove((path_ + ".idx").c_str());
+        error.clear();
+        if (!prepareIndex(path_, entries, store_size, error)) return false;
+    }
+    return true;
+}
+
 StoredRecord makeStoredRecord(const protocol::CompositeRecordV0& record) {
     StoredRecord out;
     out.kind = StoredRecordKind::Composite;

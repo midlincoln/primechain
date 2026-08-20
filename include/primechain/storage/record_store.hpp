@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,6 +37,11 @@ public:
     std::optional<StoredRecord> latest(std::string& error) const;
     std::optional<StoredRecord> findByInteger(PrimeValue integer, std::string& error) const;
     std::vector<StoredRecord> findRange(PrimeValue start, PrimeValue end, std::string& error) const;
+    bool forEachRange(
+        PrimeValue start,
+        PrimeValue end,
+        const std::function<bool(const StoredRecord&)>& visitor,
+        std::string& error) const;
 
 private:
     std::string path_;

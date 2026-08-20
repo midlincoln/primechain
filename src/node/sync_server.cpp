@@ -3256,28 +3256,30 @@ private:
         }
 
         std::string error;
-        const auto records = store_.findRange(start, end, error);
-        if (!error.empty()) {
+        const bool available = store_.forEachRange(start, end,
+            [](const primechain::storage::StoredRecord&) { return true; }, error);
+        if (!available) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
-        const auto expected_count = end - start + 1;
-        if (records.size() != expected_count) {
-            writeAll(fd, "ERROR requested record range is incomplete\n");
-            return;
-        }
-        for (std::size_t i = 0; i < records.size(); ++i) {
-            if (records[i].integer != start + i) {
-                writeAll(fd, "ERROR requested record range is non-contiguous\n");
-                return;
-            }
-        }
 
+        const auto expected_count = end - start + 1;
         std::ostringstream header;
-        header << "RECORD_RANGE " << start << " " << end << " " << records.size() << "\n";
-        writeAll(fd, header.str());
-        for (const auto& record : records) {
-            writeCommand(fd, recordLine(record));
+        header << "RECORD_RANGE " << start << " " << end << " " << expected_count << "\n";
+        if (!writeAll(fd, header.str())) return;
+
+        bool write_failed = false;
+        const bool streamed = store_.forEachRange(start, end,
+            [&](const primechain::storage::StoredRecord& record) {
+                if (!writeCommand(fd, recordLine(record))) {
+                    write_failed = true;
+                    return false;
+                }
+                return true;
+            }, error);
+        if (!streamed) {
+            if (!write_failed) writeAll(fd, "ERROR " + error + "\n");
+            return;
         }
         writeAll(fd, "END_RECORD_RANGE\n");
     }
