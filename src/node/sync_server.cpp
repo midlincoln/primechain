@@ -3100,32 +3100,40 @@ private:
 
     void sendStatus(int fd) const {
         std::string error;
-        const auto records = store_.loadAll(error);
-        if (!error.empty()) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-
-        std::uint64_t prime_records = 0;
-        std::uint64_t composite_records = 0;
-        for (const auto& record : records) {
-            if (record.kind == primechain::storage::StoredRecordKind::Prime) {
-                ++prime_records;
-            } else {
-                ++composite_records;
-            }
-        }
-
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) {
             writeAll(fd, "ERROR " + error + "\n");
             return;
         }
 
+        std::uint64_t prime_records = 0;
+        std::uint64_t composite_records = 0;
+        std::uint64_t total_records = 0;
         const auto& status = node.status();
+        const auto latest = store_.latest(error);
+        if (!error.empty()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (latest.has_value()) {
+            if (!store_.forEachRange(2, latest->integer,
+                    [&](const primechain::storage::StoredRecord& record) {
+                        ++total_records;
+                        if (record.kind == primechain::storage::StoredRecordKind::Prime) {
+                            ++prime_records;
+                        } else {
+                            ++composite_records;
+                        }
+                        return true;
+                    }, error)) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+        }
+
         std::ostringstream out;
         out << "STATUS "
-            << records.size() << " "
+            << total_records << " "
             << prime_records << " "
             << composite_records << " "
             << (status.has_genesis ? 1 : 0) << " "
