@@ -538,13 +538,15 @@ receiver=pcpq1_...
 
 The command is a dry run unless `--execute` is present. It reads spendable
 holdings from the local workdir chain, queries the peer for the sender's next
-nonce, chooses the largest prime-asset holdings first, then signs and submits
-one transaction per selected prime asset. Primechain balances are sparse
-prime-indexed assets, not one fungible account bucket, so sending a large
-amount may require many independent transactions. Keep `--max-tx` below the
-node's per-sender mempool limit, currently `25`, and wait for a batch to
-confirm before sending another batch from the same wallet. Distinct sender
-wallets have distinct nonces and per-sender mempool limits.
+nonce for planning, chooses the largest prime-asset holdings first, then signs
+and submits one transaction per selected prime asset. During `--execute`, the
+client refreshes the sender's next nonce before each individual submission so a
+batch can tolerate records being mined while the batch is running. Primechain
+balances are sparse prime-indexed assets, not one fungible account bucket, so
+sending a large amount may require many independent transactions. Keep
+`--max-tx` below the node's per-sender mempool limit, currently `25`, and wait
+for a batch to confirm before sending another batch from the same wallet.
+Distinct sender wallets have distinct nonces and per-sender mempool limits.
 
 Validator fee-pool balances can be inspected and distributed by a protocol
 transaction. The distribution transaction has no wallet signature; replay

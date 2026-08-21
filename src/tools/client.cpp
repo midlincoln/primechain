@@ -798,12 +798,23 @@ int bulkSend(int argc, char** argv) {
 
     std::uint64_t submitted = 0;
     for (const auto& item : plan) {
+        const auto current_nonce = queryNextNonce(argv[0], *peer, *sender);
+        if (!current_nonce.has_value()) {
+            std::cerr << "bulk_send_error: could not refresh nonce after_submitted="
+                      << submitted << "\n";
+            return 1;
+        }
+        std::cout << "BULK_SEND_SUBMIT"
+                  << " prime=" << item.prime
+                  << " amount=" << item.amount
+                  << " fee=" << item.fee
+                  << " nonce=" << *current_nonce << "\n";
         const int rc = runTool(argv[0], "primechain-send", {
             "submit", peer->host, std::to_string(peer->port), wallet_path, receiver,
             std::to_string(item.prime), std::to_string(item.amount),
-            std::to_string(item.fee), std::to_string(item.nonce)});
+            std::to_string(item.fee), std::to_string(*current_nonce)});
         if (rc != 0) {
-            std::cerr << "bulk_send_error: submit failed at nonce " << item.nonce
+            std::cerr << "bulk_send_error: submit failed at nonce " << *current_nonce
                       << " after_submitted=" << submitted << "\n";
             return rc;
         }
