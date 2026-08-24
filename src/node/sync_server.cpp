@@ -66,12 +66,14 @@ constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
 constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 64;
+constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 128;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
 constexpr std::size_t kMaxCompositeLotteryCandidates = 64;
 volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
+std::size_t g_active_remote_connection_total = 0;
 std::mutex g_peer_sync_mutex;
 std::uint64_t g_peer_sync_counter = 0;
 std::mutex g_record_range_mutex;
@@ -8229,12 +8231,18 @@ int main(int argc, char** argv) {
         if (!client_loopback) {
             std::lock_guard<std::mutex> lock(g_client_connection_mutex);
             auto& active = g_active_remote_connections[client_ip];
+            if (g_active_remote_connection_total >= kMaxActiveRemoteConnectionsTotal) {
+                writeAll(client_fd, "ERROR connection limit exceeded\n");
+                close(client_fd);
+                continue;
+            }
             if (active >= kMaxActiveRemoteConnectionsPerIp) {
                 writeAll(client_fd, "ERROR connection limit exceeded for client IP\n");
                 close(client_fd);
                 continue;
             }
             ++active;
+            ++g_active_remote_connection_total;
         }
         Socket client(client_fd);
         std::thread([&sync_server, client = std::move(client), client_ip, client_loopback]() mutable {
@@ -8249,6 +8257,9 @@ int main(int argc, char** argv) {
                     } else {
                         g_active_remote_connections.erase(found);
                     }
+                }
+                if (g_active_remote_connection_total > 0) {
+                    --g_active_remote_connection_total;
                 }
             }
         }).detach();
