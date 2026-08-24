@@ -39,18 +39,22 @@ PrimeValue gcd(PrimeValue a, PrimeValue b) {
 }
 
 PrimeValue mulMod(PrimeValue a, PrimeValue b, PrimeValue mod) {
-    PrimeValue result = 0;
-    a %= mod;
-    while (b > 0) {
-        if ((b & 1u) != 0) {
-            result = (result + a) % mod;
-        }
-        b >>= 1u;
-        if (b > 0) {
-            a = (a + a) % mod;
-        }
-    }
-    return result;
+    // The previous implementation computed this via repeated
+    // double-and-add (result+a, a+a, each reduced mod `mod`) specifically
+    // to avoid an overflowing a*b -- but that reasoning only holds when
+    // mod <= 2^63: once mod exceeds that, a and result can each already be
+    // up to mod-1, so `a + a` or `result + a` can reach up to ~2*mod,
+    // which overflows uint64_t and silently wraps for any mod > 2^63.
+    // Confirmed live: isPrime()'s Miller-Rabin now calls this for
+    // candidates across the *entire* uint64_t range (unlike the old
+    // Pratt-proof-only caller, which in practice never exercised primes
+    // above 2^63), and an oracle cross-check caught exactly this --
+    // correct results below 2^63, silent false-composite results above
+    // it. __int128 sidesteps the whole problem: the true 128-bit product
+    // never overflows, so a single multiply+mod is both correct for the
+    // full range and considerably faster than the old bit-by-bit loop.
+    return static_cast<PrimeValue>(
+        (static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b)) % mod);
 }
 
 PrimeValue powMod(PrimeValue base, PrimeValue exponent, PrimeValue mod) {
@@ -80,15 +84,54 @@ bool isPrime(PrimeValue n) {
     if (n < 2) {
         return false;
     }
-    if (n == 2 || n == 3) {
-        return true;
-    }
-    if (n % 2 == 0 || n % 3 == 0) {
-        return false;
+
+    // Trial-divide against the small primes used as Miller-Rabin witnesses
+    // below: cheaply resolves n as prime when it equals one of them, and
+    // rejects most composites (including all even n) before paying for any
+    // modular exponentiation.
+    constexpr PrimeValue kWitnesses[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
+    for (const PrimeValue p : kWitnesses) {
+        if (n == p) {
+            return true;
+        }
+        if (n % p == 0) {
+            return false;
+        }
     }
 
-    for (PrimeValue d = 5; d <= n / d; d += 6) {
-        if (n % d == 0 || n % (d + 2) == 0) {
+    // Deterministic Miller-Rabin over witnesses {2,3,5,7,11,13,17,19,23,29,
+    // 31,37}: a proven-correct (zero false positives, not merely
+    // probabilistic) primality test for every n < 3,317,044,064,679,887,
+    // 385,961,981 -- which safely covers PrimeValue's entire uint64_t
+    // range. Replaces the O(sqrt(n)) trial division that used to run all
+    // the way up here: primality is a mathematical fact independent of
+    // which correct test decides it, so this cannot disagree with the old
+    // algorithm on any input, it just gets there in O(log^3 n) instead of
+    // O(sqrt(n)) -- the difference between a candidate near 2^63 costing
+    // roughly 3 billion divisions versus a few dozen modular
+    // multiplications. mulMod/powMod below are the same helpers already
+    // used elsewhere in this file (e.g. verifyPrattProof).
+    PrimeValue d = n - 1;
+    int r = 0;
+    while ((d & 1u) == 0) {
+        d >>= 1u;
+        ++r;
+    }
+
+    for (const PrimeValue a : kWitnesses) {
+        PrimeValue x = powMod(a, d, n);
+        if (x == 1 || x == n - 1) {
+            continue;
+        }
+        bool possibly_composite = true;
+        for (int i = 0; i < r - 1; ++i) {
+            x = mulMod(x, x, n);
+            if (x == n - 1) {
+                possibly_composite = false;
+                break;
+            }
+        }
+        if (possibly_composite) {
             return false;
         }
     }
