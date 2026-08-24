@@ -5574,14 +5574,24 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
         std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
         return 0;
     }
-    const int rc = runTool(argv0, "primechain-sync-download", {
-        sync_peer.host,
-        std::to_string(sync_peer.port),
-        std::to_string(start),
-        std::to_string(remote.frontier),
-        chainPath(workdir),
-    });
-    if (rc != 0) return rc;
+    constexpr primechain::PrimeValue kMaxSyncRangeCount = 10000;
+    for (primechain::PrimeValue chunk_start = start; chunk_start <= remote.frontier;) {
+        const primechain::PrimeValue remaining = remote.frontier - chunk_start;
+        const primechain::PrimeValue chunk_end =
+            remaining + 1 > kMaxSyncRangeCount
+                ? chunk_start + kMaxSyncRangeCount - 1
+                : remote.frontier;
+        const int rc = runTool(argv0, "primechain-sync-download", {
+            sync_peer.host,
+            std::to_string(sync_peer.port),
+            std::to_string(chunk_start),
+            std::to_string(chunk_end),
+            chainPath(workdir),
+        });
+        if (rc != 0) return rc;
+        if (chunk_end == remote.frontier) break;
+        chunk_start = chunk_end + 1;
+    }
     std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
     return 0;
 }
