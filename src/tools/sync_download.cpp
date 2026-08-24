@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "primechain/crypto/hash.hpp"
@@ -50,6 +51,14 @@ private:
     int fd_{-1};
 };
 
+bool setSocketTimeouts(int fd, int timeout_ms) {
+    timeval timeout{};
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+
 std::optional<Socket> connectToServer(const std::string& host, int port) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -67,6 +76,11 @@ std::optional<Socket> connectToServer(const std::string& host, int port) {
     }
     if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << "connect failed: " << std::strerror(errno) << "\n";
+        close(fd);
+        return std::nullopt;
+    }
+    if (!setSocketTimeouts(fd, 20000)) {
+        std::cerr << "could not set socket timeouts: " << std::strerror(errno) << "\n";
         close(fd);
         return std::nullopt;
     }
