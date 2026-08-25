@@ -66,8 +66,10 @@ constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
 constexpr std::size_t kMaxActivePublicConnectionsPerIp = 2;
+constexpr std::size_t kMaxActivePublicSyncConnectionsPerIp = 4;
 constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 32;
 constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 12;
+constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
 constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 96;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
@@ -75,8 +77,10 @@ constexpr std::size_t kMaxCompositeLotteryCandidates = 64;
 volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
+std::map<std::uint32_t, std::size_t> g_active_public_sync_connections;
 std::size_t g_active_remote_connection_total = 0;
 std::size_t g_active_public_remote_connection_total = 0;
+std::size_t g_active_public_sync_connection_total = 0;
 std::mutex g_peer_sync_mutex;
 std::uint64_t g_peer_sync_counter = 0;
 std::mutex g_record_range_mutex;
@@ -104,6 +108,7 @@ std::string clientUpdateRequiredLine(const std::string& reason) {
 
 enum class ListenerRole {
     PublicClient,
+    PublicSync,
     ValidatorPeer,
 };
 
@@ -2022,6 +2027,7 @@ public:
         bool client_known_peer,
         ListenerRole listener_role) {
         const bool public_listener = listener_role == ListenerRole::PublicClient;
+        const bool sync_listener = listener_role == ListenerRole::PublicSync;
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
         std::size_t invalid_command_count = 0;
@@ -2030,6 +2036,12 @@ public:
             if (command_count > kMaxCommandsPerConnection) {
                 recordClientViolation(client_ip, client_loopback);
                 writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
+                return;
+            }
+            if (sync_listener && *line != "GET_STATUS" && *line != "GET_VERSION" &&
+                line->rfind("GET_RECORD ", 0) != 0 && line->rfind("GET_RECORD_RANGE ", 0) != 0) {
+                recordClientViolation(client_ip, client_loopback);
+                writeAll(fd, clientUpdateRequiredLine("sync port only accepts read-only sync commands"));
                 return;
             }
             if (isPeerOnlyCommand(*line) && listener_role != ListenerRole::ValidatorPeer) {
@@ -2083,6 +2095,11 @@ public:
                 continue;
             }
             if (line->rfind("GET_RECORD_RANGE ", 0) == 0) {
+                if (public_listener) {
+                    recordClientViolation(client_ip, client_loopback);
+                    writeAll(fd, clientUpdateRequiredLine("record sync moved to public sync port 8341; update your client or request GET_RECORD_RANGE from port 8341"));
+                    return;
+                }
                 sendRecordRange(fd, *line, client_ip, client_loopback);
                 continue;
             }
@@ -7918,6 +7935,8 @@ struct Options {
     std::string bind_address{"127.0.0.1"};
     int peer_port{0};
     std::string peer_bind_address{"0.0.0.0"};
+    int sync_port{0};
+    std::string sync_bind_address{"0.0.0.0"};
     std::string store_path{kDefaultStorePath};
     std::vector<PeerEndpoint> peers;
     int sync_interval_seconds{0};
@@ -7966,6 +7985,23 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                 return std::nullopt;
             }
             options.peer_bind_address = argv[index++];
+            continue;
+        }
+        if (flag == "--sync-port") {
+            if (index >= argc) {
+                return std::nullopt;
+            }
+            options.sync_port = std::stoi(argv[index++]);
+            if (options.sync_port <= 0 || options.sync_port > 65535) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (flag == "--sync-bind") {
+            if (index >= argc) {
+                return std::nullopt;
+            }
+            options.sync_bind_address = argv[index++];
             continue;
         }
         if (flag == "--peer" || flag == "--bootstrap-peer") {
@@ -8048,7 +8084,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer-port port] [--peer-bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--composite-lottery-window-ms ms] [--composite-lottery-win-bps bps] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer-port port] [--peer-bind address] [--sync-port port] [--sync-bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--composite-lottery-window-ms ms] [--composite-lottery-win-bps bps] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
               << "       " << argv0 << " --version\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
@@ -8122,6 +8158,13 @@ int main(int argc, char** argv) {
     if (options.peer_port > 0) {
         peer_server = listenOnPort(options.peer_bind_address, options.peer_port);
         if (!peer_server.has_value()) {
+            return 1;
+        }
+    }
+    std::optional<Socket> sync_server_socket;
+    if (options.sync_port > 0) {
+        sync_server_socket = listenOnPort(options.sync_bind_address, options.sync_port);
+        if (!sync_server_socket.has_value()) {
             return 1;
         }
     }
@@ -8212,6 +8255,9 @@ int main(int argc, char** argv) {
     if (peer_server.has_value()) {
         std::cout << "Primechain validator peer listener on " << options.peer_bind_address << ":" << options.peer_port << "\n";
     }
+    if (sync_server_socket.has_value()) {
+        std::cout << "Primechain public sync listener on " << options.sync_bind_address << ":" << options.sync_port << "\n";
+    }
     std::cout << "record store: " << options.store_path << "\n";
     if (options.sync_interval_seconds > 0 && !options.peers.empty()) {
         std::cout << "continuous peer sync interval: " << options.sync_interval_seconds << "s\n";
@@ -8286,7 +8332,7 @@ int main(int argc, char** argv) {
         }
     });
 
-    auto acceptClient = [&](Socket& listener, bool peer_listener) {
+    auto acceptClient = [&](Socket& listener, ListenerRole accept_role) {
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
         const int client_fd = accept(listener.fd(), reinterpret_cast<sockaddr*>(&client_addr), &client_len);
@@ -8302,7 +8348,7 @@ int main(int argc, char** argv) {
         const std::uint32_t client_ip = clientIpKey(client_addr);
         const bool client_known_peer = !client_loopback && sync_server.isKnownPeerClient(client_ip);
         const bool trusted_client = client_loopback || client_known_peer;
-        if (peer_listener && !trusted_client) {
+        if (accept_role == ListenerRole::ValidatorPeer && !trusted_client) {
             writeAll(client_fd, clientUpdateRequiredLine("validator peer port only accepts configured validators"));
             close(client_fd);
             return;
@@ -8314,18 +8360,29 @@ int main(int argc, char** argv) {
         }
         if (!client_loopback) {
             std::lock_guard<std::mutex> lock(g_client_connection_mutex);
-            auto& active = g_active_remote_connections[client_ip];
-            const auto per_ip_limit = trusted_client
+            auto* active_map = &g_active_remote_connections;
+            std::size_t per_ip_limit = trusted_client
                 ? kMaxActiveKnownPeerConnectionsPerIp
                 : kMaxActivePublicConnectionsPerIp;
+            if (!trusted_client && accept_role == ListenerRole::PublicSync) {
+                active_map = &g_active_public_sync_connections;
+                per_ip_limit = kMaxActivePublicSyncConnectionsPerIp;
+            }
+            auto& active = (*active_map)[client_ip];
             if (g_active_remote_connection_total >= kMaxActiveRemoteConnectionsTotal) {
                 writeAll(client_fd, "ERROR connection limit exceeded\n");
                 close(client_fd);
                 return;
             }
-            if (!trusted_client &&
+            if (!trusted_client && accept_role == ListenerRole::PublicClient &&
                 g_active_public_remote_connection_total >= kMaxActivePublicRemoteConnectionsTotal) {
                 writeAll(client_fd, "ERROR public connection limit exceeded\n");
+                close(client_fd);
+                return;
+            }
+            if (!trusted_client && accept_role == ListenerRole::PublicSync &&
+                g_active_public_sync_connection_total >= kMaxActivePublicSyncConnectionsTotal) {
+                writeAll(client_fd, "ERROR public sync connection limit exceeded\n");
                 close(client_fd);
                 return;
             }
@@ -8336,30 +8393,39 @@ int main(int argc, char** argv) {
             }
             ++active;
             ++g_active_remote_connection_total;
-            if (!trusted_client) ++g_active_public_remote_connection_total;
+            if (!trusted_client && accept_role == ListenerRole::PublicClient) ++g_active_public_remote_connection_total;
+            if (!trusted_client && accept_role == ListenerRole::PublicSync) ++g_active_public_sync_connection_total;
         }
         Socket client(client_fd);
-        const ListenerRole listener_role = peer_listener || !peer_server.has_value()
+        const ListenerRole listener_role = !peer_server.has_value() && accept_role == ListenerRole::PublicClient
             ? ListenerRole::ValidatorPeer
-            : ListenerRole::PublicClient;
+            : accept_role;
         std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role]() mutable {
             setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
             sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
             if (!client_loopback) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
-                auto found = g_active_remote_connections.find(client_ip);
-                if (found != g_active_remote_connections.end()) {
+                auto& active_map = (!trusted_client && listener_role == ListenerRole::PublicSync)
+                    ? g_active_public_sync_connections
+                    : g_active_remote_connections;
+                auto found = active_map.find(client_ip);
+                if (found != active_map.end()) {
                     if (found->second > 1) {
                         --found->second;
                     } else {
-                        g_active_remote_connections.erase(found);
+                        active_map.erase(found);
                     }
                 }
                 if (g_active_remote_connection_total > 0) {
                     --g_active_remote_connection_total;
                 }
-                if (!trusted_client && g_active_public_remote_connection_total > 0) {
+                if (!trusted_client && listener_role == ListenerRole::PublicClient &&
+                    g_active_public_remote_connection_total > 0) {
                     --g_active_public_remote_connection_total;
+                }
+                if (!trusted_client && listener_role == ListenerRole::PublicSync &&
+                    g_active_public_sync_connection_total > 0) {
+                    --g_active_public_sync_connection_total;
                 }
             }
         }).detach();
@@ -8373,6 +8439,10 @@ int main(int argc, char** argv) {
         if (peer_server.has_value()) {
             FD_SET(peer_server->fd(), &read_fds);
             max_fd = std::max(max_fd, peer_server->fd());
+        }
+        if (sync_server_socket.has_value()) {
+            FD_SET(sync_server_socket->fd(), &read_fds);
+            max_fd = std::max(max_fd, sync_server_socket->fd());
         }
 
         timeval timeout{};
@@ -8391,10 +8461,13 @@ int main(int argc, char** argv) {
             continue;
         }
         if (FD_ISSET(server->fd(), &read_fds)) {
-            acceptClient(*server, false);
+            acceptClient(*server, ListenerRole::PublicClient);
         }
         if (peer_server.has_value() && FD_ISSET(peer_server->fd(), &read_fds)) {
-            acceptClient(*peer_server, true);
+            acceptClient(*peer_server, ListenerRole::ValidatorPeer);
+        }
+        if (sync_server_socket.has_value() && FD_ISSET(sync_server_socket->fd(), &read_fds)) {
+            acceptClient(*sync_server_socket, ListenerRole::PublicSync);
         }
     }
 

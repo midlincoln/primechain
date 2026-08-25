@@ -47,6 +47,13 @@ struct StatusLine {
     std::string latest_hash;
 };
 
+PeerConfig syncDownloadPeerFor(const PeerConfig& peer) {
+    if (peer.port == 8339) {
+        return PeerConfig{peer.host, 8341};
+    }
+    return peer;
+}
+
 std::string directoryName(const std::string& path);
 bool ensureDirectory(const std::string& path);
 
@@ -5581,9 +5588,10 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
             remaining + 1 > kMaxSyncRangeCount
                 ? chunk_start + kMaxSyncRangeCount - 1
                 : remote.frontier;
+        const auto download_peer = syncDownloadPeerFor(sync_peer);
         const int rc = runTool(argv0, "primechain-sync-download", {
-            sync_peer.host,
-            std::to_string(sync_peer.port),
+            download_peer.host,
+            std::to_string(download_peer.port),
             std::to_string(chunk_start),
             std::to_string(chunk_end),
             chainPath(workdir),
