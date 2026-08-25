@@ -5574,7 +5574,7 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig&
         std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
         return 0;
     }
-    constexpr primechain::PrimeValue kMaxSyncRangeCount = 10000;
+    constexpr primechain::PrimeValue kMaxSyncRangeCount = 2000;
     for (primechain::PrimeValue chunk_start = start; chunk_start <= remote.frontier;) {
         const primechain::PrimeValue remaining = remote.frontier - chunk_start;
         const primechain::PrimeValue chunk_end =
