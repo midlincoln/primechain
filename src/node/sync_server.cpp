@@ -60,15 +60,16 @@ constexpr std::size_t kMaxKnownPeers = 32;
 constexpr std::uint64_t kPeerQuarantineFailureThreshold = 3;
 constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 20000;
+constexpr int kPublicClientReadTimeoutMs = 5000;
 constexpr std::size_t kMaxCommandsPerConnection = 128;
 constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
-constexpr std::size_t kMaxActivePublicConnectionsPerIp = 2;
+constexpr std::size_t kMaxActivePublicConnectionsPerIp = 4;
 constexpr std::size_t kMaxActivePublicSyncConnectionsPerIp = 4;
 constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 32;
-constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 12;
+constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 24;
 constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
 constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 96;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
@@ -8401,7 +8402,10 @@ int main(int argc, char** argv) {
             ? ListenerRole::ValidatorPeer
             : accept_role;
         std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role]() mutable {
-            setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
+            const int timeout_ms = listener_role == ListenerRole::PublicClient
+                ? kPublicClientReadTimeoutMs
+                : kPeerReadTimeoutMs;
+            setSocketTimeouts(client.fd(), timeout_ms);
             sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
             if (!client_loopback) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
