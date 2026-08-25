@@ -102,6 +102,11 @@ std::string clientUpdateRequiredLine(const std::string& reason) {
         + "; update from https://github.com/midlincoln/primechain\n";
 }
 
+enum class ListenerRole {
+    PublicClient,
+    ValidatorPeer,
+};
+
 bool removeIfPresent(const std::string& path, std::string& error) {
     if (std::remove(path.c_str()) == 0) return true;
     if (errno == ENOENT) return true;
@@ -2010,7 +2015,13 @@ public:
         return true;
     }
 
-    void handleClient(int fd, std::uint32_t client_ip, bool client_loopback, bool client_known_peer) {
+    void handleClient(
+        int fd,
+        std::uint32_t client_ip,
+        bool client_loopback,
+        bool client_known_peer,
+        ListenerRole listener_role) {
+        const bool public_listener = listener_role == ListenerRole::PublicClient;
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
         std::size_t invalid_command_count = 0;
@@ -2021,9 +2032,14 @@ public:
                 writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
                 return;
             }
-            if (isPeerOnlyCommand(*line) && !client_loopback && !client_known_peer) {
+            if (isPeerOnlyCommand(*line) && listener_role != ListenerRole::ValidatorPeer) {
                 recordClientViolation(client_ip, client_loopback);
                 writeAll(fd, clientUpdateRequiredLine("peer-only command sent to public validator port"));
+                return;
+            }
+            if (isPeerOnlyCommand(*line) && !client_loopback && !client_known_peer) {
+                recordClientViolation(client_ip, client_loopback);
+                writeAll(fd, clientUpdateRequiredLine("peer-only command requires configured validator peer"));
                 return;
             }
             if (isWriteCommand(*line)) {
@@ -2051,7 +2067,7 @@ public:
                 continue;
             }
             if (*line == "GET_VALIDATOR_ENDPOINTS") {
-                sendValidatorEndpoints(fd);
+                sendValidatorEndpoints(fd, public_listener);
                 continue;
             }
             if (*line == "GET_ECONOMIC_POLICY") {
@@ -2079,7 +2095,7 @@ public:
                 continue;
             }
             if (*line == "GET_PEERS") {
-                sendPeers(fd);
+                sendPeers(fd, public_listener);
                 continue;
             }
             if (*line == "GET_PEER_HEALTH") {
@@ -2981,8 +2997,13 @@ private:
         return true;
     }
 
-    void sendPeers(int fd) const {
+    void sendPeers(int fd, bool public_listener) const {
         std::ostringstream out;
+        if (public_listener) {
+            out << "PEERS 0\nEND_PEERS\n";
+            writeAll(fd, out.str());
+            return;
+        }
         out << "PEERS " << peers_.size() << "\n";
         for (const auto& peer : peers_) {
             out << "PEER " << peer.host << " " << peer.port << "\n";
@@ -3218,7 +3239,7 @@ private:
         writeAll(fd, out.str());
     }
 
-    void sendValidatorEndpoints(int fd) const {
+    void sendValidatorEndpoints(int fd, bool public_listener) const {
         std::string error;
         primechain::storage::RecordStore store(store_path_);
         const auto records = store.loadAll(error);
@@ -3240,10 +3261,15 @@ private:
                 for (const auto& update : composite->validator_endpoints) latest[update.validator_address] = update;
             }
         }
-        std::ostringstream out;
-        out << "VALIDATOR_ENDPOINTS " << latest.size() << "\n";
+        std::vector<primechain::protocol::ValidatorEndpointUpdateV1> visible;
         for (const auto& entry : latest) {
             const auto& update = entry.second;
+            if (public_listener && update.port == 8340) continue;
+            visible.push_back(update);
+        }
+        std::ostringstream out;
+        out << "VALIDATOR_ENDPOINTS " << visible.size() << "\n";
+        for (const auto& update : visible) {
             out << "VALIDATOR_ENDPOINT " << update.validator_address << " "
                 << update.host << " " << update.port << " "
                 << update.effective_integer << " " << update.sequence << "\n";
@@ -8313,9 +8339,12 @@ int main(int argc, char** argv) {
             if (!trusted_client) ++g_active_public_remote_connection_total;
         }
         Socket client(client_fd);
-        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client]() mutable {
+        const ListenerRole listener_role = peer_listener || !peer_server.has_value()
+            ? ListenerRole::ValidatorPeer
+            : ListenerRole::PublicClient;
+        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role]() mutable {
             setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
-            sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client);
+            sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
             if (!client_loopback) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
                 auto found = g_active_remote_connections.find(client_ip);
