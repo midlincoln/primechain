@@ -65,8 +65,10 @@ constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
 constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
-constexpr std::size_t kMaxActiveRemoteConnectionsPerIp = 64;
-constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 128;
+constexpr std::size_t kMaxActivePublicConnectionsPerIp = 16;
+constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 64;
+constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 48;
+constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 192;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
 constexpr std::size_t kMaxCompositeLotteryCandidates = 64;
@@ -74,6 +76,7 @@ volatile std::sig_atomic_t g_running = 1;
 std::mutex g_client_connection_mutex;
 std::map<std::uint32_t, std::size_t> g_active_remote_connections;
 std::size_t g_active_remote_connection_total = 0;
+std::size_t g_active_public_remote_connection_total = 0;
 std::mutex g_peer_sync_mutex;
 std::uint64_t g_peer_sync_counter = 0;
 std::mutex g_record_range_mutex;
@@ -192,6 +195,27 @@ std::uint32_t clientIpKey(const sockaddr_in& addr) {
     return ntohl(addr.sin_addr.s_addr);
 }
 
+std::optional<std::uint32_t> peerIpKey(const std::string& host) {
+    sockaddr_in addr{};
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return std::nullopt;
+    }
+    return ntohl(addr.sin_addr.s_addr);
+}
+
+bool isPeerOnlyCommand(const std::string& line) {
+    return line.rfind("SUBMIT_SIGNED_COMMIT_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_PHASE_VOTE_BUNDLE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_EPOCH_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_POLICY_VOTE_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_VALIDATOR_APPLICATION_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_VALIDATOR_WORK_BINDING_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_VALIDATOR_ENDPOINT_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_REVEAL_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_PRIME_PEER ", 0) == 0;
+}
+
 class Socket {
 public:
     explicit Socket(int fd = -1) : fd_(fd) {}
@@ -249,7 +273,7 @@ std::optional<Socket> listenOnPort(const std::string& bind_address, int port) {
         close(fd);
         return std::nullopt;
     }
-    if (listen(fd, 16) != 0) {
+    if (listen(fd, 128) != 0) {
         std::cerr << "listen failed: " << std::strerror(errno) << "\n";
         close(fd);
         return std::nullopt;
@@ -1981,7 +2005,7 @@ public:
         return true;
     }
 
-    void handleClient(int fd, std::uint32_t client_ip, bool client_loopback) {
+    void handleClient(int fd, std::uint32_t client_ip, bool client_loopback, bool client_known_peer) {
         std::size_t command_count = 0;
         std::size_t write_command_count = 0;
         std::size_t invalid_command_count = 0;
@@ -1990,6 +2014,11 @@ public:
             if (command_count > kMaxCommandsPerConnection) {
                 recordClientViolation(client_ip, client_loopback);
                 writeAll(fd, "ERROR rate limit exceeded: too many commands on one connection\n");
+                return;
+            }
+            if (isPeerOnlyCommand(*line) && !client_loopback && !client_known_peer) {
+                recordClientViolation(client_ip, client_loopback);
+                writeAll(fd, "ERROR peer command requires known peer connection\n");
                 return;
             }
             if (isWriteCommand(*line)) {
@@ -2500,6 +2529,14 @@ public:
 
     bool hasKnownPeers() const {
         return !peers_.empty();
+    }
+
+    bool isKnownPeerClient(std::uint32_t client_ip) const {
+        for (const auto& peer : peers_) {
+            const auto key = peerIpKey(peer.host);
+            if (key.has_value() && *key == client_ip) return true;
+        }
+        return false;
     }
 
     const std::vector<primechain::Address>& activeValidatorSet() const {
@@ -8221,8 +8258,10 @@ int main(int argc, char** argv) {
             break;
         }
 
+        setSocketTimeouts(client_fd, kPeerConnectTimeoutMs);
         const bool client_loopback = isLoopbackClient(client_addr);
         const std::uint32_t client_ip = clientIpKey(client_addr);
+        const bool client_known_peer = !client_loopback && sync_server.isKnownPeerClient(client_ip);
         if (sync_server.clientBanned(client_ip, client_loopback)) {
             writeAll(client_fd, "ERROR client temporarily banned for repeated invalid commands\n");
             close(client_fd);
@@ -8231,23 +8270,33 @@ int main(int argc, char** argv) {
         if (!client_loopback) {
             std::lock_guard<std::mutex> lock(g_client_connection_mutex);
             auto& active = g_active_remote_connections[client_ip];
+            const auto per_ip_limit = client_known_peer
+                ? kMaxActiveKnownPeerConnectionsPerIp
+                : kMaxActivePublicConnectionsPerIp;
             if (g_active_remote_connection_total >= kMaxActiveRemoteConnectionsTotal) {
                 writeAll(client_fd, "ERROR connection limit exceeded\n");
                 close(client_fd);
                 continue;
             }
-            if (active >= kMaxActiveRemoteConnectionsPerIp) {
+            if (!client_known_peer &&
+                g_active_public_remote_connection_total >= kMaxActivePublicRemoteConnectionsTotal) {
+                writeAll(client_fd, "ERROR public connection limit exceeded\n");
+                close(client_fd);
+                continue;
+            }
+            if (active >= per_ip_limit) {
                 writeAll(client_fd, "ERROR connection limit exceeded for client IP\n");
                 close(client_fd);
                 continue;
             }
             ++active;
             ++g_active_remote_connection_total;
+            if (!client_known_peer) ++g_active_public_remote_connection_total;
         }
         Socket client(client_fd);
-        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback]() mutable {
+        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, client_known_peer]() mutable {
             setSocketTimeouts(client.fd(), kPeerReadTimeoutMs);
-            sync_server.handleClient(client.fd(), client_ip, client_loopback);
+            sync_server.handleClient(client.fd(), client_ip, client_loopback, client_known_peer);
             if (!client_loopback) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
                 auto found = g_active_remote_connections.find(client_ip);
@@ -8260,6 +8309,9 @@ int main(int argc, char** argv) {
                 }
                 if (g_active_remote_connection_total > 0) {
                     --g_active_remote_connection_total;
+                }
+                if (!client_known_peer && g_active_public_remote_connection_total > 0) {
+                    --g_active_public_remote_connection_total;
                 }
             }
         }).detach();
