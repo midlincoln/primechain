@@ -463,7 +463,7 @@ add_test(
     NAME sync_rejects_large_record_range
     COMMAND
         /bin/sh -c
-        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18988 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18988 GET_RECORD_RANGE 2 10002 | grep -q '^ERROR GET_RECORD_RANGE too large' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid)"
+        "rm -f ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log; $<TARGET_FILE:primechain-sequential> 20 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.log ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat >/dev/null && ($<TARGET_FILE:primechain-sync-server> 18988 ${CMAKE_CURRENT_BINARY_DIR}/range-limit.dat > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.log 2>&1 & echo $! > ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid) && sleep 0.2 && $<TARGET_FILE:primechain-sync-query> 127.0.0.1 18988 GET_RECORD_RANGE 2 10002 | grep -q '^ERROR client update required: GET_RECORD_RANGE is too large' && kill $(cat ${CMAKE_CURRENT_BINARY_DIR}/range-limit-server.pid)"
 )
 add_test(
     NAME sync_rejects_too_many_commands
