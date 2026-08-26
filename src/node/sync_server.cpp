@@ -24,6 +24,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -62,6 +63,7 @@ constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 20000;
 constexpr int kPublicClientReadTimeoutMs = 5000;
 constexpr int kPublicSyncReadTimeoutMs = 10000;
+constexpr int kSocketWritePollTimeoutMs = 1000;
 constexpr std::size_t kMaxCommandsPerConnection = 128;
 constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
@@ -374,7 +376,22 @@ bool writeAll(int fd, const std::string& message) {
     const char* cursor = message.data();
     std::size_t remaining = message.size();
     while (remaining > 0) {
-        const ssize_t sent = send(fd, cursor, remaining, 0);
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLOUT | POLLERR | POLLHUP | POLLNVAL;
+        const int ready = poll(&pfd, 1, kSocketWritePollTimeoutMs);
+        if (ready <= 0) {
+            return false;
+        }
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+            (pfd.revents & POLLOUT) == 0) {
+            return false;
+        }
+
+        const ssize_t sent = send(fd, cursor, remaining, MSG_NOSIGNAL);
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
         if (sent <= 0) {
             return false;
         }
