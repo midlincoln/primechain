@@ -300,6 +300,13 @@ std::optional<Socket> listenOnPort(const std::string& bind_address, int port) {
     return Socket(fd);
 }
 
+void closeAcceptedSocket(int fd) {
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+    }
+}
+
 bool setSocketTimeouts(int fd, int timeout_ms) {
     timeval timeout{};
     timeout.tv_sec = timeout_ms / 1000;
@@ -8373,12 +8380,12 @@ int main(int argc, char** argv) {
         const bool trusted_client = client_loopback || client_known_peer;
         if (accept_role == ListenerRole::ValidatorPeer && !trusted_client) {
             writeAll(client_fd, clientUpdateRequiredLine("validator peer port only accepts configured validators"));
-            close(client_fd);
+            closeAcceptedSocket(client_fd);
             return;
         }
         if (sync_server.clientBanned(client_ip, client_loopback)) {
             writeAll(client_fd, "ERROR client temporarily banned for repeated invalid commands\n");
-            close(client_fd);
+            closeAcceptedSocket(client_fd);
             return;
         }
         if (!client_loopback) {
@@ -8394,24 +8401,24 @@ int main(int argc, char** argv) {
             auto& active = (*active_map)[client_ip];
             if (g_active_remote_connection_total >= kMaxActiveRemoteConnectionsTotal) {
                 writeAll(client_fd, "ERROR connection limit exceeded\n");
-                close(client_fd);
+                closeAcceptedSocket(client_fd);
                 return;
             }
             if (!trusted_client && accept_role == ListenerRole::PublicClient &&
                 g_active_public_remote_connection_total >= kMaxActivePublicRemoteConnectionsTotal) {
                 writeAll(client_fd, "ERROR public connection limit exceeded\n");
-                close(client_fd);
+                closeAcceptedSocket(client_fd);
                 return;
             }
             if (!trusted_client && accept_role == ListenerRole::PublicSync &&
                 g_active_public_sync_connection_total >= kMaxActivePublicSyncConnectionsTotal) {
                 writeAll(client_fd, "ERROR public sync connection limit exceeded\n");
-                close(client_fd);
+                closeAcceptedSocket(client_fd);
                 return;
             }
             if (active >= per_ip_limit) {
                 writeAll(client_fd, "ERROR connection limit exceeded for client IP\n");
-                close(client_fd);
+                closeAcceptedSocket(client_fd);
                 return;
             }
             ++active;
@@ -8429,6 +8436,7 @@ int main(int argc, char** argv) {
                 : (listener_role == ListenerRole::PublicSync ? kPublicSyncReadTimeoutMs : kPeerReadTimeoutMs);
             setSocketTimeouts(client.fd(), timeout_ms);
             sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
+            shutdown(client.fd(), SHUT_RDWR);
             if (!client_loopback) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
                 auto& active_map = (!trusted_client && listener_role == ListenerRole::PublicSync)
