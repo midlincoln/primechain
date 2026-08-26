@@ -34,17 +34,28 @@ Protocol-2 record identity deliberately separates the stable arithmetic subject 
 
 Transaction records are versioned. Records through version 11 keep the legacy flat ordered transaction-batch commitment stored in `transaction_merkle_root` for replay compatibility. Record version 12 and later use a real binary transaction Merkle root over canonical transaction hashes, with odd-leaf duplication at each level and `Hash256{0}` for an empty transaction list.
 
-The current public validator build includes the August 2026 sync-server memory hardening series:
+The current public validator build includes the August 2026 sync-server memory and connection hardening series:
 
 - `e501f11` reduces peer-sync temporary replay pressure by copying available replay snapshots to downloaded temp stores and cleaning abandoned temp sidecars.
 - `6921d1b` streams `GET_RECORD_RANGE` responses instead of materializing full response ranges in memory.
 - `8218609` serializes record-range serving so concurrent sync clients cannot force multiple full-chain range scans at once.
 - `2d996e0` reads the genesis validator anchor from indexed record `2` instead of replaying the downloaded temp chain.
 - `5dac9e8` serves `GET_STATUS` counts from record headers rather than allocating full payloads.
+- `aeba22f` moves public record download traffic from the mining/API listener to a dedicated public sync listener.
+- `095ce4f` and `9987dfa` tighten public listener timeouts and close public sync connections after one request.
+- `6169dc6` fails fast on stalled socket writes so disconnected sync clients do not pin handler threads or sync slots.
 
-Together these changes keep validator RSS bounded under normal public sync/status traffic and avoid stale `chain.dat.sync.*`, `.idx.tmp.*`, and `.snapshot.tmp.*` buildup. On very small validator hosts, a modest swap file is still useful operational insurance, but the node should not depend on multi-GB heap growth for routine sync.
+Together these changes keep validator RSS and socket pressure bounded under normal public sync/status traffic and avoid stale `chain.dat.sync.*`, `.idx.tmp.*`, and `.snapshot.tmp.*` buildup. On very small validator hosts, a modest swap file is still useful operational insurance, but the node should not depend on multi-GB heap growth for routine sync.
 
 Public validator operators should keep development helper endpoints disabled unless there is a specific diagnostic need. In particular, `--enable-factorization-helper` is not part of the public launch validator profile. Release commit `b6c453e2cfbb` hardens public sync-server command handling around helper factorization, off-frontier prime submission, and composite-lottery signing rate limits; see the validator runbooks for the operator note.
+
+Public launch validators use separate ports for separate traffic classes:
+
+- `8339` is the public mining, status, transaction, and lightweight API port.
+- `8341` is the public record sync/download port. Current clients derive it as `8339 + 2` during `sync-peer`; miners should still be pointed at `8339`.
+- `8340` is the private validator-to-validator peer port. It is intended only for configured validators and should be firewalled to validator IPs.
+
+Old clients that request large record ranges from `8339` are rejected with an update message. Current clients can still be invoked with validator port `8339`; record download is routed to `8341` internally.
 
 Relevant implementation files for the current protocol path:
 
@@ -113,6 +124,9 @@ that remain available for tests and protocol development.
 ```bash
 ./build/primechain-client init-workdir ./pc-work 127.0.0.1 18889
 ./build/primechain-client sync-peer ./pc-work
+# Public launch validators are still specified with port 8339; current clients
+# automatically use 8341 for record downloads during sync.
+./build/primechain-client sync-peer ./pc-work 192.81.209.230 8339
 ./build/primechain-client add-mine-job ./pc-work --target 100
 ./build/primechain-client job-status ./pc-work
 ./build/primechain-client run-jobs ./pc-work
