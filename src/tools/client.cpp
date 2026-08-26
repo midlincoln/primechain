@@ -279,6 +279,149 @@ void printValidatorEpochSummary(const primechain::protocol::ValidatorEpochTransi
     std::cout << "epoch_votes: " << transition.votes.size() << "\n";
 }
 
+
+std::string jsonEscape(const std::string& value) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    out += "\\u00";
+                    out.push_back(kHex[(ch >> 4) & 0x0f]);
+                    out.push_back(kHex[ch & 0x0f]);
+                } else {
+                    out.push_back(static_cast<char>(ch));
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+void appendJsonString(std::ostringstream& out, const char* key, const std::string& value) {
+    out << ",\"" << key << "\":\"" << jsonEscape(value) << "\"";
+}
+
+void appendJsonUint(std::ostringstream& out, const char* key, std::uint64_t value) {
+    out << ",\"" << key << "\":" << value;
+}
+
+void appendPrattFactorsJson(std::ostringstream& out, const std::vector<primechain::protocol::PrimePowerV0>& factors) {
+    out << ",\"pratt_factors\":[";
+    for (std::size_t i = 0; i < factors.size(); ++i) {
+        if (i != 0) out << ",";
+        out << "{\"prime\":" << factors[i].prime << ",\"exponent\":" << factors[i].exponent << "}";
+    }
+    out << "]";
+}
+
+std::string prattProofJson(primechain::PrimeValue witness,
+                           const std::vector<primechain::protocol::PrimePowerV0>& factors) {
+    std::ostringstream proof;
+    proof << "{\"witness\":" << witness << ",\"factors\":[";
+    for (std::size_t i = 0; i < factors.size(); ++i) {
+        if (i != 0) proof << ",";
+        proof << "{\"prime\":" << factors[i].prime << ",\"exponent\":" << factors[i].exponent << "}";
+    }
+    proof << "]}";
+    return proof.str();
+}
+
+std::string recordJsonLine(const primechain::storage::StoredRecord& stored, std::string& error) {
+    std::ostringstream out;
+    out << "{\"network_id\":\"" << primechain::version::kProtocolVersion << ":"
+        << jsonEscape(primechain::version::kNetworkVersion) << "\"";
+    appendJsonUint(out, "height", stored.height);
+    appendJsonUint(out, "integer_value", stored.integer);
+    appendJsonString(out, "record_hash", primechain::crypto::toHex(stored.record_hash));
+    appendJsonUint(out, "payload_bytes", stored.payload.size());
+
+    if (stored.kind == primechain::storage::StoredRecordKind::Composite) {
+        const auto record = primechain::protocol::deserializeCompositeRecord(stored.payload, error);
+        if (!record.has_value()) return {};
+        appendJsonString(out, "record_type", "COMPOSITE");
+        appendJsonUint(out, "version", record->version);
+        appendJsonString(out, "provider_address", record->proof.provider_address);
+        appendJsonString(out, "previous_hash", primechain::crypto::toHex(record->previous_record_hash));
+        appendJsonString(out, "candidate_hash", primechain::crypto::toHex(primechain::protocol::candidateRecordHash(*record)));
+        appendJsonString(out, "state_root", primechain::crypto::toHex(record->state_root));
+        appendJsonUint(out, "divisor", record->proof.d);
+        appendJsonUint(out, "cofactor", record->proof.e);
+        appendJsonUint(out, "proof_signature_bytes", record->proof.signature.size());
+        appendJsonUint(out, "transaction_count", record->transactions.size());
+        appendJsonString(out, "tx_merkle_root", primechain::crypto::toHex(record->tx_batch.transaction_merkle_root));
+        appendJsonUint(out, "finalization_votes", record->finalized_by.votes.size());
+        appendJsonUint(out, "round_changes", record->finalized_by.round_changes.size());
+        appendJsonUint(out, "commit_phase_votes", record->commit_phase.votes.size());
+        appendJsonUint(out, "commitments", record->commit_phase.commitments.size());
+        appendJsonUint(out, "composite_lottery_round", record->composite_lottery.round);
+        appendJsonUint(out, "composite_lottery_win_bps", record->composite_lottery.win_bps);
+        appendJsonString(out, "composite_lottery_assigned_validator", record->composite_lottery.assigned_validator);
+    } else {
+        const auto record = primechain::protocol::deserializePrimeRecord(stored.payload, error);
+        if (!record.has_value()) return {};
+        appendJsonString(out, "record_type", "PRIME");
+        appendJsonUint(out, "version", record->version);
+        appendJsonString(out, "provider_address", record->proof.provider_address);
+        appendJsonString(out, "previous_hash", primechain::crypto::toHex(record->previous_record_hash));
+        appendJsonString(out, "candidate_hash", primechain::crypto::toHex(primechain::protocol::candidateRecordHash(*record)));
+        appendJsonString(out, "state_root", primechain::crypto::toHex(record->state_root));
+        appendJsonUint(out, "prime", record->proof.p);
+        appendJsonUint(out, "pratt_witness", record->proof.witness);
+        appendPrattFactorsJson(out, record->proof.factors_of_p_minus_1);
+        appendJsonString(out, "pratt_proof_json", prattProofJson(record->proof.witness, record->proof.factors_of_p_minus_1));
+        appendJsonUint(out, "proof_signature_bytes", record->proof.signature.size());
+        appendJsonUint(out, "transaction_count", record->transactions.size());
+        appendJsonString(out, "tx_merkle_root", primechain::crypto::toHex(record->tx_batch.transaction_merkle_root));
+        appendJsonUint(out, "finalization_votes", record->finalized_by.votes.size());
+        appendJsonUint(out, "round_changes", record->finalized_by.round_changes.size());
+        if (!record->genesis_config.genesis_message.empty()) {
+            appendJsonString(out, "genesis_message", record->genesis_config.genesis_message);
+        }
+    }
+    out << "}";
+    return out.str();
+}
+
+int exportRecordsJsonl(int argc, char** argv) {
+    if (argc != 7 || std::string(argv[3]) != "--from" || std::string(argv[5]) != "--to") return 1;
+    const std::string store_path = argv[2];
+    const primechain::PrimeValue start = std::stoull(argv[4]);
+    const primechain::PrimeValue end = std::stoull(argv[6]);
+    if (end < start) {
+        std::cerr << "export_records_jsonl_error: start greater than end\n";
+        return 1;
+    }
+
+    primechain::storage::RecordStore store(store_path);
+    std::string error;
+    bool ok = store.forEachRange(start, end,
+        [&](const primechain::storage::StoredRecord& stored) {
+            std::string line_error;
+            const auto line = recordJsonLine(stored, line_error);
+            if (line.empty()) {
+                error = "decode failed for integer " + std::to_string(stored.integer) + ": " + line_error;
+                return false;
+            }
+            std::cout << line << "\n";
+            return true;
+        }, error);
+    if (!ok) {
+        std::cerr << "export_records_jsonl_error: " << error << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 int decodeRecord(int argc, char** argv) {
     if (argc != 4) return 1;
     const std::string store_path = argv[2];
@@ -5980,6 +6123,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " inspect <record-store> [integer]\n"
               << "  " << argv0 << " inspect <record-store> --range <start> <end>\n"
               << "  " << argv0 << " decode-record <record-store> <integer>\n"
+              << "  " << argv0 << " export-records-jsonl <record-store> --from <integer> --to <integer>\n"
               << "  " << argv0 << " record <record-store> <integer>\n"
               << "  " << argv0 << " latest-records <record-store> [--last count]\n"
               << "  " << argv0 << " new-miner <wallet-file>\n"
@@ -6213,6 +6357,10 @@ int main(int argc, char** argv) {
     if (command == "decode-record") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
         return decodeRecord(argc, argv);
+    }
+    if (command == "export-records-jsonl") {
+        if (argc != 7) { printUsage(argv[0]); return 1; }
+        return exportRecordsJsonl(argc, argv);
     }
     if (command == "record") {
         if (argc != 4) { printUsage(argv[0]); return 1; }
