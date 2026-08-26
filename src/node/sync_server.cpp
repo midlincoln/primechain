@@ -61,6 +61,7 @@ constexpr std::uint64_t kPeerQuarantineFailureThreshold = 3;
 constexpr int kPeerConnectTimeoutMs = 1500;
 constexpr int kPeerReadTimeoutMs = 20000;
 constexpr int kPublicClientReadTimeoutMs = 5000;
+constexpr int kPublicSyncReadTimeoutMs = 10000;
 constexpr std::size_t kMaxCommandsPerConnection = 128;
 constexpr std::size_t kMaxWriteCommandsPerConnection = 16;
 constexpr std::size_t kMaxInvalidCommandsPerConnection = 3;
@@ -2065,10 +2066,12 @@ public:
             }
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
+                if (sync_listener) return;
                 continue;
             }
             if (*line == "GET_VERSION") {
                 writeAll(fd, versionLine() + "\n");
+                if (sync_listener) return;
                 continue;
             }
             if (*line == "GET_VALIDATORS") {
@@ -2093,6 +2096,7 @@ public:
             }
             if (line->rfind("GET_RECORD ", 0) == 0) {
                 sendRecord(fd, *line);
+                if (sync_listener) return;
                 continue;
             }
             if (line->rfind("GET_RECORD_RANGE ", 0) == 0) {
@@ -2102,6 +2106,7 @@ public:
                     return;
                 }
                 sendRecordRange(fd, *line, client_ip, client_loopback);
+                if (sync_listener) return;
                 continue;
             }
             if (line->rfind("GET_FACTORIZATION ", 0) == 0) {
@@ -8404,7 +8409,7 @@ int main(int argc, char** argv) {
         std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role]() mutable {
             const int timeout_ms = listener_role == ListenerRole::PublicClient
                 ? kPublicClientReadTimeoutMs
-                : kPeerReadTimeoutMs;
+                : (listener_role == ListenerRole::PublicSync ? kPublicSyncReadTimeoutMs : kPeerReadTimeoutMs);
             setSocketTimeouts(client.fd(), timeout_ms);
             sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
             if (!client_loopback) {
