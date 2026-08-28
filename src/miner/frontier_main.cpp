@@ -37,6 +37,7 @@ constexpr primechain::PrimeValue kDefaultLimit = 20;
 constexpr std::size_t kMaxStatusProbeValidators = 5;
 constexpr const char* kDefaultPrimeMiner = "pcdev1_prime_miner";
 constexpr const char* kDefaultCompositeMiner = "pcdev1_composite_miner";
+bool g_verboseNetwork = false;
 
 class Socket {
 public:
@@ -341,7 +342,7 @@ std::optional<std::string> readRawLine(int fd) {
         if (received < 0 && errno == EINTR) continue;
         if (received <= 0) {
             if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                std::cerr << "read timed out waiting for node response\n";
+                if (g_verboseNetwork) std::cerr << "read timed out waiting for node response\n";
             }
             return std::nullopt;
         }
@@ -370,7 +371,7 @@ std::optional<std::string> readLine(int fd) {
         if (received < 0 && errno == EINTR) continue;
         if (received <= 0) {
             if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                std::cerr << "read timed out waiting for framed node response\n";
+                if (g_verboseNetwork) std::cerr << "read timed out waiting for framed node response\n";
             }
             return std::nullopt;
         }
@@ -648,6 +649,97 @@ std::string withPeerPrefix(const PeerEndpoint& peer, const std::string& line) {
     return "VALIDATOR " + peer.host + ":" + std::to_string(peer.port) + " " + line;
 }
 
+
+std::string peerLabel(const PeerEndpoint& peer) {
+    return peer.host + ":" + std::to_string(peer.port);
+}
+
+std::string shortHash(const std::string& hash) {
+    return hash.size() <= 12 ? hash : hash.substr(0, 12);
+}
+
+std::string friendlyReason(const std::string& response) {
+    if (response.find("connection limit exceeded") != std::string::npos) {
+        return "validator connection limit reached; slow local loops and retry";
+    }
+    if (response.find("must target next integer") != std::string::npos ||
+        response.find("must extend frontier") != std::string::npos ||
+        response.find("wrong frontier") != std::string::npos ||
+        response.find("node closed connection") != std::string::npos) {
+        return "network advanced first; syncing/retrying";
+    }
+    if (response.find("timed out") != std::string::npos) {
+        return "validator response timed out; retrying";
+    }
+    if (response.find("commit phase is closing or closed") != std::string::npos) {
+        return "commit phase is already closing";
+    }
+    if (response.find("commit phase is not closed by validator quorum") != std::string::npos) {
+        return "waiting for validator quorum";
+    }
+    if (response.find("provider is in winner cooldown") != std::string::npos) {
+        return "provider is in winner cooldown";
+    }
+    if (response.rfind("REVEAL_PENDING ", 0) == 0) {
+        return "reveal is pending validator quorum";
+    }
+    if (response.rfind("RECORD_CONFLICT", 0) == 0) {
+        return "another candidate reached validators first";
+    }
+    return response;
+}
+
+bool parseAcceptedResponse(
+    const std::string& response,
+    std::string& action,
+    primechain::PrimeValue& integer,
+    std::string& hash) {
+    std::istringstream in(response);
+    std::string tag;
+    in >> tag;
+    if (tag == "PRIME_ACCEPTED") action = "MINED prime";
+    else if (tag == "COMPOSITE_ACCEPTED") action = "MINED composite";
+    else if (tag == "RECORD_DUPLICATE") action = "ALREADY_RECORDED";
+    else if (tag == "RECORD_REPLACED") action = "RECORD_REPLACED";
+    else return false;
+    in >> integer >> hash;
+    return static_cast<bool>(in);
+}
+
+void printAcceptedSummary(
+    const PeerEndpoint& peer,
+    const std::string& response,
+    bool mining_composite) {
+    std::string action;
+    primechain::PrimeValue integer = 0;
+    std::string hash;
+    if (!parseAcceptedResponse(response, action, integer, hash)) {
+        std::cout << withPeerPrefix(peer, response) << "\n";
+        return;
+    }
+    std::cout << action << " integer=" << integer
+              << " validator=" << peerLabel(peer);
+    if (!hash.empty()) std::cout << " hash=" << shortHash(hash);
+    if (action.rfind("MINED", 0) == 0) {
+        if (mining_composite) {
+            std::cout << " reward=pending-composite-discovery";
+        } else {
+            std::cout << " reward=prime-discovery";
+        }
+        std::cout << " note=sync-then-check-rewards";
+    }
+    std::cout << "\n";
+}
+
+void printRetrySummary(
+    primechain::PrimeValue integer,
+    std::size_t attempt,
+    const std::string& reason) {
+    std::cerr << "RETRY integer=" << integer
+              << " attempt=" << attempt << "/5"
+              << " reason=\"" << friendlyReason(reason) << "\"\n";
+}
+
 std::optional<PeerEndpoint> closeCommitPhaseQuorum(
     const std::vector<PeerEndpoint>& peers,
     primechain::PrimeValue integer,
@@ -689,7 +781,7 @@ std::optional<Status> getStatus(const std::string& host, int port) {
        >> status.frontier
        >> status.latest_hash;
     if (!in || tag != "STATUS") {
-        std::cerr << "unexpected status response: " << *response << "\n";
+        if (g_verboseNetwork) std::cerr << "unexpected status response: " << *response << "\n";
         return std::nullopt;
     }
     status.has_genesis = has_genesis != 0;
@@ -986,7 +1078,7 @@ void warmQuorumCommitments(
 
 void printUsage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...] [--parallel-probes]\n"
+              << " [host] [port] [limit] --prime-identity <file> --composite-identity <file> [--validator-endpoint host port...] [--parallel-probes] [--verbose]\n"
               << "legacy development: " << argv0
               << " [host] [port] [limit] [prime_miner] [composite_miner]\n";
 }
@@ -1021,6 +1113,8 @@ int main(int argc, char** argv) {
             pending_composite_path = argv[argument++];
         } else if (option == "--parallel-probes") {
             parallel_probes = true;
+        } else if (option == "--verbose") {
+            g_verboseNetwork = true;
         } else if (option == "--validator-endpoint") {
             if (argument + 1 >= argc) { printUsage(argv[0]); return 1; }
             PeerEndpoint peer;
@@ -1077,16 +1171,16 @@ int main(int argc, char** argv) {
         const primechain::PrimeValue effective_frontier =
             status.has_genesis ? status.frontier : 2;
         if (effective_frontier >= limit) {
-            std::cout << "frontier miner complete frontier=" << effective_frontier
-                      << " submitted=" << submitted << "\n";
+            std::cout << "MINER_COMPLETE frontier=" << effective_frontier
+                      << " submitted=" << submitted
+                      << " message=\"frontier miner complete frontier=" << effective_frontier << "\"\n";
             return 0;
         }
 
         if (status.has_genesis && proof_store_frontier.has_value() && effective_frontier > *proof_store_frontier) {
-            std::cerr << "local proof store behind validator frontier; sync required"
-                      << " local_frontier=" << *proof_store_frontier
-                      << " validator=" << active_peer.host << ":" << active_peer.port
-                      << " validator_frontier=" << effective_frontier << "\n";
+            std::cerr << "SYNC_NEEDED local_frontier=" << *proof_store_frontier
+                      << " validator_frontier=" << effective_frontier
+                      << " validator=" << peerLabel(active_peer) << "\n";
             return 1;
         }
 
@@ -1094,12 +1188,12 @@ int main(int argc, char** argv) {
         auto retryCurrentInteger = [&](const std::string& reason) -> bool {
             auto& attempts = retry_counts[next];
             if (attempts >= 5) {
-                std::cerr << "retry limit reached for " << next << ": " << reason << "\n";
+                std::cerr << "FAILED integer=" << next
+                          << " reason=\"" << friendlyReason(reason) << "\"\n";
                 return false;
             }
             ++attempts;
-            std::cerr << "frontier changed while mining " << next << "; retrying: "
-                      << reason << "\n";
+            printRetrySummary(next, attempts, reason);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             return true;
         };
@@ -1192,6 +1286,11 @@ int main(int argc, char** argv) {
         const auto local_provider = composite_identity.has_value()
             ? composite_identity->address : composite_miner;
 
+        std::cout << "MINING integer=" << next
+                  << " kind=" << (mining_composite ? "composite" : "prime")
+                  << " frontier=" << effective_frontier
+                  << " validator=" << peerLabel(active_peer) << "\n";
+
         if (commit_request.has_value()) {
             const auto view = requestMiningView(active_peer, next);
             if (view.has_value()) {
@@ -1221,7 +1320,12 @@ int main(int argc, char** argv) {
                 if (retryCurrentInteger("node closed connection while committing")) continue;
                 return 1;
             }
-            std::cout << withPeerPrefix(active_peer, *commit_response) << "\n";
+            if (g_verboseNetwork) {
+                std::cout << withPeerPrefix(active_peer, *commit_response) << "\n";
+            } else if (commitAcceptedOrDuplicate(*commit_response)) {
+                std::cout << "COMMIT_READY integer=" << next
+                          << " validator=" << peerLabel(active_peer) << "\n";
+            }
             if (!commitAcceptedOrDuplicate(*commit_response)) {
                 if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
                 return 1;
@@ -1237,11 +1341,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         got_response = true;
-        std::cout << withPeerPrefix(active_peer, *response) << "\n";
-        if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
-             response->rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
-            !proof_summary.empty()) {
-            std::cout << withPeerPrefix(active_peer, proof_summary) << "\n";
+        if (accepted(*response) && !g_verboseNetwork) {
+            printAcceptedSummary(active_peer, *response, mining_composite);
+        } else if (!g_verboseNetwork && mining_composite && compositeLotteryLost(*response)) {
+            // The friendly LOTTERY_LOST line below carries the useful result.
+        } else {
+            std::cout << withPeerPrefix(active_peer, *response) << "\n";
+            if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
+                 response->rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
+                !proof_summary.empty()) {
+                std::cout << withPeerPrefix(active_peer, proof_summary) << "\n";
+            }
         }
         if (accepted(*response)) {
             submitted_ok = true;
@@ -1254,10 +1364,11 @@ int main(int argc, char** argv) {
         }
         if (!submitted_ok) {
             if (mining_composite && compositeLotteryLost(last_rejection)) {
-                std::cout << withPeerPrefix(active_peer,
-                    "LOTTERY_LOST integer=" + std::to_string(next) +
-                    " provider=" + local_provider +
-                    " reason=" + compositeLotteryLossReason(last_rejection)) << "\n";
+                std::cout << "LOTTERY_LOST integer=" << next
+                          << " kind=composite"
+                          << " provider=" << local_provider
+                          << " validator=" << peerLabel(active_peer)
+                          << " reason=" << compositeLotteryLossReason(last_rejection) << "\n";
             }
             if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {
                 clearPendingComposite(pending_composite_path);

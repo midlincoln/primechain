@@ -57,6 +57,12 @@ Public launch validators use separate ports for separate traffic classes:
 
 Old clients that request large record ranges from `8339` are rejected with an update message. Current clients can still be invoked with validator port `8339`; record download is routed to `8341` internally.
 
+### Launch-Testnet Epoch 17000 Update
+
+Launch-testnet operators should update miners, clients, indexers, and validators to a build at or after `34f8bde` before the chain reaches integer `17000`. That release adds future-anchored validator epoch records, encoded as record version 14, so an epoch transition can be approved before it activates. Older `5dac9e8` / `55a283e` builds only understand validator epoch changes that activate at the next integer and may fail to replay or follow the chain once a future-anchored epoch transition is included.
+
+Wallet files and balances do not change. This is a client/protocol compatibility update. Late validator applicants are still handled by normal append-only records after `17000`: the active validator set at that time can approve a later application and schedule a later epoch transition.
+
 Relevant implementation files for the current protocol path:
 
 - `include/primechain/version.hpp.in` declares the protocol/network version stamped into binaries.
