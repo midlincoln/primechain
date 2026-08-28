@@ -5785,9 +5785,16 @@ int initWorkdir(const char* argv0, int argc, char** argv) {
 std::vector<SyncPeerCandidate> rankedSyncPeers(
     const char* argv0,
     const std::string& workdir,
-    const PeerConfig& configured_peer,
+    const std::vector<PeerConfig>& seed_peers,
     std::map<std::string, PeerHealthStats>& stats) {
-    std::vector<PeerConfig> peers{configured_peer};
+    std::vector<PeerConfig> peers;
+    for (const auto& peer : seed_peers) {
+        if (peer.port > 0 && std::none_of(peers.begin(), peers.end(), [&peer](const PeerConfig& existing) {
+                return existing.host == peer.host && existing.port == peer.port;
+            })) {
+            peers.push_back(peer);
+        }
+    }
     auto known = loadValidatorEndpointsFromStore(chainPath(workdir));
     std::random_device rd;
     std::mt19937 rng(rd());
@@ -5822,11 +5829,12 @@ std::vector<SyncPeerCandidate> rankedSyncPeers(
     return candidates;
 }
 
-int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig& peer) {
+int syncWorkdir(const char* argv0, const std::string& workdir, const std::vector<PeerConfig>& peers) {
     if (!ensureWorkdirLayout(workdir)) return 1;
+    if (peers.empty()) return 1;
     auto peer_stats = loadPeerHealthStats(workdir);
     const auto local = loadLocalStatus(chainPath(workdir));
-    const auto sync_candidates = rankedSyncPeers(argv0, workdir, peer, peer_stats);
+    const auto sync_candidates = rankedSyncPeers(argv0, workdir, peers, peer_stats);
     if (sync_candidates.empty()) {
         savePeerHealthStats(workdir, peer_stats);
         return 1;
@@ -5895,7 +5903,7 @@ std::optional<StatusLine> waitForFrontierAdvance(
     primechain::PrimeValue target) {
     for (int attempt = 0; attempt < 4; ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        if (syncWorkdir(argv0, workdir, peer) != 0) continue;
+        if (syncWorkdir(argv0, workdir, std::vector<PeerConfig>{peer}) != 0) continue;
         const auto local = loadLocalStatus(chainPath(workdir));
         if (local.frontier > previous_frontier || local.frontier >= target) {
             return local;
@@ -5905,20 +5913,23 @@ std::optional<StatusLine> waitForFrontierAdvance(
 }
 
 int syncPeer(const char* argv0, int argc, char** argv) {
-    if (argc != 3 && argc != 5) return 1;
+    if (argc < 3 || argc % 2 == 0) return 1;
     const std::string workdir = argv[2];
-    std::optional<PeerConfig> peer;
-    if (argc == 5) {
-        peer = PeerConfig{argv[3], std::stoi(argv[4])};
-        if (!writeConfig(workdir, peer)) return 1;
+    std::vector<PeerConfig> peers;
+    if (argc > 3) {
+        for (int i = 3; i + 1 < argc; i += 2) {
+            peers.push_back(PeerConfig{argv[i], std::stoi(argv[i + 1])});
+        }
+        if (!peers.empty() && !writeConfig(workdir, peers.front())) return 1;
     } else {
-        peer = readPeerConfig(workdir);
+        auto configured = readPeerConfig(workdir);
+        if (configured.has_value()) peers.push_back(*configured);
     }
-    if (!peer.has_value()) {
-        std::cerr << "no peer configured; pass host and port\n";
+    if (peers.empty()) {
+        std::cerr << "no peer configured; pass one or more host port pairs\n";
         return 1;
     }
-    return syncWorkdir(argv0, workdir, *peer);
+    return syncWorkdir(argv0, workdir, peers);
 }
 
 int jobStatus(int argc, char** argv) {
@@ -6014,7 +6025,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
     state["last_result"] = "syncing-before-mine";
     if (!writeMineState(workdir, state)) return 1;
 
-    int rc = syncWorkdir(argv0, workdir, *peer);
+    int rc = syncWorkdir(argv0, workdir, std::vector<PeerConfig>{*peer});
     if (rc != 0) {
         state["status"] = "failed";
         state["updated_at"] = nowSeconds();
@@ -6088,7 +6099,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
         state["updated_at"] = nowSeconds();
         state["last_result"] = "syncing-after-stale-miner";
         if (!writeMineState(workdir, state)) return 1;
-        const int sync_rc = syncWorkdir(argv0, workdir, *peer);
+        const int sync_rc = syncWorkdir(argv0, workdir, std::vector<PeerConfig>{*peer});
         local = loadLocalStatus(chainPath(workdir));
         state["last_synced_frontier"] = std::to_string(local.frontier);
         if (sync_rc == 0 && local.frontier <= before_mine.frontier) {
@@ -6161,7 +6172,7 @@ int runJobs(const char* argv0, int argc, char** argv) {
     state["last_result"] = "syncing-after-mine";
     if (!writeMineState(workdir, state)) return 1;
 
-    rc = syncWorkdir(argv0, workdir, *peer);
+    rc = syncWorkdir(argv0, workdir, std::vector<PeerConfig>{*peer});
     local = loadLocalStatus(chainPath(workdir));
     state["last_synced_frontier"] = std::to_string(local.frontier);
     state["updated_at"] = nowSeconds();
@@ -6212,7 +6223,7 @@ void printUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " version\n"
               << "  " << argv0 << " init-workdir <workdir> [host port]\n"
-              << "  " << argv0 << " sync-peer <workdir> [host port]\n"
+              << "  " << argv0 << " sync-peer <workdir> [host port ...]\n"
               << "  " << argv0 << " job-status <workdir>\n"
               << "  " << argv0 << " add-mine-job <workdir> --target <integer> [--parallel-probes]\n"
               << "  " << argv0 << " run-jobs <workdir>\n"
@@ -6299,7 +6310,7 @@ int main(int argc, char** argv) {
         return initWorkdir(argv[0], argc, argv);
     }
     if (command == "sync-peer") {
-        if (argc != 3 && argc != 5) { printUsage(argv[0]); return 1; }
+        if (argc < 3 || argc % 2 == 0) { printUsage(argv[0]); return 1; }
         return syncPeer(argv[0], argc, argv);
     }
     if (command == "job-status") {

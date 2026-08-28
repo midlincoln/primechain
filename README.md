@@ -133,6 +133,7 @@ that remain available for tests and protocol development.
 # Public launch validators are still specified with port 8339; current clients
 # automatically use 8341 for record downloads during sync.
 ./build/primechain-client sync-peer ./pc-work 192.81.209.230 8339
+./build/primechain-client sync-peer ./pc-work 192.81.209.230 8339 137.184.129.231 8339 67.205.172.245 8339
 ./build/primechain-client add-mine-job ./pc-work --target 100
 ./build/primechain-client job-status ./pc-work
 ./build/primechain-client run-jobs ./pc-work
