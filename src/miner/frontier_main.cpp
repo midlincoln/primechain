@@ -719,10 +719,11 @@ std::string friendlyReason(const std::string& response) {
     if (response.find("connection limit exceeded") != std::string::npos) {
         return "validator connection limit reached; slow local loops and retry";
     }
-    if (response.find("must target next integer") != std::string::npos ||
+    if (response.rfind("STALE_FRONTIER ", 0) == 0 ||
+        response.find("must target next integer") != std::string::npos ||
         response.find("must extend frontier") != std::string::npos ||
         response.find("wrong frontier") != std::string::npos) {
-        return "frontier changed; sync and retry";
+        return "frontier changed; sync and mine next integer";
     }
     if (response.find("all validators closed connection") != std::string::npos) {
         return "validators did not answer; rotating and retrying same integer";
@@ -1101,7 +1102,8 @@ bool accepted(const std::string& response) {
 }
 
 bool staleOrTransient(const std::string& response) {
-    return response.find("must target next integer") != std::string::npos ||
+    return response.rfind("STALE_FRONTIER ", 0) == 0 ||
+           response.find("must target next integer") != std::string::npos ||
            response.find("must extend frontier") != std::string::npos ||
            response.find("wrong frontier") != std::string::npos ||
            response.find("current frontier record not found") != std::string::npos ||
@@ -1308,6 +1310,7 @@ int main(int argc, char** argv) {
             for (const auto& peer : rankedPeerAlternates(candidate_peers, preferred_peer)) {
                 addUniquePeer(attempts, peer);
             }
+            std::optional<std::pair<PeerEndpoint, std::string>> last_recoverable_response;
             for (std::size_t i = 0; i < attempts.size(); ++i) {
                 const auto& attempt_peer = attempts[i];
                 if (i != 0) {
@@ -1316,16 +1319,24 @@ int main(int argc, char** argv) {
                                     probed.has_value() ? "status-ok" : "status-no-response");
                     if (!probed.has_value()) continue;
                     if (probed->status.frontier > effective_frontier) {
-                        return std::make_pair(attempt_peer, std::string("ERROR must extend frontier"));
+                        return std::make_pair(attempt_peer, std::string("STALE_FRONTIER local_frontier=") +
+                            std::to_string(effective_frontier) + " validator_frontier=" +
+                            std::to_string(probed->status.frontier) + " expected_integer=" +
+                            std::to_string(probed->status.frontier + 1));
                     }
                     if (probed->status.frontier < effective_frontier) continue;
                 }
                 const auto response = requestLine(attempt_peer.host, attempt_peer.port, command);
                 if (response.has_value()) {
+                    if (staleOrTransient(*response) && friendlyReason(*response).find("frontier changed") != std::string::npos) {
+                        recordPeerSubmit(attempt_peer, true, operation + "-stale-frontier");
+                        return std::make_pair(attempt_peer, *response);
+                    }
                     const bool try_next = operation == "submit" && shouldTryAlternateValidatorResponse(*response) &&
                         i + 1 < attempts.size();
                     recordPeerSubmit(attempt_peer, !try_next, operation + (try_next ? "-alternate-needed" : "-response"));
                     if (!try_next) return std::make_pair(attempt_peer, *response);
+                    last_recoverable_response = std::make_pair(attempt_peer, *response);
                     std::cerr << "ROTATE_VALIDATOR integer=" << next
                               << " from=" << peerLabel(attempt_peer)
                               << " to=" << peerLabel(attempts[i + 1])
@@ -1340,6 +1351,7 @@ int main(int argc, char** argv) {
                               << " reason=" << operation << "-no-response\n";
                 }
             }
+            if (last_recoverable_response.has_value()) return last_recoverable_response;
             return std::nullopt;
         };
         std::string request;

@@ -6569,8 +6569,10 @@ private:
         const primechain::PrimeValue frontier =
             node.status().has_genesis ? node.status().frontier_integer : 2;
         if (g != frontier + 1) {
-            writeAll(fd, "ERROR SUBMIT_SIGNED_COMMIT must target next integer "
-                + std::to_string(frontier + 1) + "\n");
+            writeAll(fd, "STALE_FRONTIER submitted_integer=" + std::to_string(g) +
+                " local_frontier=" + std::to_string(frontier) +
+                " expected_integer=" + std::to_string(frontier + 1) +
+                " message=SUBMIT_SIGNED_COMMIT_must_target_next_integer\n");
             return;
         }
         const auto key = std::make_tuple(g, activeCommitPhaseRound(g), provider_address);
@@ -6643,8 +6645,10 @@ private:
         const primechain::PrimeValue frontier =
             node.status().has_genesis ? node.status().frontier_integer : 2;
         if (g != frontier + 1) {
-            writeAll(fd, "ERROR SUBMIT_COMMIT must target next integer "
-                + std::to_string(frontier + 1) + "\n");
+            writeAll(fd, "STALE_FRONTIER submitted_integer=" + std::to_string(g) +
+                " local_frontier=" + std::to_string(frontier) +
+                " expected_integer=" + std::to_string(frontier + 1) +
+                " message=SUBMIT_COMMIT_must_target_next_integer\n");
             return;
         }
         if (quorumEnabled() && phaseFrozen(g)) {
@@ -7227,11 +7231,10 @@ private:
 
         if (g != node.status().frontier_integer + 1) {
             std::ostringstream out;
-            out << "ERROR SUBMIT_COMPOSITE must extend frontier "
-                << node.status().frontier_integer
-                << " with integer "
-                << (node.status().frontier_integer + 1)
-                << "\n";
+            out << "STALE_FRONTIER submitted_integer=" << g
+                << " local_frontier=" << node.status().frontier_integer
+                << " expected_integer=" << (node.status().frontier_integer + 1)
+                << " message=SUBMIT_COMPOSITE_must_extend_frontier\n";
             writeAll(fd, out.str());
             return;
         }
@@ -7390,10 +7393,10 @@ private:
         if (node.status().has_genesis && proof.p != node.status().frontier_integer + 1 &&
             !(proof.p == node.status().frontier_integer && node.status().frontier_integer > 2)) {
             std::ostringstream out;
-            out << "ERROR prime submission must target current frontier "
-                << node.status().frontier_integer
-                << " or next integer "
-                << (node.status().frontier_integer + 1) << "\n";
+            out << "STALE_FRONTIER submitted_integer=" << proof.p
+                << " local_frontier=" << node.status().frontier_integer
+                << " expected_integer=" << (node.status().frontier_integer + 1)
+                << " message=prime_submission_must_target_current_frontier_or_next_integer\n";
             writeAll(fd, out.str());
             return;
         }
@@ -7470,9 +7473,10 @@ private:
 
         if (proof.p != node.status().frontier_integer + 1) {
             std::ostringstream out;
-            out << "ERROR prime submission must extend frontier "
-                << node.status().frontier_integer << " with integer "
-                << (node.status().frontier_integer + 1) << "\n";
+            out << "STALE_FRONTIER submitted_integer=" << proof.p
+                << " local_frontier=" << node.status().frontier_integer
+                << " expected_integer=" << (node.status().frontier_integer + 1)
+                << " message=prime_submission_must_extend_frontier\n";
             writeAll(fd, out.str());
             return;
         }
