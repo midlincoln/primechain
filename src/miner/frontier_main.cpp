@@ -1125,6 +1125,11 @@ bool compositeLotteryLost(const std::string& response) {
            response.find("could not collect assigned composite lottery win") != std::string::npos;
 }
 
+bool shouldTryAlternateValidatorResponse(const std::string& response) {
+    return response.find("could not collect assigned composite lottery win") != std::string::npos ||
+           response.find("connection limit exceeded") != std::string::npos;
+}
+
 bool recordConflict(const std::string& response) {
     return response.rfind("RECORD_CONFLICT", 0) == 0;
 }
@@ -1317,8 +1322,15 @@ int main(int argc, char** argv) {
                 }
                 const auto response = requestLine(attempt_peer.host, attempt_peer.port, command);
                 if (response.has_value()) {
-                    recordPeerSubmit(attempt_peer, true, operation + "-response");
-                    return std::make_pair(attempt_peer, *response);
+                    const bool try_next = operation == "submit" && shouldTryAlternateValidatorResponse(*response) &&
+                        i + 1 < attempts.size();
+                    recordPeerSubmit(attempt_peer, !try_next, operation + (try_next ? "-alternate-needed" : "-response"));
+                    if (!try_next) return std::make_pair(attempt_peer, *response);
+                    std::cerr << "ROTATE_VALIDATOR integer=" << next
+                              << " from=" << peerLabel(attempt_peer)
+                              << " to=" << peerLabel(attempts[i + 1])
+                              << " reason=validator-could-not-complete-lottery\n";
+                    continue;
                 }
                 recordPeerSubmit(attempt_peer, false, operation + "-no-response");
                 if (i + 1 < attempts.size()) {
