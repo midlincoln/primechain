@@ -1285,16 +1285,18 @@ A quorum node reports the exact target that validators must sign:
 
 ```bash
 ./build/primechain-sync-query 127.0.0.1 18889 GET_VALIDATOR_EPOCH
-# VALIDATOR_EPOCH <current_epoch> <next_integer> <current_tip_hash>
+# VALIDATOR_EPOCH <current_epoch> <future_record_integer> <zero_hash>
 ```
 
 Create the three replacement validator identities first, sort their `pcpq1_`
 addresses lexicographically, then have at least two validators from the current
-set independently sign the same proposal:
+set independently sign the same proposal. For protocol v14 epoch votes, use the
+`future_record_integer` and `zero_hash` returned by `GET_VALIDATOR_EPOCH`; do not
+replace them with the current tip manually:
 
 ```bash
 vote=$(./build/primechain-composite-commitment sign-epoch \
-  ./wallets/validator-a.wallet <current_tip_hash> <next_integer> <next_epoch> \
+  ./wallets/validator-a.wallet <zero_hash> <future_record_integer> <next_epoch> \
   <next_validator_a> <next_validator_b> <next_validator_c>)
 ./build/primechain-sync-query 127.0.0.1 18889 $vote
 ```
@@ -1306,10 +1308,11 @@ Inspect the pending certificate with:
 ```
 
 Votes are validated, atomically stored in `<record-store>.epochs`, and gossiped
-to configured peers. Once two current validators sign the same proposal, the
-next accepted prime or composite record automatically becomes version 2 and
-embeds the epoch transition. The old set authorizes that record; the new set is
-active from the following integer. The temporary epoch-vote file is then cleared.
+to configured peers. Once two current validators sign the same future-boundary
+proposal, the votes wait until the chain reaches that record integer. That prime
+or composite record automatically becomes version 14, embeds the signed vote
+anchor plus epoch transition, and activates the new set from the following
+integer. The temporary epoch-vote file is then cleared.
 
 After rotation, nodes still pass the original genesis addresses to
 `--validator-set`. A newly activated validator supplies its own identity through

@@ -698,17 +698,21 @@ This anchors the initial controlled-testnet membership.
 ### 10.3 Signed Validator Epoch Transitions
 
 A non-genesis prime or composite record may use version 2 and embed one
-`ValidatorEpochTransitionV1`:
+`ValidatorEpochTransitionV1`. Version 14 extends that transition with an explicit
+epoch-vote anchor so validators can sign a future boundary before the chain
+reaches it:
 
 ```text
 epoch
+[v14] vote_previous_record_hash
+[v14] vote_record_integer
 activation_integer
 next_validator_set[3]
 votes[2..3] { validator_address, public_key, signature }
 ```
 
-The active validator set signs a domain-separated payload containing the prior
-record hash, containing-record integer, next sequential epoch number, activation
+The active validator set signs a domain-separated payload containing the vote
+anchor hash, vote record integer, next sequential epoch number, activation
 integer, canonical next set, and voter address. The transition is valid only when:
 
 - the epoch is exactly the current epoch plus one;
@@ -725,16 +729,18 @@ The controlled-testnet coordination commands are:
 
 ```text
 GET_VALIDATOR_EPOCH
-VALIDATOR_EPOCH current_epoch next_integer current_tip_hash
+VALIDATOR_EPOCH current_epoch future_record_integer zero_hash
 SUBMIT_EPOCH_VOTE previous_hash record_integer epoch activation_integer next_a next_b next_c voter public_key signature
 GET_EPOCH_VOTES
 ```
 
-Votes are bound to the current tip and next integer, stored atomically in the
-`.epochs` sidecar, and propagated to configured peers. Two matching current-set
-votes make the proposal ready. The next accepted prime or composite record embeds
-the transition and clears temporary votes. `SUBMIT_RECORD` also accepts a fully
-constructed valid version-2 record. Permissionless validator selection remains
+Votes may be bound either to the current tip and next integer (legacy v2), or to
+a zero hash and future epoch-boundary record integer (v14). Future-boundary votes
+are stored atomically in the `.epochs` sidecar, propagated to configured peers,
+and retained while the chain advances. Two matching current-set votes make the
+proposal ready; when the chain reaches the target integer, the accepted prime or
+composite record embeds the transition and clears temporary votes. `SUBMIT_RECORD` also accepts a fully
+constructed valid version-2 or version-14 record. Permissionless validator selection remains
 future work.
 
 ## 11. Bitcoin Mirror Payload

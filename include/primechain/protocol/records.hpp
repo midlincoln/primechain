@@ -13,6 +13,7 @@ using Bytes = std::vector<std::uint8_t>;
 
 constexpr std::uint64_t kBinaryTransactionMerkleRecordVersion = 12;
 constexpr std::uint64_t kIntegerCompositeLotteryRecordVersion = 13;
+constexpr std::uint64_t kFutureValidatorEpochRecordVersion = 14;
 
 struct Amount {
     std::uint64_t numerator{0};
@@ -142,6 +143,8 @@ struct ValidatorEpochVoteV1 {
 
 struct ValidatorEpochTransitionV1 {
     std::uint64_t epoch{0};
+    Hash256 vote_previous_record_hash{};
+    PrimeValue vote_record_integer{0};
     PrimeValue activation_integer{0};
     std::vector<Address> next_validator_set;
     std::vector<ValidatorEpochVoteV1> votes;

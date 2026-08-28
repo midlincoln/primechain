@@ -105,6 +105,57 @@ primechain::protocol::PrimeRecordV0 makeRotationRecord(
     return record;
 }
 
+primechain::protocol::PrimeRecordV0 makeFutureAnchoredRotationRecord(
+    const primechain::node::SequentialNode& node,
+    const std::vector<ValidatorKey>& current,
+    std::vector<primechain::Address> next_set,
+    std::string& error) {
+    auto record = makeRotationRecord(node, current, next_set, 2, error);
+    if (!error.empty()) return {};
+    record.version = primechain::protocol::kFutureValidatorEpochRecordVersion;
+    record.validator_epoch.vote_previous_record_hash = {};
+    record.validator_epoch.vote_record_integer = record.integer;
+    record.validator_epoch.votes.clear();
+    for (std::size_t i = 0; i < 2 && i < current.size(); ++i) {
+        primechain::protocol::ValidatorEpochVoteV1 vote;
+        vote.validator_address = current[i].address;
+        vote.public_key = current[i].keys.public_key;
+        const auto signature = primechain::crypto::signProtocolMessage(
+            current[i].keys.private_key,
+            primechain::crypto::validatorEpochVoteSigningPayload(
+                record.validator_epoch.vote_previous_record_hash,
+                record.validator_epoch.vote_record_integer,
+                record.validator_epoch.epoch,
+                record.validator_epoch.activation_integer,
+                record.validator_epoch.next_validator_set,
+                vote.validator_address),
+            error);
+        if (!signature.has_value()) return {};
+        vote.signature = *signature;
+        record.validator_epoch.votes.push_back(vote);
+    }
+    std::sort(record.validator_epoch.votes.begin(), record.validator_epoch.votes.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.validator_address < rhs.validator_address; });
+    primechain::protocol::updateTransactionBatch(record);
+    record.finalized_by.votes.clear();
+    const auto candidate_hash = primechain::protocol::candidateRecordHash(record);
+    const auto finalization_quorum = primechain::core::requiredValidatorQuorum(current.size());
+    for (std::size_t i = 0; i < finalization_quorum; ++i) {
+        auto finalization_vote = primechain::protocol::makeSignedValidatorVote(
+            current[i].address,
+            current[i].keys.public_key,
+            current[i].keys.private_key,
+            candidate_hash,
+            1,
+            error);
+        if (finalization_vote.signature.empty()) return {};
+        record.finalized_by.votes.push_back(std::move(finalization_vote));
+    }
+    std::sort(record.finalized_by.votes.begin(), record.finalized_by.votes.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.validator_address < rhs.validator_address; });
+    return record;
+}
+
 std::vector<primechain::Address> addresses(const std::vector<ValidatorKey>& validators) {
     std::vector<primechain::Address> out;
     for (const auto& validator : validators) out.push_back(validator.address);
@@ -157,6 +208,30 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+
+    const std::string future_anchor_path = std::string(argv[1]) + ".future-anchor";
+    std::remove(future_anchor_path.c_str());
+    primechain::node::SequentialNode future_anchor(future_anchor_path);
+    error.clear();
+    if (!expect(future_anchor.load(error), "load future-anchor node") ||
+        !expect(future_anchor.initializeGenesis(addresses(current), error), "initialize future-anchor genesis")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    auto future_rotation = makeFutureAnchoredRotationRecord(future_anchor, current, next_set, error);
+    error.clear();
+    if (!expect(future_anchor.appendPrime(future_rotation, error), "accept zero-anchor epoch rotation")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    primechain::node::SequentialNode future_reloaded(future_anchor_path);
+    error.clear();
+    if (!expect(future_reloaded.load(error), "replay zero-anchor epoch rotation") ||
+        !expect(future_reloaded.validatorEpoch() == 1, "replay zero-anchor epoch number") ||
+        !expect(future_reloaded.validatorSet() == next_set, "replay zero-anchor validator set")) {
+        std::cerr << error << "\n";
+        return 1;
+    }
 
     const std::string bootstrap_one_path = std::string(argv[1]) + ".bootstrap-one";
     std::remove(bootstrap_one_path.c_str());

@@ -317,8 +317,13 @@ void appendGenesisConfig(
 
 void appendValidatorEpochTransition(
     std::vector<std::uint8_t>& out,
-    const ValidatorEpochTransitionV1& transition) {
+    const ValidatorEpochTransitionV1& transition,
+    std::uint64_t record_version) {
     appendUint64(out, transition.epoch);
+    if (record_version >= kFutureValidatorEpochRecordVersion) {
+        appendHash(out, transition.vote_previous_record_hash);
+        appendUint64(out, transition.vote_record_integer);
+    }
     appendUint64(out, transition.activation_integer);
     appendUint64(out, transition.next_validator_set.size());
     for (const auto& validator : transition.next_validator_set) appendAddress(out, validator);
@@ -526,11 +531,15 @@ bool readGenesisConfig(ByteReader& reader, GenesisConfigV1& config, std::uint64_
 
 bool readValidatorEpochTransition(
     ByteReader& reader,
-    ValidatorEpochTransitionV1& transition) {
+    ValidatorEpochTransitionV1& transition,
+    std::uint64_t record_version) {
     std::uint64_t validator_count = 0;
     std::uint64_t vote_count = 0;
-    if (!reader.readUint64(transition.epoch) ||
-        !reader.readUint64(transition.activation_integer) ||
+    if (!reader.readUint64(transition.epoch)) return false;
+    if (record_version >= kFutureValidatorEpochRecordVersion &&
+        (!reader.readHash(transition.vote_previous_record_hash) ||
+         !reader.readUint64(transition.vote_record_integer))) return false;
+    if (!reader.readUint64(transition.activation_integer) ||
         !reader.readUint64(validator_count) || validator_count > 16) return false;
     transition.next_validator_set.clear();
     for (std::uint64_t i = 0; i < validator_count; ++i) {
@@ -753,7 +762,7 @@ std::vector<std::uint8_t> serializeCompositeRecordInternal(
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.version >= 1 && record.version < 9) appendCommitPhaseCertificate(out, record.commit_phase);
-    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch, record.version);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
@@ -777,7 +786,7 @@ std::vector<std::uint8_t> serializePrimeRecordInternal(
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config, record.version);
-    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch, record.version);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
@@ -961,7 +970,7 @@ std::optional<CompositeRecordV0> deserializeCompositeRecord(const std::vector<st
         !readTransactionList(reader, record.transactions, error) ||
         !reader.readHash(record.state_root) ||
         (record.version >= 1 && record.version < 9 && !readCommitPhaseCertificate(reader, record.commit_phase)) ||
-        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch))) {
+        (record.version >= 2 && !readValidatorEpochTransition(reader, record.validator_epoch, record.version))) {
         error = "truncated composite record payload";
         return std::nullopt;
     }
@@ -1025,7 +1034,7 @@ std::optional<PrimeRecordV0> deserializePrimeRecord(const std::vector<std::uint8
             return false;
         }
         if (record.version >= 2 &&
-            !readValidatorEpochTransition(candidate_reader, record.validator_epoch)) {
+            !readValidatorEpochTransition(candidate_reader, record.validator_epoch, record.version)) {
             return false;
         }
         if (!readOptionalMetadataAndFinalization(
@@ -1139,7 +1148,7 @@ std::vector<std::uint8_t> serializeCompositeRecordWithoutFinalization(const Comp
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.version >= 1 && record.version < 9) appendCommitPhaseCertificate(out, record.commit_phase);
-    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch, record.version);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
@@ -1160,7 +1169,7 @@ std::vector<std::uint8_t> serializePrimeRecordWithoutFinalization(const PrimeRec
     appendTransactionList(out, record.transactions);
     appendHash(out, record.state_root);
     if (record.height == 0) appendGenesisConfig(out, record.genesis_config, record.version);
-    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch);
+    if (record.version >= 2) appendValidatorEpochTransition(out, record.validator_epoch, record.version);
     if (record.version >= 3) appendValidatorEndpointUpdates(out, record.validator_endpoints);
     if (record.version >= 4) appendEconomicPolicyUpdate(out, record.economic_policy, record.version);
     if (record.version >= 5) appendValidatorApplications(out, record.validator_applications);
@@ -1463,7 +1472,8 @@ bool verifyValidatorEpochTransition(
     const Hash256& previous_record_hash,
     PrimeValue record_integer,
     std::string& error) {
-    const bool absent = transition.epoch == 0 && transition.activation_integer == 0 &&
+    const bool absent = transition.epoch == 0 && isZeroHash(transition.vote_previous_record_hash) &&
+        transition.vote_record_integer == 0 && transition.activation_integer == 0 &&
         transition.next_validator_set.empty() && transition.votes.empty();
     if (absent) return true;
     if (!isCanonicalProtocolValidatorSet(current_validator_set)) {
@@ -1472,6 +1482,18 @@ bool verifyValidatorEpochTransition(
     }
     if (transition.epoch != current_epoch + 1) {
         error = "validator epoch number is not sequential";
+        return false;
+    }
+    const bool has_explicit_vote_anchor = transition.vote_record_integer != 0 ||
+        !isZeroHash(transition.vote_previous_record_hash);
+    const Hash256& vote_previous_record_hash = has_explicit_vote_anchor
+        ? transition.vote_previous_record_hash
+        : previous_record_hash;
+    const PrimeValue vote_record_integer = has_explicit_vote_anchor
+        ? transition.vote_record_integer
+        : record_integer;
+    if (vote_record_integer != record_integer) {
+        error = "validator epoch vote anchor must match transition record";
         return false;
     }
     if (transition.activation_integer != record_integer + 1) {
@@ -1506,7 +1528,7 @@ bool verifyValidatorEpochTransition(
         if (!crypto::verifyProtocolMessageSignature(
                 vote.public_key,
                 crypto::validatorEpochVoteSigningPayload(
-                    previous_record_hash, record_integer, transition.epoch,
+                    vote_previous_record_hash, vote_record_integer, transition.epoch,
                     transition.activation_integer, transition.next_validator_set,
                     vote.validator_address),
                 vote.signature, signature_error)) {

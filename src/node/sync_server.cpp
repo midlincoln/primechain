@@ -73,9 +73,26 @@ constexpr std::size_t kMaxActivePublicConnectionsPerIp = 4;
 constexpr std::size_t kMaxActivePublicSyncConnectionsPerIp = 4;
 constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 32;
 constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 24;
+constexpr std::uint64_t kValidatorEpochMinLeadRecords = 100;
 constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
 constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 96;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
+
+primechain::Hash256 zeroHash256() {
+    return primechain::Hash256{};
+}
+
+primechain::PrimeValue nextValidatorEpochVoteRecordInteger(
+    const primechain::node::SequentialNodeStatus& status,
+    const primechain::protocol::ValidatorEligibilityPolicyV0& policy = {}) {
+    const auto epoch_length = policy.epoch_length == 0 ? 1000 : policy.epoch_length;
+    const auto next_integer = status.frontier_integer + 1;
+    auto target = ((status.frontier_integer / epoch_length) + policy.activation_delay_epochs) * epoch_length;
+    if (target < next_integer || target <= status.frontier_integer + kValidatorEpochMinLeadRecords) {
+        target += epoch_length;
+    }
+    return target;
+}
 constexpr std::uint32_t kDefaultCompositeLotteryWinBps = 5000;
 constexpr std::size_t kMaxCompositeLotteryCandidates = 64;
 volatile std::sig_atomic_t g_running = 1;
@@ -3265,8 +3282,8 @@ private:
         }
         std::ostringstream out;
         out << "VALIDATOR_EPOCH " << node.validatorEpoch() << " "
-            << (node.status().frontier_integer + 1) << " "
-            << primechain::crypto::toHex(node.status().latest_record_hash) << "\n";
+            << nextValidatorEpochVoteRecordInteger(node.status()) << " "
+            << primechain::crypto::toHex(zeroHash256()) << "\n";
         writeAll(fd, out.str());
     }
 
@@ -5648,7 +5665,9 @@ private:
     bool epochProposalTargetsNextRecord(const primechain::node::SequentialNode& node) const {
         if (epoch_votes_.empty()) return false;
         const auto& proposal = epoch_votes_.begin()->second;
-        return proposal.previous_record_hash == node.status().latest_record_hash &&
+        const bool current_tip_anchor = proposal.previous_record_hash == node.status().latest_record_hash;
+        const bool future_zero_anchor = proposal.previous_record_hash == zeroHash256();
+        return (current_tip_anchor || future_zero_anchor) &&
                proposal.record_integer == node.status().frontier_integer + 1 &&
                proposal.epoch == node.validatorEpoch() + 1 &&
                proposal.activation_integer == proposal.record_integer + 1;
@@ -5659,6 +5678,8 @@ private:
         if (!epochProposalReady()) return transition;
         const auto& proposal = epoch_votes_.begin()->second;
         transition.epoch = proposal.epoch;
+        transition.vote_previous_record_hash = proposal.previous_record_hash;
+        transition.vote_record_integer = proposal.record_integer;
         transition.activation_integer = proposal.activation_integer;
         transition.next_validator_set = proposal.next_validator_set;
         for (const auto& entry : epoch_votes_) transition.votes.push_back(entry.second.vote);
@@ -5671,6 +5692,13 @@ private:
     primechain::protocol::ValidatorEpochTransitionV1 embeddedValidatorEpochForNextRecord(
             const primechain::node::SequentialNode& node) {
         if (epoch_votes_.empty()) return {};
+        const auto& proposal = epoch_votes_.begin()->second;
+        const auto next_integer = node.status().frontier_integer + 1;
+        if (proposal.record_integer < next_integer || proposal.epoch != node.validatorEpoch() + 1) {
+            clearEpochVotesAfterRecord();
+            return {};
+        }
+        if (proposal.record_integer > next_integer) return {};
         if (!epochProposalTargetsNextRecord(node)) {
             clearEpochVotesAfterRecord();
             return {};
@@ -5710,8 +5738,11 @@ private:
                 pruned = true;
                 continue;
             }
-            if (record.previous_record_hash != node.status().latest_record_hash ||
-                record.record_integer != node.status().frontier_integer + 1 ||
+            const bool current_tip_anchor = record.previous_record_hash == node.status().latest_record_hash &&
+                record.record_integer == node.status().frontier_integer + 1;
+            const bool future_zero_anchor = record.previous_record_hash == zeroHash256() &&
+                record.record_integer >= node.status().frontier_integer + 1;
+            if (!(current_tip_anchor || future_zero_anchor) ||
                 record.epoch != node.validatorEpoch() + 1 ||
                 record.activation_integer != record.record_integer + 1 ||
                 !primechain::core::validValidatorSetSize(record.next_validator_set.size()) ||
@@ -5834,8 +5865,11 @@ private:
         std::string error;
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) { writeAll(fd, "ERROR " + error + "\n"); return; }
-        if (!quorumEnabled() || record.previous_record_hash != node.status().latest_record_hash ||
-            record.record_integer != node.status().frontier_integer + 1 ||
+        const bool current_tip_anchor = record.previous_record_hash == node.status().latest_record_hash &&
+            record.record_integer == node.status().frontier_integer + 1;
+        const bool future_zero_anchor = record.previous_record_hash == zeroHash256() &&
+            record.record_integer >= node.status().frontier_integer + 1;
+        if (!quorumEnabled() || !(current_tip_anchor || future_zero_anchor) ||
             record.epoch != node.validatorEpoch() + 1 || record.activation_integer != record.record_integer + 1 ||
             !primechain::core::validValidatorSetSize(record.next_validator_set.size()) ||
             !std::is_sorted(record.next_validator_set.begin(), record.next_validator_set.end()) ||
@@ -7209,7 +7243,11 @@ private:
             record.version = primechain::node::kTransactionMerkleRecordVersion;
             auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
             if (validator_epoch.epoch != 0) {
-                record.version = std::max<std::uint64_t>(record.version, 2);
+                record.version = std::max<std::uint64_t>(
+                    record.version,
+                    validator_epoch.vote_record_integer != 0
+                        ? primechain::protocol::kFutureValidatorEpochRecordVersion
+                        : 2);
                 record.validator_epoch = std::move(validator_epoch);
             }
             auto endpoint_updates = embeddedValidatorEndpointsForNextRecord(node);
@@ -7468,7 +7506,11 @@ private:
         if (quorumEnabled()) record.version = primechain::node::kTransactionMerkleRecordVersion;
         auto validator_epoch = embeddedValidatorEpochForNextRecord(node);
         if (validator_epoch.epoch != 0) {
-            record.version = std::max<std::uint64_t>(record.version, 2);
+            record.version = std::max<std::uint64_t>(
+                record.version,
+                validator_epoch.vote_record_integer != 0
+                    ? primechain::protocol::kFutureValidatorEpochRecordVersion
+                    : 2);
             record.validator_epoch = std::move(validator_epoch);
         }
         auto endpoint_updates = embeddedValidatorEndpointsForNextRecord(node);

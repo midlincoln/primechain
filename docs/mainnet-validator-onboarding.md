@@ -195,15 +195,15 @@ Each validator signs its own endpoint update. Run on the validator host:
 
 ```bash
 cd ~/primechain
-status=$(./build/primechain-client query 127.0.0.1 8339 GET_VALIDATOR_EPOCH)
+status=$(./build/primechain-client query 127.0.0.1 8339 GET_STATUS)
 echo "$status"
 ```
 
 Extract:
 
 ```text
-record_integer = field 3
-previous_hash  = field 4
+record_integer = field 7 + 1
+previous_hash  = field 8
 ```
 
 Sign and submit the endpoint update:
