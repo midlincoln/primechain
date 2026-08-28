@@ -172,7 +172,18 @@ struct PendingComposite {
 struct PeerStatus {
     PeerEndpoint peer;
     Status status;
+    std::uint64_t response_ms{0};
 };
+
+struct PeerRuntimeStats {
+    std::uint64_t probes{0};
+    std::uint64_t submits{0};
+    std::uint64_t failures{0};
+    std::uint64_t total_response_ms{0};
+    std::string last_result;
+};
+
+std::map<std::string, PeerRuntimeStats> g_peerRuntimeStats;
 
 std::optional<PendingComposite> loadPendingComposite(const std::string& path) {
     std::ifstream in(path);
@@ -654,6 +665,52 @@ std::string peerLabel(const PeerEndpoint& peer) {
     return peer.host + ":" + std::to_string(peer.port);
 }
 
+PeerRuntimeStats& runtimeStatsFor(const PeerEndpoint& peer) {
+    return g_peerRuntimeStats[peerLabel(peer)];
+}
+
+void recordPeerProbe(const PeerEndpoint& peer, bool ok, std::uint64_t response_ms, const std::string& result) {
+    auto& stats = runtimeStatsFor(peer);
+    ++stats.probes;
+    if (!ok) ++stats.failures;
+    if (response_ms != 0) stats.total_response_ms += response_ms;
+    stats.last_result = result;
+}
+
+void recordPeerSubmit(const PeerEndpoint& peer, bool ok, const std::string& result) {
+    auto& stats = runtimeStatsFor(peer);
+    ++stats.submits;
+    if (!ok) ++stats.failures;
+    stats.last_result = result;
+}
+
+bool samePeer(const PeerEndpoint& a, const PeerEndpoint& b) {
+    return a.host == b.host && a.port == b.port;
+}
+
+std::vector<PeerEndpoint> rankedPeerAlternates(
+    const std::vector<PeerEndpoint>& peers,
+    const PeerEndpoint& active_peer) {
+    std::vector<PeerEndpoint> alternates;
+    for (const auto& peer : peers) {
+        if (!samePeer(peer, active_peer)) alternates.push_back(peer);
+    }
+    std::stable_sort(alternates.begin(), alternates.end(), [](const PeerEndpoint& a, const PeerEndpoint& b) {
+        const auto astats = g_peerRuntimeStats.find(peerLabel(a));
+        const auto bstats = g_peerRuntimeStats.find(peerLabel(b));
+        const auto afail = astats == g_peerRuntimeStats.end() ? 0 : astats->second.failures;
+        const auto bfail = bstats == g_peerRuntimeStats.end() ? 0 : bstats->second.failures;
+        if (afail != bfail) return afail < bfail;
+        const auto aprobes = astats == g_peerRuntimeStats.end() ? 0 : astats->second.probes;
+        const auto bprobes = bstats == g_peerRuntimeStats.end() ? 0 : bstats->second.probes;
+        const auto ams = (astats == g_peerRuntimeStats.end() || aprobes == 0) ? 0 : astats->second.total_response_ms / aprobes;
+        const auto bms = (bstats == g_peerRuntimeStats.end() || bprobes == 0) ? 0 : bstats->second.total_response_ms / bprobes;
+        if (ams != bms) return ams < bms;
+        return peerLabel(a) < peerLabel(b);
+    });
+    return alternates;
+}
+
 std::string shortHash(const std::string& hash) {
     return hash.size() <= 12 ? hash : hash.substr(0, 12);
 }
@@ -666,6 +723,9 @@ std::string friendlyReason(const std::string& response) {
         response.find("must extend frontier") != std::string::npos ||
         response.find("wrong frontier") != std::string::npos) {
         return "frontier changed; sync and retry";
+    }
+    if (response.find("all validators closed connection") != std::string::npos) {
+        return "validators did not answer; rotating and retrying same integer";
     }
     if (response.find("node closed connection") != std::string::npos) {
         return "validator closed the submit connection; retrying same integer";
@@ -790,6 +850,31 @@ std::optional<Status> getStatus(const std::string& host, int port) {
     return status;
 }
 
+std::optional<PeerStatus> probePeerStatus(const PeerEndpoint& peer) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto status = getStatus(peer.host, peer.port);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    if (!status.has_value()) return std::nullopt;
+    PeerStatus out;
+    out.peer = peer;
+    out.status = *status;
+    out.response_ms = static_cast<std::uint64_t>(std::max<long long>(0, elapsed));
+    return out;
+}
+
+bool betterPeerStatus(const PeerStatus& candidate, const PeerStatus& current) {
+    if (candidate.status.frontier != current.status.frontier) {
+        return candidate.status.frontier > current.status.frontier;
+    }
+    const auto candidate_stats = g_peerRuntimeStats.find(peerLabel(candidate.peer));
+    const auto current_stats = g_peerRuntimeStats.find(peerLabel(current.peer));
+    const auto candidate_failures = candidate_stats == g_peerRuntimeStats.end() ? 0 : candidate_stats->second.failures;
+    const auto current_failures = current_stats == g_peerRuntimeStats.end() ? 0 : current_stats->second.failures;
+    if (candidate_failures != current_failures) return candidate_failures < current_failures;
+    return candidate.response_ms < current.response_ms;
+}
+
 std::vector<PeerEndpoint> sampledStatusProbePeers(
     const std::string& host,
     int port,
@@ -824,24 +909,28 @@ std::optional<PeerStatus> freshestPeerStatus(
     const auto peers = sampledStatusProbePeers(host, port, configured_validator_endpoints, parallel_probes);
     std::optional<PeerStatus> best;
     if (parallel_probes) {
-        std::vector<std::future<std::optional<Status>>> futures;
+        std::vector<std::future<std::optional<PeerStatus>>> futures;
         futures.reserve(peers.size());
         for (const auto& peer : peers) {
-            futures.push_back(std::async(std::launch::async, getStatus, peer.host, peer.port));
+            futures.push_back(std::async(std::launch::async, probePeerStatus, peer));
         }
         for (std::size_t i = 0; i < peers.size(); ++i) {
-            const auto status = futures[i].get();
-            if (!status.has_value()) continue;
-            if (!best.has_value() || status->frontier > best->status.frontier) {
-                best = PeerStatus{peers[i], *status};
+            const auto probed = futures[i].get();
+            recordPeerProbe(peers[i], probed.has_value(), probed.has_value() ? probed->response_ms : 0,
+                            probed.has_value() ? "status-ok" : "status-no-response");
+            if (!probed.has_value()) continue;
+            if (!best.has_value() || betterPeerStatus(*probed, *best)) {
+                best = *probed;
             }
         }
     } else {
         for (const auto& peer : peers) {
-            const auto status = getStatus(peer.host, peer.port);
-            if (!status.has_value()) continue;
-            if (!best.has_value() || status->frontier > best->status.frontier) {
-                best = PeerStatus{peer, *status};
+            const auto probed = probePeerStatus(peer);
+            recordPeerProbe(peer, probed.has_value(), probed.has_value() ? probed->response_ms : 0,
+                            probed.has_value() ? "status-ok" : "status-no-response");
+            if (!probed.has_value()) continue;
+            if (!best.has_value() || betterPeerStatus(*probed, *best)) {
+                best = *probed;
             }
         }
     }
@@ -1173,6 +1262,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         const auto active_peer = peer_status->peer;
+        const auto candidate_peers = sampledStatusProbePeers(
+            host, port, configured_validator_endpoints, parallel_probes);
         const auto status = peer_status->status;
         const primechain::PrimeValue effective_frontier =
             status.has_genesis ? status.frontier : 2;
@@ -1202,6 +1293,42 @@ int main(int argc, char** argv) {
             printRetrySummary(next, attempts, reason);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             return true;
+        };
+        auto requestWithPeerRotation = [&](const std::string& command,
+                                           const std::string& operation,
+                                           const PeerEndpoint& preferred_peer)
+            -> std::optional<std::pair<PeerEndpoint, std::string>> {
+            std::vector<PeerEndpoint> attempts;
+            addUniquePeer(attempts, preferred_peer);
+            for (const auto& peer : rankedPeerAlternates(candidate_peers, preferred_peer)) {
+                addUniquePeer(attempts, peer);
+            }
+            for (std::size_t i = 0; i < attempts.size(); ++i) {
+                const auto& attempt_peer = attempts[i];
+                if (i != 0) {
+                    const auto probed = probePeerStatus(attempt_peer);
+                    recordPeerProbe(attempt_peer, probed.has_value(), probed.has_value() ? probed->response_ms : 0,
+                                    probed.has_value() ? "status-ok" : "status-no-response");
+                    if (!probed.has_value()) continue;
+                    if (probed->status.frontier > effective_frontier) {
+                        return std::make_pair(attempt_peer, std::string("ERROR must extend frontier"));
+                    }
+                    if (probed->status.frontier < effective_frontier) continue;
+                }
+                const auto response = requestLine(attempt_peer.host, attempt_peer.port, command);
+                if (response.has_value()) {
+                    recordPeerSubmit(attempt_peer, true, operation + "-response");
+                    return std::make_pair(attempt_peer, *response);
+                }
+                recordPeerSubmit(attempt_peer, false, operation + "-no-response");
+                if (i + 1 < attempts.size()) {
+                    std::cerr << "ROTATE_VALIDATOR integer=" << next
+                              << " from=" << peerLabel(attempt_peer)
+                              << " to=" << peerLabel(attempts[i + 1])
+                              << " reason=" << operation << "-no-response\n";
+                }
+            }
+            return std::nullopt;
         };
         std::string request;
         std::string proof_summary;
@@ -1321,67 +1448,65 @@ int main(int argc, char** argv) {
         }
 
         if (commit_request.has_value() && !skip_commit_request) {
-            const auto commit_response = requestLine(active_peer.host, active_peer.port, *commit_request);
-            if (!commit_response.has_value()) {
-                if (retryCurrentInteger("node closed connection while committing")) continue;
+            const auto commit_attempt = requestWithPeerRotation(*commit_request, "commit", active_peer);
+            if (!commit_attempt.has_value()) {
+                if (retryCurrentInteger("all validators closed connection while committing")) continue;
                 return 1;
             }
+            const auto& commit_peer = commit_attempt->first;
+            const auto& commit_response = commit_attempt->second;
             if (g_verboseNetwork) {
-                std::cout << withPeerPrefix(active_peer, *commit_response) << "\n";
-            } else if (commitAcceptedOrDuplicate(*commit_response)) {
+                std::cout << withPeerPrefix(commit_peer, commit_response) << "\n";
+            } else if (commitAcceptedOrDuplicate(commit_response)) {
                 std::cout << "COMMIT_READY integer=" << next
-                          << " validator=" << peerLabel(active_peer) << "\n";
+                          << " validator=" << peerLabel(commit_peer) << "\n";
             }
-            if (!commitAcceptedOrDuplicate(*commit_response)) {
-                if (staleOrTransient(*commit_response) && retryCurrentInteger(*commit_response)) continue;
+            if (!commitAcceptedOrDuplicate(commit_response)) {
+                if (staleOrTransient(commit_response) && retryCurrentInteger(commit_response)) continue;
                 return 1;
             }
         }
 
         bool submitted_ok = false;
-        bool got_response = false;
         std::string last_rejection;
-        const auto response = requestLine(active_peer.host, active_peer.port, request);
-        if (!response.has_value()) {
-            if (retryCurrentInteger("node closed connection while submitting")) continue;
+        const auto submit_attempt = requestWithPeerRotation(request, "submit", active_peer);
+        if (!submit_attempt.has_value()) {
+            if (retryCurrentInteger("all validators closed connection while submitting")) continue;
             return 1;
         }
-        got_response = true;
-        if (accepted(*response) && !g_verboseNetwork) {
-            printAcceptedSummary(active_peer, *response, mining_composite);
-        } else if (!g_verboseNetwork && mining_composite && compositeLotteryLost(*response)) {
+        const auto& response_peer = submit_attempt->first;
+        const auto& response = submit_attempt->second;
+        if (accepted(response) && !g_verboseNetwork) {
+            printAcceptedSummary(response_peer, response, mining_composite);
+        } else if (!g_verboseNetwork && mining_composite && compositeLotteryLost(response)) {
             // The friendly LOTTERY_LOST line below carries the useful result.
-        } else if (!g_verboseNetwork && recordConflict(*response)) {
+        } else if (!g_verboseNetwork && recordConflict(response)) {
             // The friendly LOST_RACE line below carries the useful result.
         } else {
-            std::cout << withPeerPrefix(active_peer, *response) << "\n";
-            if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
-                 response->rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
+            std::cout << withPeerPrefix(response_peer, response) << "\n";
+            if ((response.rfind("PRIME_ACCEPTED ", 0) == 0 ||
+                 response.rfind("COMPOSITE_ACCEPTED ", 0) == 0) &&
                 !proof_summary.empty()) {
-                std::cout << withPeerPrefix(active_peer, proof_summary) << "\n";
+                std::cout << withPeerPrefix(response_peer, proof_summary) << "\n";
             }
         }
-        if (accepted(*response)) {
+        if (accepted(response)) {
             submitted_ok = true;
         } else {
-            last_rejection = *response;
-        }
-        if (!got_response) {
-            if (retryCurrentInteger("node closed connection while submitting")) continue;
-            return 1;
+            last_rejection = response;
         }
         if (!submitted_ok) {
             if (mining_composite && compositeLotteryLost(last_rejection)) {
                 std::cout << "LOTTERY_LOST integer=" << next
                           << " kind=composite"
                           << " provider=" << local_provider
-                          << " validator=" << peerLabel(active_peer)
+                          << " validator=" << peerLabel(response_peer)
                           << " reason=" << compositeLotteryLossReason(last_rejection) << "\n";
             }
             if (recordConflict(last_rejection)) {
                 std::cout << "LOST_RACE integer=" << next
                           << " kind=" << (mining_composite ? "composite" : "prime")
-                          << " validator=" << peerLabel(active_peer)
+                          << " validator=" << peerLabel(response_peer)
                           << " reason=another-miner-finalized-first\n";
             }
             if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {

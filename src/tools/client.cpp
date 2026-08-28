@@ -47,6 +47,22 @@ struct StatusLine {
     std::string latest_hash;
 };
 
+struct PeerHealthStats {
+    std::uint64_t attempts{0};
+    std::uint64_t successes{0};
+    std::uint64_t failures{0};
+    std::uint64_t total_response_ms{0};
+    primechain::PrimeValue last_frontier{0};
+    std::string last_result;
+    std::string updated_at;
+};
+
+struct SyncPeerCandidate {
+    PeerConfig peer;
+    StatusLine status;
+    std::uint64_t response_ms{0};
+};
+
 PeerConfig syncDownloadPeerFor(const PeerConfig& peer) {
     if (peer.port == 8339) {
         return PeerConfig{peer.host, 8341};
@@ -536,6 +552,7 @@ std::string dataDir(const std::string& workdir) { return joinPath(workdir, "data
 std::string walletsDir(const std::string& workdir) { return joinPath(workdir, "wallets"); }
 std::string jobsDir(const std::string& workdir) { return joinPath(workdir, "jobs"); }
 std::string logsDir(const std::string& workdir) { return joinPath(workdir, "logs"); }
+std::string peerStatsPath(const std::string& workdir) { return joinPath(logsDir(workdir), "peer-stats.tsv"); }
 std::string indexesDir(const std::string& workdir) { return joinPath(workdir, "indexes"); }
 std::string chainPath(const std::string& workdir) { return joinPath(dataDir(workdir), "chain.dat"); }
 std::string primeWalletPath(const std::string& workdir) { return joinPath(walletsDir(workdir), "prime.wallet"); }
@@ -618,6 +635,72 @@ std::optional<PeerConfig> readPeerConfig(const std::string& workdir) {
     const auto port = values.find("peer_port");
     if (host == values.end() || port == values.end()) return std::nullopt;
     return PeerConfig{host->second, std::stoi(port->second)};
+}
+
+std::string peerKey(const PeerConfig& peer) {
+    return peer.host + ":" + std::to_string(peer.port);
+}
+
+std::map<std::string, PeerHealthStats> loadPeerHealthStats(const std::string& workdir) {
+    std::map<std::string, PeerHealthStats> stats;
+    std::ifstream in(peerStatsPath(workdir));
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line.rfind("host\t", 0) == 0) continue;
+        std::istringstream row(line);
+        PeerConfig peer;
+        PeerHealthStats item;
+        row >> peer.host >> peer.port >> item.attempts >> item.successes >> item.failures
+            >> item.total_response_ms >> item.last_frontier >> item.last_result >> item.updated_at;
+        if (row && peer.port > 0) stats[peerKey(peer)] = item;
+    }
+    return stats;
+}
+
+bool savePeerHealthStats(
+    const std::string& workdir,
+    const std::map<std::string, PeerHealthStats>& stats) {
+    if (!ensureDirectory(logsDir(workdir))) return false;
+    std::ofstream out(peerStatsPath(workdir), std::ios::trunc);
+    if (!out) {
+        std::cerr << "could not write " << peerStatsPath(workdir) << "\n";
+        return false;
+    }
+    out << "host\tport\tattempts\tsuccesses\tfailures\ttotal_response_ms\tlast_frontier\tlast_result\tupdated_at\n";
+    for (const auto& entry : stats) {
+        const auto colon = entry.first.rfind(':');
+        if (colon == std::string::npos) continue;
+        out << entry.first.substr(0, colon) << "\t" << entry.first.substr(colon + 1)
+            << "\t" << entry.second.attempts
+            << "\t" << entry.second.successes
+            << "\t" << entry.second.failures
+            << "\t" << entry.second.total_response_ms
+            << "\t" << entry.second.last_frontier
+            << "\t" << (entry.second.last_result.empty() ? "unknown" : entry.second.last_result)
+            << "\t" << entry.second.updated_at << "\n";
+    }
+    return static_cast<bool>(out);
+}
+
+void recordPeerHealth(
+    std::map<std::string, PeerHealthStats>& stats,
+    const PeerConfig& peer,
+    bool success,
+    std::uint64_t response_ms,
+    primechain::PrimeValue frontier,
+    const std::string& result) {
+    auto& item = stats[peerKey(peer)];
+    ++item.attempts;
+    if (success) ++item.successes;
+    else ++item.failures;
+    item.total_response_ms += response_ms;
+    item.last_frontier = frontier;
+    item.last_result = result;
+    item.updated_at = nowSeconds();
+}
+
+std::uint64_t averageResponseMs(const PeerHealthStats& stats) {
+    return stats.attempts == 0 ? 0 : stats.total_response_ms / stats.attempts;
 }
 
 int runTool(const std::string& argv0, const std::string& tool, std::vector<std::string> args) {
@@ -732,6 +815,23 @@ std::optional<StatusLine> queryPeerStatus(const std::string& argv0, const PeerCo
         return std::nullopt;
     }
     return status;
+}
+
+std::optional<SyncPeerCandidate> querySyncPeerCandidate(
+    const std::string& argv0,
+    const PeerConfig& peer,
+    std::map<std::string, PeerHealthStats>& stats) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto status = queryPeerStatus(argv0, peer);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    const auto response_ms = static_cast<std::uint64_t>(std::max<long long>(0, elapsed));
+    if (!status.has_value()) {
+        recordPeerHealth(stats, peer, false, response_ms, 0, "status-failed");
+        return std::nullopt;
+    }
+    recordPeerHealth(stats, peer, true, response_ms, status->frontier, "status-ok");
+    return SyncPeerCandidate{peer, *status, response_ms};
 }
 
 StatusLine loadLocalStatus(const std::string& path) {
@@ -5682,10 +5782,11 @@ int initWorkdir(const char* argv0, int argc, char** argv) {
     return 0;
 }
 
-std::optional<std::pair<PeerConfig, StatusLine>> chooseFreshestSyncPeer(
+std::vector<SyncPeerCandidate> rankedSyncPeers(
     const char* argv0,
     const std::string& workdir,
-    const PeerConfig& configured_peer) {
+    const PeerConfig& configured_peer,
+    std::map<std::string, PeerHealthStats>& stats) {
     std::vector<PeerConfig> peers{configured_peer};
     auto known = loadValidatorEndpointsFromStore(chainPath(workdir));
     std::random_device rd;
@@ -5701,50 +5802,89 @@ std::optional<std::pair<PeerConfig, StatusLine>> chooseFreshestSyncPeer(
         if (!already_added(endpoint)) peers.push_back(endpoint);
     }
 
-    std::optional<std::pair<PeerConfig, StatusLine>> best;
+    std::vector<SyncPeerCandidate> candidates;
     for (const auto& candidate : peers) {
-        auto status = queryPeerStatus(argv0, candidate);
-        if (!status.has_value()) continue;
-        if (!best.has_value() || status->frontier > best->second.frontier) {
-            best = std::make_pair(candidate, *status);
-        }
+        auto status = querySyncPeerCandidate(argv0, candidate, stats);
+        if (status.has_value()) candidates.push_back(*status);
     }
-    return best;
+    std::stable_sort(candidates.begin(), candidates.end(), [&stats](const auto& a, const auto& b) {
+        if (a.status.frontier != b.status.frontier) return a.status.frontier > b.status.frontier;
+        const auto astats = stats.find(peerKey(a.peer));
+        const auto bstats = stats.find(peerKey(b.peer));
+        const auto afail = astats == stats.end() ? 0 : astats->second.failures;
+        const auto bfail = bstats == stats.end() ? 0 : bstats->second.failures;
+        if (afail != bfail) return afail < bfail;
+        const auto ams = astats == stats.end() ? a.response_ms : averageResponseMs(astats->second);
+        const auto bms = bstats == stats.end() ? b.response_ms : averageResponseMs(bstats->second);
+        if (ams != bms) return ams < bms;
+        return peerKey(a.peer) < peerKey(b.peer);
+    });
+    return candidates;
 }
 
 int syncWorkdir(const char* argv0, const std::string& workdir, const PeerConfig& peer) {
     if (!ensureWorkdirLayout(workdir)) return 1;
+    auto peer_stats = loadPeerHealthStats(workdir);
     const auto local = loadLocalStatus(chainPath(workdir));
-    const auto remote_peer = chooseFreshestSyncPeer(argv0, workdir, peer);
-    if (!remote_peer.has_value()) return 1;
-    const auto& sync_peer = remote_peer->first;
-    const auto& remote = remote_peer->second;
+    const auto sync_candidates = rankedSyncPeers(argv0, workdir, peer, peer_stats);
+    if (sync_candidates.empty()) {
+        savePeerHealthStats(workdir, peer_stats);
+        return 1;
+    }
     const primechain::PrimeValue start = local.has_genesis ? local.frontier + 1 : 2;
-    if (remote.frontier < start) {
+    if (sync_candidates.front().status.frontier < start) {
+        savePeerHealthStats(workdir, peer_stats);
         std::cout << "SYNC_UP_TO_DATE " << local.frontier << "\n";
         return 0;
     }
+
     constexpr primechain::PrimeValue kMaxSyncRangeCount = 2000;
-    for (primechain::PrimeValue chunk_start = start; chunk_start <= remote.frontier;) {
-        const primechain::PrimeValue remaining = remote.frontier - chunk_start;
-        const primechain::PrimeValue chunk_end =
-            remaining + 1 > kMaxSyncRangeCount
-                ? chunk_start + kMaxSyncRangeCount - 1
-                : remote.frontier;
-        const auto download_peer = syncDownloadPeerFor(sync_peer);
-        const int rc = runTool(argv0, "primechain-sync-download", {
-            download_peer.host,
-            std::to_string(download_peer.port),
-            std::to_string(chunk_start),
-            std::to_string(chunk_end),
-            chainPath(workdir),
-        });
-        if (rc != 0) return rc;
-        if (chunk_end == remote.frontier) break;
-        chunk_start = chunk_end + 1;
+    for (std::size_t peer_index = 0; peer_index < sync_candidates.size(); ++peer_index) {
+        const auto& candidate = sync_candidates[peer_index];
+        const auto& sync_peer = candidate.peer;
+        const auto& remote = candidate.status;
+        if (remote.frontier < start) continue;
+
+        bool synced = true;
+        for (primechain::PrimeValue chunk_start = start; chunk_start <= remote.frontier;) {
+            const primechain::PrimeValue remaining = remote.frontier - chunk_start;
+            const primechain::PrimeValue chunk_end =
+                remaining + 1 > kMaxSyncRangeCount
+                    ? chunk_start + kMaxSyncRangeCount - 1
+                    : remote.frontier;
+            const auto download_peer = syncDownloadPeerFor(sync_peer);
+            const auto started = std::chrono::steady_clock::now();
+            const int rc = runTool(argv0, "primechain-sync-download", {
+                download_peer.host,
+                std::to_string(download_peer.port),
+                std::to_string(chunk_start),
+                std::to_string(chunk_end),
+                chainPath(workdir),
+            });
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            const auto response_ms = static_cast<std::uint64_t>(std::max<long long>(0, elapsed));
+            if (rc != 0) {
+                recordPeerHealth(peer_stats, sync_peer, false, response_ms, remote.frontier, "download-failed");
+                synced = false;
+                if (peer_index + 1 < sync_candidates.size()) {
+                    std::cerr << "SYNC_ROTATE from=" << peerKey(sync_peer)
+                              << " to=" << peerKey(sync_candidates[peer_index + 1].peer)
+                              << " reason=download-failed\n";
+                }
+                break;
+            }
+            recordPeerHealth(peer_stats, sync_peer, true, response_ms, chunk_end, "download-ok");
+            if (chunk_end == remote.frontier) break;
+            chunk_start = chunk_end + 1;
+        }
+        if (!synced) continue;
+        savePeerHealthStats(workdir, peer_stats);
+        std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
+        return 0;
     }
-    std::cout << "SYNCED " << start << " " << remote.frontier << "\n";
-    return 0;
+    savePeerHealthStats(workdir, peer_stats);
+    return 1;
 }
 
 std::optional<StatusLine> waitForFrontierAdvance(
