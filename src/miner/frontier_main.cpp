@@ -1036,6 +1036,10 @@ bool compositeLotteryLost(const std::string& response) {
            response.find("could not collect assigned composite lottery win") != std::string::npos;
 }
 
+bool recordConflict(const std::string& response) {
+    return response.rfind("RECORD_CONFLICT", 0) == 0;
+}
+
 std::string compositeLotteryLossReason(const std::string& response) {
     if (response.find("composite lottery lost") != std::string::npos) {
         return "lottery-draw-lost";
@@ -1347,6 +1351,8 @@ int main(int argc, char** argv) {
             printAcceptedSummary(active_peer, *response, mining_composite);
         } else if (!g_verboseNetwork && mining_composite && compositeLotteryLost(*response)) {
             // The friendly LOTTERY_LOST line below carries the useful result.
+        } else if (!g_verboseNetwork && recordConflict(*response)) {
+            // The friendly LOST_RACE line below carries the useful result.
         } else {
             std::cout << withPeerPrefix(active_peer, *response) << "\n";
             if ((response->rfind("PRIME_ACCEPTED ", 0) == 0 ||
@@ -1371,6 +1377,12 @@ int main(int argc, char** argv) {
                           << " provider=" << local_provider
                           << " validator=" << peerLabel(active_peer)
                           << " reason=" << compositeLotteryLossReason(last_rejection) << "\n";
+            }
+            if (recordConflict(last_rejection)) {
+                std::cout << "LOST_RACE integer=" << next
+                          << " kind=" << (mining_composite ? "composite" : "prime")
+                          << " validator=" << peerLabel(active_peer)
+                          << " reason=another-miner-finalized-first\n";
             }
             if (commit_request.has_value() && resetsCompositeCommitState(last_rejection)) {
                 clearPendingComposite(pending_composite_path);
