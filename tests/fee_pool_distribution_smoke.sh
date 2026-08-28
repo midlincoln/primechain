@@ -190,9 +190,12 @@ grep -q '^VALIDATOR_REWARD_DISTRIBUTION_STATUS .* interval_primes=1000 current_p
 [ "$(grep -c '^VALIDATOR_REWARD_DISTRIBUTION_RECIPIENT address=' "$base/reward-distribution-status-before.out")" -eq 3 ]
 grep -q '^VALIDATOR_REWARD_HOLDING epoch=0 prime=3 micro_units=100000$' "$base/reward-distribution-status-before.out"
 
-$send distribute-fee-pool 127.0.0.1 19188 0 3 2 1 "$a" "$b" "$c" > "$base/distribute.out"
+fee_recipients=$(awk '/^FEE_DISTRIBUTION_RECIPIENT address=/{for(i=1;i<=NF;i++){if($i ~ /^address=/){split($i,a,"="); print a[2]}}}' "$base/distribution-status-before.out")
+reward_recipients=$(awk '/^VALIDATOR_REWARD_DISTRIBUTION_RECIPIENT address=/{for(i=1;i<=NF;i++){if($i ~ /^address=/){split($i,a,"="); print a[2]}}}' "$base/reward-distribution-status-before.out")
+
+$send distribute-fee-pool 127.0.0.1 19188 0 3 2 1 $fee_recipients > "$base/distribute.out"
 grep -q '^TX_ACCEPTED ' "$base/distribute.out"
-$send distribute-validator-reward-pool 127.0.0.1 19188 0 3 100000 1 "$a" "$b" "$c" > "$base/distribute-reward.out"
+$send distribute-validator-reward-pool 127.0.0.1 19188 0 3 100000 1 $reward_recipients > "$base/distribute-reward.out"
 grep -q '^TX_ACCEPTED ' "$base/distribute-reward.out"
 
 $client add-mine-job "$base/work" --target 5 > "$base/add-5.out"

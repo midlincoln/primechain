@@ -325,10 +325,13 @@ std::optional<primechain::protocol::TransactionV0> makeValidatorPoolDistribution
         error = "invalid validator pool distribution arguments";
         return std::nullopt;
     }
-    std::sort(validators.begin(), validators.end());
-    if (std::adjacent_find(validators.begin(), validators.end()) != validators.end()) {
-        error = "duplicate validator address";
-        return std::nullopt;
+    for (std::size_t i = 0; i < validators.size(); ++i) {
+        for (std::size_t j = i + 1; j < validators.size(); ++j) {
+            if (validators[i] == validators[j]) {
+                error = "duplicate validator address";
+                return std::nullopt;
+            }
+        }
     }
     for (const auto& validator : validators) {
         if (!primechain::crypto::isProtocolSignatureAddress(validator)) {
