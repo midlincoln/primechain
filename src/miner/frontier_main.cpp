@@ -664,12 +664,14 @@ std::string friendlyReason(const std::string& response) {
     }
     if (response.find("must target next integer") != std::string::npos ||
         response.find("must extend frontier") != std::string::npos ||
-        response.find("wrong frontier") != std::string::npos ||
-        response.find("node closed connection") != std::string::npos) {
-        return "network advanced first; syncing/retrying";
+        response.find("wrong frontier") != std::string::npos) {
+        return "frontier changed; sync and retry";
+    }
+    if (response.find("node closed connection") != std::string::npos) {
+        return "validator closed the submit connection; retrying same integer";
     }
     if (response.find("timed out") != std::string::npos) {
-        return "validator response timed out; retrying";
+        return "validator response timed out; retrying same integer";
     }
     if (response.find("commit phase is closing or closed") != std::string::npos) {
         return "commit phase is already closing";
