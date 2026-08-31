@@ -726,7 +726,7 @@ std::string friendlyReason(const std::string& response) {
         return "frontier changed; sync and mine next integer";
     }
     if (response.find("all validators closed connection") != std::string::npos) {
-        return "validators did not answer; rotating and retrying same integer";
+        return "validators did not answer; retrying same integer";
     }
     if (response.find("node closed connection") != std::string::npos) {
         return "validator closed the submit connection; retrying same integer";
@@ -1344,6 +1344,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 recordPeerSubmit(attempt_peer, false, operation + "-no-response");
+                std::cerr << "VALIDATOR_NO_RESPONSE integer=" << next
+                          << " operation=" << operation
+                          << " validator=" << peerLabel(attempt_peer) << "\n";
                 if (i + 1 < attempts.size()) {
                     std::cerr << "ROTATE_VALIDATOR integer=" << next
                               << " from=" << peerLabel(attempt_peer)
