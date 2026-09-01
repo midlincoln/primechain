@@ -2558,7 +2558,6 @@ public:
         const primechain::protocol::TransactionV0& tx,
         std::string& error) {
         std::lock_guard<std::mutex> lock(mempool_mutex_);
-        revalidateMempoolLocked();
         if (mempool_.size() >= kMaxMempoolTransactions) {
             error = "mempool full";
             return false;
@@ -2590,6 +2589,7 @@ public:
             error = "sender mempool limit exceeded";
             return false;
         }
+        revalidateMempoolLocked();
 
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) return false;
@@ -3558,7 +3558,6 @@ private:
         const auto hash = primechain::protocol::transactionHash(*tx);
         {
             std::lock_guard<std::mutex> lock(mempool_mutex_);
-            revalidateMempoolLocked();
             if (mempool_.size() >= kMaxMempoolTransactions) {
                 writeAll(fd, "ERROR mempool full; max="
                     + std::to_string(kMaxMempoolTransactions)
@@ -3585,6 +3584,7 @@ private:
                     std::to_string(kMaxMempoolTransactionsPerSender) + "\n");
                 return;
             }
+            revalidateMempoolLocked();
 
             primechain::node::SequentialNode node(store_path_);
             if (!node.load(error)) {
@@ -7842,6 +7842,10 @@ private:
     }
 
     void revalidateMempoolLocked() {
+        if (mempool_.empty()) {
+            mempool_first_seen_.clear();
+            return;
+        }
         primechain::node::SequentialNode node(store_path_);
         std::string error;
         if (!node.load(error)) {
