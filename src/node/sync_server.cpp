@@ -158,6 +158,11 @@ struct ClientPenaltyState {
     std::uint64_t banned_until{0};
 };
 
+struct CachedStatusLine {
+    bool initialized{false};
+    std::string line;
+};
+
 struct CommitPhaseTimeoutVote {
     primechain::Address validator_address;
     std::vector<std::uint8_t> public_key;
@@ -1973,6 +1978,13 @@ public:
         if (use_chain_endpoints_) {
             loadChainEndpointPeers();
         }
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(node, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
         return true;
     }
 
@@ -2469,6 +2481,13 @@ public:
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
         revalidateMempool();
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(reloaded, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
         removeStoreTempArtifacts(temp_path);
         return true;
     }
@@ -3227,26 +3246,9 @@ private:
         writeAll(fd, "PEER_ADDED " + peer.host + " " + std::to_string(peer.port) + "\n");
     }
 
-    void sendStatus(int fd) const {
-        std::string error;
-        primechain::node::SequentialNode node(store_path_);
-        if (!node.load(error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-
-        primechain::storage::RecordKindCounts counts;
-        const auto& status = node.status();
-        const auto latest = store_.latest(error);
-        if (!error.empty()) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-        if (latest.has_value() && !store_.countRangeByKind(2, latest->integer, counts, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
-            return;
-        }
-
+    std::string buildStatusLine(
+        const primechain::node::SequentialNodeStatus& status,
+        const primechain::storage::RecordKindCounts& counts) const {
         std::ostringstream out;
         out << "STATUS "
             << counts.total << " "
@@ -3256,7 +3258,66 @@ private:
             << status.height << " "
             << status.frontier_integer << " "
             << primechain::crypto::toHex(status.latest_record_hash) << "\n";
-        writeAll(fd, out.str());
+        return out.str();
+    }
+
+    bool refreshStatusCacheFromNode(
+        const primechain::node::SequentialNode& node,
+        std::string& error) {
+        primechain::storage::RecordKindCounts counts;
+        const auto latest = store_.latest(error);
+        if (!error.empty()) return false;
+        if (latest.has_value() && !store_.countRangeByKind(2, latest->integer, counts, error)) {
+            return false;
+        }
+        CachedStatusLine updated;
+        updated.initialized = true;
+        updated.line = buildStatusLine(node.status(), counts);
+        {
+            std::lock_guard<std::mutex> lock(status_cache_mutex_);
+            status_cache_ = std::move(updated);
+        }
+        return true;
+    }
+
+    bool refreshStatusCache(std::string& error) {
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) return false;
+        return refreshStatusCacheFromNode(node, error);
+    }
+
+    void invalidateStatusCache() {
+        std::lock_guard<std::mutex> lock(status_cache_mutex_);
+        status_cache_ = {};
+    }
+
+    void sendStatus(int fd) const {
+        {
+            std::lock_guard<std::mutex> lock(status_cache_mutex_);
+            if (status_cache_.initialized) {
+                writeAll(fd, status_cache_.line);
+                return;
+            }
+        }
+
+        std::string error;
+        primechain::node::SequentialNode node(store_path_);
+        if (!node.load(error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+
+        primechain::storage::RecordKindCounts counts;
+        const auto latest = store_.latest(error);
+        if (!error.empty()) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        if (latest.has_value() && !store_.countRangeByKind(2, latest->integer, counts, error)) {
+            writeAll(fd, "ERROR " + error + "\n");
+            return;
+        }
+        writeAll(fd, buildStatusLine(node.status(), counts));
     }
 
     void sendValidators(int fd) const {
@@ -3670,6 +3731,13 @@ private:
         validator_set_ = node.validatorSet();
         clearSignedCandidate(submitted->integer);
         revalidateMempool();
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(node, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
 
         propagateRecord(*submitted);
         writeAll(fd, "RECORD_ACCEPTED " + primechain::crypto::toHex(submitted->record_hash) + "\n");
@@ -3732,6 +3800,13 @@ private:
                         clearEpochVotesAfterRecord();
                         clearSignedCandidate(submitted.integer);
                         revalidateMempool();
+                        std::string cache_error;
+                        if (!refreshStatusCacheFromNode(reloaded, cache_error)) {
+                            invalidateStatusCache();
+                            if (!cache_error.empty()) {
+                                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+                            }
+                        }
                         propagateRecord(*validated);
                         writeAll(fd, "RECORD_REPLACED "
                             + primechain::crypto::toHex(validated->record_hash)
@@ -3793,6 +3868,13 @@ private:
                 validator_set_ = reloaded.validatorSet();
                 clearEpochVotesAfterRecord();
                 revalidateMempool();
+                std::string cache_error;
+                if (!refreshStatusCacheFromNode(reloaded, cache_error)) {
+                    invalidateStatusCache();
+                    if (!cache_error.empty()) {
+                        std::cerr << "status cache refresh warning: " << cache_error << "\n";
+                    }
+                }
                 propagateRecord(*validated);
                 writeAll(fd, "RECORD_REPLACED "
                     + primechain::crypto::toHex(validated->record_hash)
@@ -7320,6 +7402,13 @@ private:
         clearValidatorWorkBindingsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(node, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
@@ -7568,6 +7657,13 @@ private:
         clearValidatorWorkBindingsAfterRecord();
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(node, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
 
         const auto stored = primechain::storage::makeStoredRecord(record);
         clearSignedCandidate(record.integer);
@@ -7885,6 +7981,13 @@ private:
 
         removeMempoolTransactions(included_transactions);
         revalidateMempool();
+        std::string cache_error;
+        if (!refreshStatusCacheFromNode(reloaded, cache_error)) {
+            invalidateStatusCache();
+            if (!cache_error.empty()) {
+                std::cerr << "status cache refresh warning: " << cache_error << "\n";
+            }
+        }
         for (const auto& record : appended_records) {
             propagateRecord(record);
         }
@@ -7976,6 +8079,8 @@ private:
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     bool use_chain_endpoints_{false};
     bool allow_remote_admin_{false};
+    mutable std::mutex status_cache_mutex_;
+    CachedStatusLine status_cache_;
     mutable std::mutex mempool_mutex_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<std::string, std::uint64_t> mempool_first_seen_;
