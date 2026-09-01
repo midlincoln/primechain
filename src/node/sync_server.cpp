@@ -71,11 +71,11 @@ constexpr std::size_t kClientViolationBanThreshold = 6;
 constexpr std::uint64_t kClientViolationBanSeconds = 60;
 constexpr std::size_t kMaxActivePublicConnectionsPerIp = 4;
 constexpr std::size_t kMaxActivePublicSyncConnectionsPerIp = 4;
-constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 32;
+constexpr std::size_t kMaxActiveKnownPeerConnectionsPerIp = 6;
 constexpr std::size_t kMaxActivePublicRemoteConnectionsTotal = 24;
 constexpr std::uint64_t kValidatorEpochMinLeadRecords = 100;
 constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
-constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 96;
+constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 48;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
 
 primechain::Hash256 zeroHash256() {
