@@ -2392,6 +2392,7 @@ public:
 
     bool syncFromPeer(const std::string& host, int port, std::string& error) {
         std::lock_guard<std::mutex> sync_lock(g_peer_sync_mutex);
+        last_peer_sync_advanced_ = false;
         primechain::node::SequentialNode local(store_path_);
         if (!local.load(error)) {
             return false;
@@ -2473,6 +2474,7 @@ public:
             return false;
         }
         removeStoreTempArtifacts(temp_path);
+        last_peer_sync_advanced_ = true;
         validator_set_ = reloaded.validatorSet();
         if (use_chain_endpoints_) {
             loadChainEndpointPeers();
@@ -2480,7 +2482,7 @@ public:
         clearEpochVotesAfterRecord();
         clearEndpointUpdatesAfterRecord();
         clearPolicyVotesAfterRecord();
-        revalidateMempool();
+        clearMempool("peer chain sync advanced");
         std::string cache_error;
         if (!refreshStatusCacheFromNode(reloaded, cache_error)) {
             invalidateStatusCache();
@@ -2552,6 +2554,10 @@ public:
 
     bool syncFromKnownPeers(std::string& error) {
         return syncFromPeers(peers_, error);
+    }
+
+    bool lastPeerSyncAdvanced() const {
+        return last_peer_sync_advanced_;
     }
 
     bool acceptPeerMempoolTransaction(
@@ -2714,6 +2720,7 @@ public:
             ++attempted;
             error.clear();
             if (syncFromPeer(peer.host, peer.port, error)) {
+                const bool chain_advanced = lastPeerSyncAdvanced();
                 markPeerSuccess(peer);
                 synced_any = true;
                 std::string commitment_error;
@@ -2728,10 +2735,15 @@ public:
                                   << ": " << phase_error << "\n";
                     }
                 }
-                std::string mempool_error;
-                if (!syncMempoolFromPeerEndpoint(peer, mempool_error)) {
-                    std::cerr << "mempool sync warning from " << peer.host << ":" << peer.port
-                              << ": " << mempool_error << "\n";
+                if (chain_advanced) {
+                    std::cerr << "mempool sync skipped from " << peer.host << ":" << peer.port
+                              << ": peer chain sync advanced; volatile mempool cleared\n";
+                } else {
+                    std::string mempool_error;
+                    if (!syncMempoolFromPeerEndpoint(peer, mempool_error)) {
+                        std::cerr << "mempool sync warning from " << peer.host << ":" << peer.port
+                                  << ": " << mempool_error << "\n";
+                    }
                 }
                 continue;
             }
@@ -7841,6 +7853,16 @@ private:
         revalidateMempoolLocked();
     }
 
+    void clearMempool(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mempool_mutex_);
+        if (!mempool_.empty() || !mempool_first_seen_.empty()) {
+            std::cerr << "mempool cleared: " << reason
+                      << " transactions=" << mempool_.size() << "\n";
+        }
+        mempool_.clear();
+        mempool_first_seen_.clear();
+    }
+
     void revalidateMempoolLocked() {
         if (mempool_.empty()) {
             mempool_first_seen_.clear();
@@ -8088,6 +8110,7 @@ private:
     mutable std::mutex mempool_mutex_;
     std::vector<primechain::protocol::TransactionV0> mempool_;
     std::map<std::string, std::uint64_t> mempool_first_seen_;
+    bool last_peer_sync_advanced_{false};
     std::map<
         std::tuple<primechain::PrimeValue, std::uint64_t, std::string>,
         primechain::storage::StoredCommitment> commitments_;
@@ -8375,10 +8398,21 @@ int main(int argc, char** argv) {
             sync_server.discoverPeersFromKnown();
         }
         if (!sync_server.syncFromKnownPeers(error)) {
-            std::cerr << "peer sync failed: " << error << "\n";
-            return 1;
+            std::string local_error;
+            primechain::node::SequentialNode local_node(options.store_path);
+            if (!local_node.load(local_error) || !local_node.status().has_genesis) {
+                std::cerr << "peer sync failed: " << error << "\n";
+                if (!local_error.empty()) {
+                    std::cerr << "local chain load failed: " << local_error << "\n";
+                }
+                return 1;
+            }
+            std::cerr << "startup peer sync warning: " << error
+                      << "; continuing with valid local chain at frontier "
+                      << local_node.status().frontier_integer << "\n";
+        } else {
+            std::cout << "peer sync complete from " << options.peers.size() << " configured peer(s)\n";
         }
-        std::cout << "peer sync complete from " << options.peers.size() << " configured peer(s)\n";
     }
     {
         std::string error;
