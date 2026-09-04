@@ -27,6 +27,7 @@
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "primechain/core/consensus.hpp"
@@ -77,6 +78,33 @@ constexpr std::uint64_t kValidatorEpochMinLeadRecords = 100;
 constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
 constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 48;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
+
+bool currentFileSize(const std::string& path, std::uint64_t& size, std::string& error) {
+    struct stat info {};
+    if (stat(path.c_str(), &info) != 0) {
+        if (errno == ENOENT) {
+            size = 0;
+            return true;
+        }
+        error = "could not stat record store: " + std::string(std::strerror(errno));
+        return false;
+    }
+    if (info.st_size < 0) {
+        error = "record store has invalid size";
+        return false;
+    }
+    size = static_cast<std::uint64_t>(info.st_size);
+    return true;
+}
+
+bool rollbackRecordStore(const std::string& path, std::uint64_t size, std::string& error) {
+    if (truncate(path.c_str(), static_cast<off_t>(size)) != 0) {
+        error = "could not roll back record store: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::remove((path + ".idx").c_str());
+    return true;
+}
 
 primechain::Hash256 zeroHash256() {
     return primechain::Hash256{};
@@ -1602,6 +1630,18 @@ bool downloadRecordRange(
         return false;
     }
 
+    std::uint64_t rollback_size = 0;
+    if (!currentFileSize(output.path(), rollback_size, error)) return false;
+    auto failPeerDownload = [&](const std::string& message) {
+        std::string rollback_error;
+        if (!rollbackRecordStore(output.path(), rollback_size, rollback_error)) {
+            error = message + "; " + rollback_error;
+        } else {
+            error = message;
+        }
+        return false;
+    };
+
     std::uint64_t downloaded = 0;
     while (const auto line = readLine(socket->fd())) {
         if (*line == "END_RECORD_RANGE") {
@@ -1609,23 +1649,20 @@ bool downloadRecordRange(
         }
         const auto record = parseRecordLine(*line);
         if (!record.has_value()) {
-            error = "invalid peer record line";
-            return false;
+            return failPeerDownload("invalid peer record line");
         }
         const primechain::PrimeValue expected_integer = start + downloaded;
         const std::uint64_t expected_height = expected_integer - 2;
         if (record->integer != expected_integer || record->height != expected_height) {
-            error = "peer record sequence mismatch";
-            return false;
+            return failPeerDownload("peer record sequence mismatch");
         }
         if (!output.append(*record, error)) {
-            return false;
+            return failPeerDownload(error);
         }
         ++downloaded;
     }
     if (downloaded != expected_count) {
-        error = "peer range count mismatch";
-        return false;
+        return failPeerDownload("peer range count mismatch");
     }
     return true;
 }
