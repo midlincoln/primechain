@@ -150,7 +150,7 @@ std::optional<std::string> readRawLine(int fd) {
         if (ch == '\n') {
             return line;
         }
-        if (line.size() > 1024 * 1024) {
+        if (line.size() > 64 * 1024 * 1024) {
             return std::nullopt;
         }
         line.push_back(ch);
@@ -165,7 +165,7 @@ std::optional<std::string> readLine(int fd) {
     std::string tag, extra;
     std::size_t size = 0;
     in >> tag >> size;
-    if (!in || tag != "FRAME" || size == 0 || size > 1024 * 1024 || (in >> extra)) {
+    if (!in || tag != "FRAME" || size == 0 || size > 64 * 1024 * 1024 || (in >> extra)) {
         return std::nullopt;
     }
     std::string payload(size, '\0');

@@ -52,8 +52,8 @@ constexpr int kDefaultPort = 18889;
 constexpr const char* kDefaultStorePath = "data/sequential-chain.dat";
 constexpr std::size_t kMaxLineBytes = 8192;
 constexpr std::size_t kFrameThresholdBytes = 4096;
-constexpr std::size_t kMaxFrameBytes = 1024 * 1024;
-constexpr std::uint64_t kMaxRecordRangeCount = 2000;
+constexpr std::size_t kMaxFrameBytes = 64 * 1024 * 1024;
+constexpr std::uint64_t kMaxRecordRangeCount = 100;
 constexpr std::size_t kMaxMempoolTransactions = 1000;
 constexpr std::size_t kMaxMempoolTransactionsPerSender = 25;
 constexpr std::uint64_t kMempoolMaxTransactionAgeSeconds = 60 * 60;
@@ -3496,30 +3496,28 @@ private:
             return;
         }
 
-        std::lock_guard<std::mutex> range_lock(g_record_range_mutex);
-        std::string error;
-        if (!store_.hasContiguousRange(start, end, error)) {
-            writeAll(fd, "ERROR " + error + "\n");
+        const auto expected_count = end - start + 1;
+        std::vector<primechain::storage::StoredRecord> records;
+        {
+            std::lock_guard<std::mutex> range_lock(g_record_range_mutex);
+            std::string error;
+            records = store_.findRange(start, end, error);
+            if (!error.empty()) {
+                writeAll(fd, "ERROR " + error + "\n");
+                return;
+            }
+        }
+        if (records.size() != expected_count) {
+            writeAll(fd, "ERROR requested record range is incomplete\n");
             return;
         }
 
-        const auto expected_count = end - start + 1;
         std::ostringstream header;
         header << "RECORD_RANGE " << start << " " << end << " " << expected_count << "\n";
         if (!writeAll(fd, header.str())) return;
 
-        bool write_failed = false;
-        const bool streamed = store_.forEachRange(start, end,
-            [&](const primechain::storage::StoredRecord& record) {
-                if (!writeCommand(fd, recordLine(record))) {
-                    write_failed = true;
-                    return false;
-                }
-                return true;
-            }, error);
-        if (!streamed) {
-            if (!write_failed) writeAll(fd, "ERROR " + error + "\n");
-            return;
+        for (const auto& record : records) {
+            if (!writeCommand(fd, recordLine(record))) return;
         }
         writeAll(fd, "END_RECORD_RANGE\n");
     }
