@@ -5846,7 +5846,7 @@ int syncWorkdir(const char* argv0, const std::string& workdir, const std::vector
         return 0;
     }
 
-    constexpr primechain::PrimeValue kMaxSyncRangeCount = 2000;
+    constexpr primechain::PrimeValue kMaxSyncRangeCount = 100;
     for (std::size_t peer_index = 0; peer_index < sync_candidates.size(); ++peer_index) {
         const auto& candidate = sync_candidates[peer_index];
         const auto& sync_peer = candidate.peer;

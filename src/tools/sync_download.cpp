@@ -1,6 +1,8 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <sys/stat.h>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -17,6 +19,33 @@
 #include "primechain/storage/record_store.hpp"
 
 namespace {
+
+bool currentFileSize(const std::string& path, std::uint64_t& size, std::string& error) {
+    struct stat info {};
+    if (stat(path.c_str(), &info) != 0) {
+        if (errno == ENOENT) {
+            size = 0;
+            return true;
+        }
+        error = "could not stat output store: " + std::string(std::strerror(errno));
+        return false;
+    }
+    if (info.st_size < 0) {
+        error = "output store has invalid size";
+        return false;
+    }
+    size = static_cast<std::uint64_t>(info.st_size);
+    return true;
+}
+
+bool truncateOutputStore(const std::string& path, std::uint64_t size, std::string& error) {
+    if (truncate(path.c_str(), static_cast<off_t>(size)) != 0) {
+        error = "could not roll back output store: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::remove((path + ".idx").c_str());
+    return true;
+}
 
 class Socket {
 public:
@@ -321,6 +350,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::uint64_t rollback_size = 0;
+    if (!currentFileSize(output_store, rollback_size, error)) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    auto failDownload = [&](const std::string& message) {
+        std::string rollback_error;
+        if (!truncateOutputStore(output_store, rollback_size, rollback_error)) {
+            std::cerr << message << "; " << rollback_error << "\n";
+            return 1;
+        }
+        std::cerr << message << "\n";
+        return 1;
+    };
+
     primechain::storage::RecordStore output(output_store);
     std::uint64_t downloaded = 0;
     while (const auto line = readLine(socket->fd())) {
@@ -329,44 +373,46 @@ int main(int argc, char** argv) {
         }
         const auto record = parseRecordLine(*line);
         if (!record.has_value()) {
-            std::cerr << "invalid record line\n";
-            return 1;
+            return failDownload("invalid record line");
         }
         const primechain::PrimeValue expected_integer = start + downloaded;
         const std::uint64_t expected_height = expected_integer - 2;
         if (record->integer != expected_integer) {
-            std::cerr << "downloaded record integer sequence mismatch: expected "
-                      << expected_integer << " got " << record->integer << "\n";
-            return 1;
+            std::ostringstream message;
+            message << "downloaded record integer sequence mismatch: expected "
+                    << expected_integer << " got " << record->integer;
+            return failDownload(message.str());
         }
         if (record->height != expected_height) {
-            std::cerr << "downloaded record height mismatch for integer "
-                      << record->integer << ": expected " << expected_height
-                      << " got " << record->height << "\n";
-            return 1;
+            std::ostringstream message;
+            message << "downloaded record height mismatch for integer "
+                    << record->integer << ": expected " << expected_height
+                    << " got " << record->height;
+            return failDownload(message.str());
         }
         if (!output.append(*record, error)) {
-            std::cerr << "could not append downloaded record: " << error << "\n";
-            return 1;
+            return failDownload("could not append downloaded record: " + error);
         }
         ++downloaded;
     }
 
     if (downloaded != expected_count) {
-        std::cerr << "downloaded record count mismatch\n";
-        return 1;
+        std::ostringstream message;
+        message << "downloaded record count mismatch: expected " << expected_count
+                << " got " << downloaded;
+        return failDownload(message.str());
     }
 
     primechain::node::SequentialNode node(output_store);
     error.clear();
     if (!node.load(error)) {
-        std::cerr << "downloaded store did not replay: " << error << "\n";
-        return 1;
+        return failDownload("downloaded store did not replay: " + error);
     }
     if (!node.status().has_genesis || node.status().frontier_integer != end) {
-        std::cerr << "downloaded store did not reach requested end: expected "
-                  << end << " got " << node.status().frontier_integer << "\n";
-        return 1;
+        std::ostringstream message;
+        message << "downloaded store did not reach requested end: expected "
+                << end << " got " << node.status().frontier_integer;
+        return failDownload(message.str());
     }
 
     std::cout << "sync download complete\n";
