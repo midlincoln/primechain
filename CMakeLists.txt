@@ -7,6 +7,13 @@ project(primechain
 
 add_definitions(-D_FILE_OFFSET_BITS=64)
 
+# Off by default: libFuzzer targets require -fsanitize=fuzzer, which only
+# clang implements (this project's default/tested build uses whatever
+# CMAKE_CXX_COMPILER resolves to, commonly gcc). Turning this on with a
+# non-clang compiler will fail to configure/build -- see fuzz/README.md
+# for how to set up a separate clang-based build directory for this.
+option(PRIMECHAIN_BUILD_FUZZERS "Build libFuzzer-based fuzz targets (requires clang)" OFF)
+
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -78,12 +85,48 @@ target_include_directories(primechain_core
         ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
+if(PRIMECHAIN_BUILD_FUZZERS)
+    # -fsanitize=fuzzer-no-link instruments this library for coverage
+    # feedback without pulling in libFuzzer's own main() (that only goes
+    # into the fuzz executables themselves, via their -fsanitize=fuzzer
+    # link flag). Without this, a fuzz target would link fine but get zero
+    # coverage signal from inside the code it's actually fuzzing --
+    # effectively unguided random testing -- and ASan wouldn't catch
+    # memory-safety bugs happening inside this library at all. Only
+    # applied when PRIMECHAIN_BUILD_FUZZERS is on, so the default
+    # (typically gcc) build is completely unaffected.
+    target_compile_options(primechain_core PRIVATE -fsanitize=fuzzer-no-link,address -g -O1)
+endif()
+
 target_compile_options(primechain_core
     PRIVATE
         -Wall
         -Wextra
         -Wpedantic
 )
+
+if(PRIMECHAIN_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR
+            "PRIMECHAIN_BUILD_FUZZERS requires clang (got ${CMAKE_CXX_COMPILER_ID}). "
+            "Configure a separate build directory with -DCMAKE_CXX_COMPILER=clang++.")
+    endif()
+
+    # Every fuzz target below fuzzes a pure bytes-in/struct-out decode
+    # function -- no sockets, no filesystem, no global state -- so they can
+    # run in-process at full libFuzzer speed and their crashes are directly
+    # reproducible from the saved input, no server/workdir setup needed.
+    function(primechain_add_fuzzer name source)
+        add_executable(${name} ${source})
+        target_link_libraries(${name} PRIVATE primechain_core)
+        target_compile_options(${name} PRIVATE -fsanitize=fuzzer,address -g -O1)
+        target_link_options(${name} PRIVATE -fsanitize=fuzzer,address)
+    endfunction()
+
+    primechain_add_fuzzer(fuzz-transaction-decode fuzz/fuzz_transaction_decode.cpp)
+    primechain_add_fuzzer(fuzz-composite-record-decode fuzz/fuzz_composite_record_decode.cpp)
+    primechain_add_fuzzer(fuzz-prime-record-decode fuzz/fuzz_prime_record_decode.cpp)
+endif()
 
 add_executable(primechain-node
     src/node/main.cpp
