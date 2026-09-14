@@ -78,6 +78,7 @@ constexpr std::uint64_t kValidatorEpochMinLeadRecords = 100;
 constexpr std::size_t kMaxActivePublicSyncConnectionsTotal = 32;
 constexpr std::size_t kMaxActiveRemoteConnectionsTotal = 48;
 constexpr int kMempoolRebroadcastIntervalSeconds = 30;
+constexpr primechain::PrimeValue kFinalizationSafetyLockRetention = 10000;
 
 bool currentFileSize(const std::string& path, std::uint64_t& size, std::string& error) {
     struct stat info {};
@@ -3941,9 +3942,54 @@ private:
         writeAll(fd, "ERROR conflicting historical record\n");
     }
 
+    struct SignedCandidateSubject {
+        primechain::Hash256 previous_hash{};
+        primechain::PrimeValue integer{0};
+        primechain::Hash256 subject_hash{};
+    };
+
+    std::optional<SignedCandidateSubject> signedCandidateSubject(
+        const primechain::storage::SignedCandidateRecord& signed_record,
+        std::string& error) const {
+        const auto kind = parseStoredKindName(signed_record.candidate_kind);
+        if (!kind.has_value()) { error = "invalid persisted finalization candidate kind"; return std::nullopt; }
+
+        SignedCandidateSubject subject;
+        if (*kind == primechain::storage::StoredRecordKind::Prime) {
+            const auto record = primechain::protocol::deserializePrimeRecord(
+                signed_record.candidate_payload, error);
+            if (!record.has_value()) return std::nullopt;
+            subject.previous_hash = record->previous_record_hash;
+            subject.integer = record->integer;
+        } else {
+            const auto record = primechain::protocol::deserializeCompositeRecord(
+                signed_record.candidate_payload, error);
+            if (!record.has_value()) return std::nullopt;
+            subject.previous_hash = record->previous_record_hash;
+            subject.integer = record->integer;
+        }
+
+        error.clear();
+        const auto subject_hash = subjectHashFromCandidatePayload(
+            *kind, signed_record.candidate_payload, error);
+        if (!subject_hash.has_value()) return std::nullopt;
+        subject.subject_hash = *subject_hash;
+        return subject;
+    }
+
     std::vector<primechain::storage::SignedCandidateRecord> signedCandidateSnapshot() const {
         std::vector<primechain::storage::SignedCandidateRecord> out;
-        for (const auto& entry : signed_candidates_) out.push_back(entry.second);
+        std::set<std::pair<primechain::PrimeValue, std::uint64_t>> included;
+        for (const auto& entry : signed_candidates_) {
+            out.push_back(entry.second);
+            included.emplace(entry.second.integer, entry.second.vote.round);
+        }
+        for (const auto& entry : finalization_locks_) {
+            const auto& record = entry.second;
+            if (included.emplace(record.integer, record.vote.round).second) {
+                out.push_back(record);
+            }
+        }
         return out;
     }
 
@@ -4126,6 +4172,7 @@ private:
 
     bool loadFinalizationVotesInternal(std::string& error) {
         signed_candidates_.clear();
+        finalization_locks_.clear();
         const auto stored = finalization_store_.loadAll(error);
         if (!error.empty()) return false;
         if (!quorumEnabled()) {
@@ -4137,9 +4184,12 @@ private:
         const auto target = node.status().frontier_integer + 1;
         bool pruned = false;
         for (const auto& record : stored) {
-            if (record.integer < target) { pruned = true; continue; }
+            if (record.integer < target && target - record.integer > kFinalizationSafetyLockRetention) {
+                pruned = true;
+                continue;
+            }
             const auto& vote = record.vote;
-            if (record.integer != target || vote.round == 0 ||
+            if (vote.round == 0 ||
                 vote.validator_address != validator_identity_->address ||
                 vote.validator_address != primechain::crypto::addressFromProtocolPublicKey(vote.public_key)) {
                 error = "invalid persisted finalization vote";
@@ -4154,19 +4204,45 @@ private:
                 error = "invalid persisted finalization signature";
                 return false;
             }
-            if (!record.candidate_payload.empty()) {
-                const auto kind = parseStoredKindName(record.candidate_kind);
-                if (!kind.has_value()) {
-                    error = "invalid persisted finalization candidate kind";
+            if (record.candidate_payload.empty()) {
+                if (record.integer == target &&
+                    !signed_candidates_.emplace(std::make_pair(record.integer, vote.round), record).second) {
+                    error = "duplicate persisted finalization vote";
                     return false;
                 }
-                std::string subject_error;
-                if (!subjectHashFromCandidatePayload(*kind, record.candidate_payload, subject_error).has_value()) {
-                    error = "invalid persisted finalization candidate payload: " + subject_error;
-                    return false;
-                }
+                continue;
             }
-            if (!signed_candidates_.emplace(std::make_pair(record.integer, vote.round), record).second) {
+            std::string subject_error;
+            const auto subject = signedCandidateSubject(record, subject_error);
+            if (!subject.has_value()) {
+                error = "invalid persisted finalization candidate payload: " + subject_error;
+                return false;
+            }
+            if (subject->integer != record.integer || vote.record_hash != subject->subject_hash) {
+                error = "persisted finalization vote does not match candidate payload";
+                return false;
+            }
+            const auto lock_key = std::make_pair(subject->previous_hash, subject->integer);
+            const auto lock = finalization_locks_.find(lock_key);
+            if (lock != finalization_locks_.end()) {
+                std::string lock_error;
+                const auto locked_subject = signedCandidateSubject(lock->second, lock_error);
+                if (!locked_subject.has_value()) {
+                    error = "invalid persisted finalization safety lock: " + lock_error;
+                    return false;
+                }
+                if (locked_subject->subject_hash != subject->subject_hash) {
+                    error = "conflicting persisted finalization safety lock";
+                    return false;
+                }
+                if (vote.round > lock->second.vote.round) {
+                    finalization_locks_[lock_key] = record;
+                }
+            } else {
+                finalization_locks_[lock_key] = record;
+            }
+            if (record.integer == target &&
+                !signed_candidates_.emplace(std::make_pair(record.integer, vote.round), record).second) {
                 error = "duplicate persisted finalization vote";
                 return false;
             }
@@ -4386,6 +4462,21 @@ private:
             }
         }
 
+        const auto lock_key = std::make_pair(previous_hash, integer);
+        const auto safety_lock = finalization_locks_.find(lock_key);
+        if (safety_lock != finalization_locks_.end()) {
+            std::string lock_error;
+            const auto locked_subject = signedCandidateSubject(safety_lock->second, lock_error);
+            if (!locked_subject.has_value()) {
+                error = "invalid finalization safety lock: " + lock_error;
+                return false;
+            }
+            if (locked_subject->subject_hash != candidate_hash) {
+                error = "validator already signed a different candidate for this previous hash and integer";
+                return false;
+            }
+        }
+
         const auto key = std::make_pair(integer, round);
         const auto existing = signed_candidates_.find(key);
         if (existing != signed_candidates_.end()) {
@@ -4406,8 +4497,20 @@ private:
         signed_record.candidate_payload = candidate_payload;
         signed_record.vote = vote;
         signed_candidates_[key] = signed_record;
+        const auto previous_lock = finalization_locks_.find(lock_key);
+        const bool inserted_lock = previous_lock == finalization_locks_.end();
+        primechain::storage::SignedCandidateRecord previous_lock_record;
+        if (!inserted_lock) previous_lock_record = previous_lock->second;
+        if (inserted_lock || vote.round > previous_lock->second.vote.round) {
+            finalization_locks_[lock_key] = signed_record;
+        }
         if (!persistSignedCandidates(error)) {
             signed_candidates_.erase(key);
+            if (inserted_lock) {
+                finalization_locks_.erase(lock_key);
+            } else {
+                finalization_locks_[lock_key] = previous_lock_record;
+            }
             return false;
         }
         return true;
@@ -4680,39 +4783,24 @@ private:
         vote.new_round = new_round;
 
         std::lock_guard<std::mutex> lock(finalization_mutex_);
-        for (const auto& entry : signed_candidates_) {
-            const auto& signed_record = entry.second;
+        const auto lock_entry = finalization_locks_.find(std::make_pair(previous_hash, integer));
+        if (lock_entry != finalization_locks_.end()) {
+            const auto& signed_record = lock_entry->second;
             const auto& signed_vote = signed_record.vote;
-            if (signed_record.integer != integer || signed_vote.round == 0 ||
-                signed_vote.round >= new_round || signed_record.candidate_payload.empty()) continue;
-            const auto kind = parseStoredKindName(signed_record.candidate_kind);
-            if (!kind.has_value()) continue;
-            std::string candidate_error;
-            primechain::Hash256 candidate_previous{};
-            primechain::PrimeValue candidate_integer = 0;
-            if (*kind == primechain::storage::StoredRecordKind::Prime) {
-                const auto record = primechain::protocol::deserializePrimeRecord(
-                    signed_record.candidate_payload, candidate_error);
-                if (!record.has_value()) continue;
-                candidate_previous = record->previous_record_hash;
-                candidate_integer = record->integer;
-            } else {
-                const auto record = primechain::protocol::deserializeCompositeRecord(
-                    signed_record.candidate_payload, candidate_error);
-                if (!record.has_value()) continue;
-                candidate_previous = record->previous_record_hash;
-                candidate_integer = record->integer;
-            }
-            if (candidate_previous != previous_hash || candidate_integer != integer) continue;
-            candidate_error.clear();
-            const auto subject = subjectHashFromCandidatePayload(
-                *kind, signed_record.candidate_payload, candidate_error);
-            if (!subject.has_value()) continue;
-            if (signed_vote.round > vote.locked_round) {
-                vote.locked_round = signed_vote.round;
-                vote.locked_candidate_kind = signed_record.candidate_kind;
-                vote.locked_candidate_hash = *subject;
-                vote.locked_candidate_payload = signed_record.candidate_payload;
+            if (signed_vote.round != 0 && signed_vote.round < new_round &&
+                !signed_record.candidate_payload.empty()) {
+                const auto kind = parseStoredKindName(signed_record.candidate_kind);
+                if (kind.has_value()) {
+                    std::string candidate_error;
+                    const auto subject = subjectHashFromCandidatePayload(
+                        *kind, signed_record.candidate_payload, candidate_error);
+                    if (subject.has_value()) {
+                        vote.locked_round = signed_vote.round;
+                        vote.locked_candidate_kind = signed_record.candidate_kind;
+                        vote.locked_candidate_hash = *subject;
+                        vote.locked_candidate_payload = signed_record.candidate_payload;
+                    }
+                }
             }
         }
 
@@ -8167,6 +8255,8 @@ private:
     std::map<primechain::PrimeValue, CompositeLotteryRoundState> composite_lottery_;
     std::map<std::pair<primechain::PrimeValue, std::uint64_t>,
         primechain::storage::SignedCandidateRecord> signed_candidates_;
+    std::map<std::pair<primechain::Hash256, primechain::PrimeValue>,
+        primechain::storage::SignedCandidateRecord> finalization_locks_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, primechain::Address>,
         primechain::protocol::RoundChangeVoteV1> round_changes_;
     std::map<std::tuple<primechain::PrimeValue, std::uint64_t, std::uint64_t, primechain::Address>,
