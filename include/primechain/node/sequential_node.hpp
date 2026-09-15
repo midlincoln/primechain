@@ -74,6 +74,7 @@ private:
     bool applyTransactions(
         const std::vector<protocol::TransactionV0>& transactions,
         const Address& fee_recipient,
+        PrimeValue validation_integer,
         std::string& error);
     bool applyCompositeLedger(const protocol::CompositeRecordV0& record, std::string& error);
     bool applyPrimeLedger(const protocol::PrimeRecordV0& record, std::string& error);

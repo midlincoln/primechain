@@ -18,6 +18,7 @@ namespace {
 constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
 constexpr std::uint64_t kValidatorReserveLockTxVersion = 4;
 constexpr std::uint64_t kValidatorRewardPoolDistributionTxVersion = 5;
+constexpr PrimeValue kFullValidatorRewardDistributionEffectiveInteger = 26488;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
     return tx.version == 2 && crypto::isProtocolSignatureAddress(tx.sender_address);
@@ -131,10 +132,11 @@ bool validateValidatorReserveLockShape(
 bool validateValidatorPoolDistributionShape(
     const protocol::TransactionV0& tx,
     const std::string& pool_name,
-    const std::vector<Address>& distribution_recipients,
+    const std::vector<Address>& active_validators,
     std::uint64_t pool_balance_micro_units,
+    bool require_full_validator_set,
     std::string& error) {
-    if (distribution_recipients.empty()) {
+    if (active_validators.empty()) {
         error = pool_name + " distribution requires eligible validator recipients";
         return false;
     }
@@ -161,29 +163,43 @@ bool validateValidatorPoolDistributionShape(
         error = pool_name + " distribution must spend the full active pool balance";
         return false;
     }
+    if (tx.outputs.empty()) {
+        error = pool_name + " distribution is missing validator outputs";
+        return false;
+    }
+    if (tx.outputs.size() > active_validators.size()) {
+        error = pool_name + " distribution has too many validator outputs";
+        return false;
+    }
+    if (require_full_validator_set && tx.outputs.size() != active_validators.size()) {
+        error = pool_name + " distribution must include the full active validator set";
+        return false;
+    }
 
-    const auto base_share = *distributed / distribution_recipients.size();
-    const auto remainder = static_cast<std::size_t>(*distributed % distribution_recipients.size());
-    std::size_t output_index = 0;
-    for (std::size_t i = 0; i < distribution_recipients.size(); ++i) {
+    const auto base_share = *distributed / tx.outputs.size();
+    const auto remainder = static_cast<std::size_t>(*distributed % tx.outputs.size());
+    std::size_t validator_index = 0;
+    for (std::size_t i = 0; i < tx.outputs.size(); ++i) {
         const auto expected_share = base_share + (i < remainder ? 1 : 0);
-        if (expected_share == 0) continue;
-        if (output_index >= tx.outputs.size()) {
-            error = pool_name + " distribution is missing validator outputs";
+        const auto& output = tx.outputs[i];
+        bool found = false;
+        for (; validator_index < active_validators.size(); ++validator_index) {
+            if (active_validators[validator_index] == output.receiver_address) {
+                found = true;
+                ++validator_index;
+                break;
+            }
+        }
+        if (!found) {
+            error = pool_name + " distribution output receiver is not an active validator";
             return false;
         }
-        const auto& output = tx.outputs[output_index++];
-        if (output.receiver_address != distribution_recipients[i] ||
-            output.prime != tx.inputs.front().prime ||
+        if (output.prime != tx.inputs.front().prime ||
             output.amount.denominator != 1 ||
             output.amount.numerator != expected_share) {
             error = pool_name + " distribution outputs do not match deterministic validator split";
             return false;
         }
-    }
-    if (output_index != tx.outputs.size()) {
-        error = pool_name + " distribution has extra validator outputs";
-        return false;
     }
     return true;
 }
@@ -720,7 +736,7 @@ bool SequentialNode::load(std::string& error) {
                 return replayFailure();
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
+                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), decoded->integer, error) ||
                 !applyCompositeLedger(*decoded, error)) {
                 return replayFailure();
             }
@@ -769,7 +785,7 @@ bool SequentialNode::load(std::string& error) {
                 return replayFailure();
             }
             if (!decoded.has_value() ||
-                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), error) ||
+                !applyTransactions(decoded->transactions, validatorFeePoolAddress(), decoded->integer, error) ||
                 !applyPrimeLedger(*decoded, error)) {
                 return replayFailure();
             }
@@ -874,7 +890,7 @@ bool SequentialNode::validateCompositeCandidate(
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), error) &&
+    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), record.integer, error) &&
         applyCompositeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
@@ -919,7 +935,7 @@ bool SequentialNode::validatePrimeCandidate(
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
     const auto pending_before = pending_composite_providers_;
-    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), error) &&
+    const bool valid = applyTransactions(record.transactions, validatorFeePoolAddress(), record.integer, error) &&
         applyPrimeLedger(record, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
@@ -948,7 +964,7 @@ bool SequentialNode::appendComposite(const protocol::CompositeRecordV0& record, 
     const bool reset_reward_participants =
         hasValidatorRewardPoolDistributionV1(record.transactions, validatorRewardPoolAddress()) ||
         hasValidatorEpochTransition(record.validator_epoch);
-    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
+    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), record.integer, error) ||
         !applyCompositeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
@@ -1009,7 +1025,7 @@ bool SequentialNode::appendPrime(const protocol::PrimeRecordV0& record, std::str
     const bool reset_reward_participants =
         hasValidatorRewardPoolDistributionV1(record.transactions, validatorRewardPoolAddress()) ||
         hasValidatorEpochTransition(record.validator_epoch);
-    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), error) ||
+    if (!applyTransactions(record.transactions, validatorFeePoolAddress(), record.integer, error) ||
         !applyPrimeLedger(record, error)) {
         balances_ = balances_before;
         total_supply_ = total_supply_before;
@@ -1087,8 +1103,7 @@ std::vector<Address> SequentialNode::feeDistributionRecipients() const {
 }
 
 std::vector<Address> SequentialNode::validatorRewardDistributionRecipients() const {
-    return eligibleValidatorsFromParticipants(
-        validator_set_, validator_reward_distribution_participants_);
+    return validator_set_;
 }
 
 void SequentialNode::noteValidatorParticipation(
@@ -1263,7 +1278,7 @@ bool SequentialNode::validatePendingTransactions(
     const auto balances_before = balances_;
     const auto total_supply_before = total_supply_;
     const auto nonces_before = account_nonces_;
-    const bool valid = applyTransactions(transactions, {}, error);
+    const bool valid = applyTransactions(transactions, {}, status_.frontier_integer + 1, error);
     balances_ = balances_before;
     total_supply_ = total_supply_before;
     account_nonces_ = nonces_before;
@@ -1273,6 +1288,7 @@ bool SequentialNode::validatePendingTransactions(
 bool SequentialNode::applyTransactions(
     const std::vector<protocol::TransactionV0>& transactions,
     const Address& fee_recipient,
+    PrimeValue validation_integer,
     std::string& error) {
     std::map<PrimeValue, std::uint64_t> collected_fees;
     for (const auto& tx : transactions) {
@@ -1294,15 +1310,17 @@ bool SequentialNode::applyTransactions(
             isValidatorRewardPoolDistributionV1(tx, active_reward_pool_address);
         if (fee_pool_distribution &&
             !validateValidatorPoolDistributionShape(
-                tx, "fee pool", feeDistributionRecipients(),
+                tx, "fee pool", validator_set_,
                 balanceMicroUnits(active_fee_pool_address, tx.inputs.front().prime),
+                false,
                 error)) {
             return false;
         }
         if (reward_pool_distribution &&
             !validateValidatorPoolDistributionShape(
-                tx, "validator reward pool", validatorRewardDistributionRecipients(),
+                tx, "validator reward pool", validator_set_,
                 balanceMicroUnits(active_reward_pool_address, tx.inputs.front().prime),
+                validation_integer >= kFullValidatorRewardDistributionEffectiveInteger,
                 error)) {
             return false;
         }
