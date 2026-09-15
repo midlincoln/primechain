@@ -134,6 +134,7 @@ std::size_t g_active_public_sync_connection_total = 0;
 std::mutex g_peer_sync_mutex;
 std::uint64_t g_peer_sync_counter = 0;
 std::mutex g_record_range_mutex;
+std::mutex g_chain_store_mutex;
 
 void handleSignal(int) {
     g_running = 0;
@@ -2431,10 +2432,6 @@ public:
     bool syncFromPeer(const std::string& host, int port, std::string& error) {
         std::lock_guard<std::mutex> sync_lock(g_peer_sync_mutex);
         last_peer_sync_advanced_ = false;
-        primechain::node::SequentialNode local(store_path_);
-        if (!local.load(error)) {
-            return false;
-        }
 
         const auto peer_status = requestPeerStatus(host, port, error);
         if (!peer_status.has_value()) {
@@ -2444,75 +2441,84 @@ public:
             return true;
         }
 
-        const primechain::PrimeValue local_frontier =
+        std::lock_guard<std::mutex> chain_lock(g_chain_store_mutex);
+        primechain::node::SequentialNode local(store_path_);
+        if (!local.load(error)) {
+            return false;
+        }
+
+        primechain::PrimeValue local_frontier =
             local.status().has_genesis ? local.status().frontier_integer : 0;
         if (peer_status->frontier_integer <= local_frontier) {
             return true;
         }
 
-        const primechain::PrimeValue start =
-            local.status().has_genesis ? local.status().frontier_integer + 1 : 2;
-        const std::uint64_t sync_id = ++g_peer_sync_counter;
-        const std::string temp_path = store_path_ + ".sync." + std::to_string(getpid()) +
-            "." + std::to_string(sync_id);
-        removeStoreTempArtifacts(temp_path);
-        if (!copyFileOrCreateEmpty(store_path_, temp_path, error)) {
-            removeStoreTempArtifacts(temp_path);
-            return false;
-        }
-        copyReplaySnapshotIfPresent(store_path_, temp_path);
+        primechain::node::SequentialNode reloaded(store_path_);
+        while (local_frontier < peer_status->frontier_integer) {
+            const primechain::PrimeValue start = local_frontier == 0 ? 2 : local_frontier + 1;
+            const primechain::PrimeValue chunk_end = std::min(
+                peer_status->frontier_integer,
+                static_cast<primechain::PrimeValue>(start + kMaxRecordRangeCount - 1));
 
-        primechain::storage::RecordStore temp_store(temp_path);
-        if (!downloadRecordRange(host, port, start, peer_status->frontier_integer, temp_store, error)) {
-            removeStoreTempArtifacts(temp_path);
-            return false;
-        }
-
-        primechain::node::SequentialNode reloaded(temp_path);
-        if (!reloaded.load(error)) {
-            removeStoreTempArtifacts(temp_path);
-            return false;
-        }
-        if (!reloaded.status().has_genesis ||
-            reloaded.status().frontier_integer != peer_status->frontier_integer) {
-            error = "auto-sync replay frontier mismatch";
-            removeStoreTempArtifacts(temp_path);
-            return false;
-        }
-        if (quorumEnabled()) {
-            std::vector<primechain::Address> anchored;
-            if (!loadGenesisValidatorSet(temp_path, anchored, error) ||
-                anchored != genesis_validator_set_) {
-                if (error.empty()) error = "peer genesis validator set differs from configured validator set";
-                removeStoreTempArtifacts(temp_path);
+            std::uint64_t rollback_size = 0;
+            if (!currentFileSize(store_path_, rollback_size, error)) {
                 return false;
             }
-        }
 
-        primechain::node::SequentialNode current(store_path_);
-        if (!current.load(error)) {
-            removeStoreTempArtifacts(temp_path);
-            return false;
-        }
-        if (current.status().has_genesis != local.status().has_genesis ||
-            current.status().frontier_integer != local.status().frontier_integer ||
-            current.status().latest_record_hash != local.status().latest_record_hash) {
-            if (current.status().has_genesis &&
-                current.status().frontier_integer >= peer_status->frontier_integer) {
-                removeStoreTempArtifacts(temp_path);
-                return true;
+            if (!downloadRecordRange(host, port, start, chunk_end, store_, error)) {
+                return false;
             }
-            error = "local store changed during peer sync";
-            removeStoreTempArtifacts(temp_path);
-            return false;
+
+            error.clear();
+            reloaded = primechain::node::SequentialNode(store_path_);
+            if (!reloaded.load(error)) {
+                std::string rollback_error;
+                if (!rollbackRecordStore(store_path_, rollback_size, rollback_error)) {
+                    error = "downloaded store did not replay: " + error + "; " + rollback_error;
+                } else {
+                    error = "downloaded store did not replay: " + error;
+                }
+                return false;
+            }
+            if (!reloaded.status().has_genesis ||
+                reloaded.status().frontier_integer != chunk_end) {
+                std::string rollback_error;
+                if (!rollbackRecordStore(store_path_, rollback_size, rollback_error)) {
+                    error = "auto-sync replay frontier mismatch; " + rollback_error;
+                } else {
+                    error = "auto-sync replay frontier mismatch";
+                }
+                return false;
+            }
+            if (chunk_end == peer_status->frontier_integer &&
+                reloaded.status().latest_record_hash != peer_status->latest_record_hash) {
+                std::string rollback_error;
+                if (!rollbackRecordStore(store_path_, rollback_size, rollback_error)) {
+                    error = "auto-sync replay hash mismatch; " + rollback_error;
+                } else {
+                    error = "auto-sync replay hash mismatch";
+                }
+                return false;
+            }
+            if (quorumEnabled()) {
+                std::vector<primechain::Address> anchored;
+                if (!loadGenesisValidatorSet(store_path_, anchored, error) ||
+                    anchored != genesis_validator_set_) {
+                    std::string rollback_error;
+                    rollbackRecordStore(store_path_, rollback_size, rollback_error);
+                    if (error.empty()) error = "peer genesis validator set differs from configured validator set";
+                    if (!rollback_error.empty()) error += "; " + rollback_error;
+                    return false;
+                }
+            }
+
+            last_peer_sync_advanced_ = true;
+            local_frontier = reloaded.status().frontier_integer;
         }
 
-        if (!store_.installValidatedStore(temp_path, error)) {
-            removeStoreTempArtifacts(temp_path);
-            return false;
+        if (!last_peer_sync_advanced_) {
+            return true;
         }
-        removeStoreTempArtifacts(temp_path);
-        last_peer_sync_advanced_ = true;
         validator_set_ = reloaded.validatorSet();
         if (use_chain_endpoints_) {
             loadChainEndpointPeers();
@@ -2528,7 +2534,6 @@ public:
                 std::cerr << "status cache refresh warning: " << cache_error << "\n";
             }
         }
-        removeStoreTempArtifacts(temp_path);
         return true;
     }
 
@@ -3737,6 +3742,7 @@ private:
             return;
         }
 
+        std::lock_guard<std::mutex> chain_lock(g_chain_store_mutex);
         std::string error;
         primechain::node::SequentialNode node(store_path_);
         if (!node.load(error)) {
