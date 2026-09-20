@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
@@ -521,6 +522,7 @@ std::optional<std::string> readLine(int fd) {
 
 bool isWriteCommand(const std::string& line) {
     return line.rfind("ADD_PEER ", 0) == 0 ||
+           line.rfind("SET_MAINTENANCE_MODE ", 0) == 0 ||
            line.rfind("SUBMIT_TX ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_COMMIT_PEER ", 0) == 0 ||
@@ -545,6 +547,23 @@ bool isWriteCommand(const std::string& line) {
            line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_SIGNED_PRIME_PEER ", 0) == 0 ||
+           line.rfind("SUBMIT_PRIME ", 0) == 0 ||
+           line.rfind("SUBMIT_RECORD ", 0) == 0 ||
+           line.rfind("ACK_MEMPOOL ", 0) == 0 ||
+           line.rfind("ADVANCE_TO ", 0) == 0;
+}
+
+bool isMaintenanceBlockedCommand(const std::string& line) {
+    return line.rfind("SUBMIT_TX ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_COMMIT ", 0) == 0 ||
+           line.rfind("SUBMIT_COMMIT ", 0) == 0 ||
+           line.rfind("CLOSE_COMMIT_PHASE ", 0) == 0 ||
+           line.rfind("SIGN_RECORD_CANDIDATE ", 0) == 0 ||
+           line.rfind("SIGN_COMPOSITE_LOTTERY ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_REVEAL ", 0) == 0 ||
+           line.rfind("SUBMIT_COMPOSITE_REVEAL ", 0) == 0 ||
+           line.rfind("SUBMIT_COMPOSITE ", 0) == 0 ||
+           line.rfind("SUBMIT_SIGNED_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_PRIME ", 0) == 0 ||
            line.rfind("SUBMIT_RECORD ", 0) == 0 ||
            line.rfind("ACK_MEMPOOL ", 0) == 0 ||
@@ -2114,6 +2133,35 @@ public:
         return true;
     }
 
+    bool maintenanceModeEnabled() const {
+        return maintenance_mode_.load(std::memory_order_relaxed);
+    }
+
+    void sendMaintenanceMode(int fd) const {
+        writeAll(fd, std::string("MAINTENANCE_MODE ") +
+            (maintenanceModeEnabled() ? "1" : "0") + "\n");
+    }
+
+    void setMaintenanceModeCommand(int fd, const std::string& line) {
+        std::istringstream in(line);
+        std::string command;
+        int enabled = -1;
+        std::string extra;
+        in >> command >> enabled;
+        if (!in || command != "SET_MAINTENANCE_MODE" || (enabled != 0 && enabled != 1) || (in >> extra)) {
+            writeAll(fd, "ERROR invalid SET_MAINTENANCE_MODE; expected SET_MAINTENANCE_MODE 0|1\n");
+            return;
+        }
+        maintenance_mode_.store(enabled == 1, std::memory_order_relaxed);
+        sendMaintenanceMode(fd);
+    }
+
+    bool rejectMaintenanceBlockedCommand(int fd, const std::string& line) const {
+        if (!maintenanceModeEnabled() || !isMaintenanceBlockedCommand(line)) return false;
+        writeAll(fd, "ERROR validator maintenance mode: mining and transaction submissions temporarily paused\n");
+        return true;
+    }
+
     void handleClient(
         int fd,
         std::uint32_t client_ip,
@@ -2159,6 +2207,18 @@ public:
             if (*line == "GET_STATUS") {
                 sendStatus(fd);
                 if (sync_listener) return;
+                continue;
+            }
+            if (*line == "GET_MAINTENANCE_MODE") {
+                sendMaintenanceMode(fd);
+                continue;
+            }
+            if (line->rfind("SET_MAINTENANCE_MODE ", 0) == 0) {
+                if (rejectRemoteAdmin(fd, client_ip, client_loopback)) continue;
+                setMaintenanceModeCommand(fd, *line);
+                continue;
+            }
+            if (rejectMaintenanceBlockedCommand(fd, *line)) {
                 continue;
             }
             if (*line == "GET_VERSION") {
@@ -8234,6 +8294,7 @@ private:
     std::optional<primechain::wallet::MinerIdentity> validator_identity_;
     bool use_chain_endpoints_{false};
     bool allow_remote_admin_{false};
+    std::atomic<bool> maintenance_mode_{false};
     mutable std::mutex status_cache_mutex_;
     CachedStatusLine status_cache_;
     mutable std::mutex mempool_mutex_;
