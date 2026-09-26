@@ -19,6 +19,7 @@ struct ReplaySnapshot {
     std::map<Address, std::uint64_t> account_nonces;
     std::vector<Address> pending_composite_providers;
     std::vector<Address> validator_set;
+    std::map<std::uint64_t, std::vector<Address>> validator_sets_by_epoch;
     std::uint64_t validator_epoch{0};
     std::uint64_t transfer_fee_micro_units{1};
     std::uint64_t validator_min_reserve_micro_units{5'000'000};

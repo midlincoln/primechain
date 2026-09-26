@@ -14,7 +14,7 @@ namespace primechain::storage {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3150414e53434350ull; // "PCCSNAP1"
-constexpr std::uint64_t kVersion = 5;
+constexpr std::uint64_t kVersion = 6;
 constexpr std::uint64_t kMaxEntries = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxAddressBytes = 64ull * 1024ull;
 constexpr std::uint64_t kMaxSnapshotBytes = 512ull * 1024ull * 1024ull;
@@ -79,6 +79,12 @@ std::vector<std::uint8_t> encode(const ReplaySnapshot& value) {
     for (const auto& address : value.pending_composite_providers) putAddress(out, address);
     put64(out, value.validator_set.size());
     for (const auto& address : value.validator_set) putAddress(out, address);
+    put64(out, value.validator_sets_by_epoch.size());
+    for (const auto& item : value.validator_sets_by_epoch) {
+        put64(out, item.first);
+        put64(out, item.second.size());
+        for (const auto& address : item.second) putAddress(out, address);
+    }
     put64(out, value.validator_epoch);
     put64(out, value.transfer_fee_micro_units);
     put64(out, value.validator_min_reserve_micro_units);
@@ -151,6 +157,26 @@ bool decode(const std::string& path, ReplaySnapshot& result, std::string& error)
         Address address;
         if (!reader.address(address)) { error = "invalid replay snapshot validator"; return false; }
         value.validator_set.push_back(std::move(address));
+    }
+    if (version >= 6) {
+        if (!reader.count(count) || count > 1024) {
+            error = "invalid replay snapshot validator epoch set count"; return false;
+        }
+        for (std::uint64_t i = 0; i < count; ++i) {
+            std::uint64_t epoch = 0, validator_count = 0;
+            if (!reader.u64(epoch) || !reader.count(validator_count) || validator_count > 16 ||
+                value.validator_sets_by_epoch.count(epoch) != 0) {
+                error = "invalid replay snapshot validator epoch set"; return false;
+            }
+            std::vector<Address> validators;
+            validators.reserve(static_cast<std::size_t>(validator_count));
+            for (std::uint64_t j = 0; j < validator_count; ++j) {
+                Address address;
+                if (!reader.address(address)) { error = "invalid replay snapshot validator epoch member"; return false; }
+                validators.push_back(std::move(address));
+            }
+            value.validator_sets_by_epoch.emplace(epoch, std::move(validators));
+        }
     }
     if (!reader.u64(value.validator_epoch)) {
         error = "invalid replay snapshot trailing data"; return false;

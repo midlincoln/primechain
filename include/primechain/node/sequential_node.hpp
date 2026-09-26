@@ -63,6 +63,7 @@ public:
     Address validatorRewardPoolAddress() const;
     std::vector<Address> feeDistributionRecipients() const;
     std::vector<Address> validatorRewardDistributionRecipients() const;
+    std::vector<Address> validatorRewardDistributionRecipientsForEpoch(std::uint64_t epoch) const;
     bool loadedFromSnapshot() const { return loaded_from_snapshot_; }
 
 private:
@@ -97,6 +98,7 @@ private:
     std::map<Address, std::uint64_t> account_nonces_;
     std::vector<Address> pending_composite_providers_;
     std::vector<Address> validator_set_;
+    std::map<std::uint64_t, std::vector<Address>> validator_sets_by_epoch_;
     std::uint64_t validator_epoch_{0};
     std::uint64_t transfer_fee_micro_units_{kDefaultTransferFeeMicroUnits};
     std::uint64_t validator_min_reserve_micro_units_{kDefaultValidatorMinReserveMicroUnits};
