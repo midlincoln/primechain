@@ -1249,14 +1249,20 @@ bool verifyCompositeLotteryProof(
     const std::vector<Address>& validator_set,
     std::string& error) {
     if (record.version < 10) return true;
+    const bool empty_lottery =
+        record.composite_lottery.round == 0 &&
+        record.composite_lottery.win_bps == 0 &&
+        isZeroHash(record.composite_lottery.subject_hash) &&
+        record.composite_lottery.assigned_validator.empty() &&
+        record.composite_lottery.public_key.empty() &&
+        record.composite_lottery.signature.empty();
+    if (record.integer >= kCompositeLotteryDisabledFromInteger) {
+        if (empty_lottery) return true;
+        error = "composite lottery must be empty after lottery disable activation";
+        return false;
+    }
     if (record.composite_lottery.round == 0) {
-        if (record.composite_lottery.win_bps == 0 &&
-            isZeroHash(record.composite_lottery.subject_hash) &&
-            record.composite_lottery.assigned_validator.empty() &&
-            record.composite_lottery.public_key.empty() &&
-            record.composite_lottery.signature.empty()) {
-            return true;
-        }
+        if (empty_lottery) return true;
         error = "composite lottery round must be positive";
         return false;
     }

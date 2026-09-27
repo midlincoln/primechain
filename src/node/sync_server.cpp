@@ -7322,6 +7322,9 @@ private:
         if (!compositeLotteryEnabled()) return true;
         record.version = std::max<std::uint64_t>(record.version, primechain::node::kCompositeLotteryRecordVersion);
         record.composite_lottery = {};
+        if (record.integer >= primechain::protocol::kCompositeLotteryDisabledFromInteger) {
+            return true;
+        }
         const auto assigned = primechain::protocol::assignedCompositeLotteryValidator(record, validator_set_, error);
         if (!assigned.has_value()) return false;
         if (localValidatorActive() && *assigned == validator_identity_->address) {

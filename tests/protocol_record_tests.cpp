@@ -418,6 +418,30 @@ int main() {
                 "v13 composite lottery assignment is stable across candidates")) {
         return 1;
     }
+    auto disabled_lottery = lottery_a;
+    disabled_lottery.integer = kCompositeLotteryDisabledFromInteger;
+    disabled_lottery.composite_lottery = {};
+    lottery_error.clear();
+    if (!expect(verifyCompositeLotteryProof(disabled_lottery, sorted_validators, lottery_error),
+                "empty composite lottery proof is valid after disable activation")) {
+        std::cerr << lottery_error << "\n";
+        return 1;
+    }
+    auto pre_disabled_lottery = disabled_lottery;
+    pre_disabled_lottery.integer = kCompositeLotteryDisabledFromInteger - 1;
+    lottery_error.clear();
+    if (!expect(verifyCompositeLotteryProof(pre_disabled_lottery, sorted_validators, lottery_error),
+                "empty composite lottery proof remains valid before disable activation")) {
+        std::cerr << lottery_error << "\n";
+        return 1;
+    }
+    auto non_empty_disabled_lottery = disabled_lottery;
+    non_empty_disabled_lottery.composite_lottery.round = 1;
+    lottery_error.clear();
+    if (!expect(!verifyCompositeLotteryProof(non_empty_disabled_lottery, sorted_validators, lottery_error),
+                "non-empty composite lottery proof is invalid after disable activation")) {
+        return 1;
+    }
     const auto signed_hash = candidateRecordHash(signed_record);
     for (std::size_t i = 0; i < 2; ++i) {
         const auto index = order[i];
