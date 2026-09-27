@@ -20,6 +20,7 @@ namespace {
 constexpr std::uint64_t kFeePoolDistributionTxVersion = 3;
 constexpr std::uint64_t kValidatorReserveLockTxVersion = 4;
 constexpr std::uint64_t kValidatorRewardPoolDistributionTxVersion = 5;
+constexpr std::uint64_t kValidatorReserveUnlockTxVersion = 8;
 constexpr PrimeValue kFullValidatorRewardDistributionEffectiveInteger = 26488;
 
 bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
@@ -28,6 +29,11 @@ bool isAuthenticatedTransferV1(const protocol::TransactionV0& tx) {
 
 bool isValidatorReserveLockV1(const protocol::TransactionV0& tx) {
     return tx.version == kValidatorReserveLockTxVersion &&
+           crypto::isProtocolSignatureAddress(tx.sender_address);
+}
+
+bool isValidatorReserveUnlockV1(const protocol::TransactionV0& tx) {
+    return tx.version == kValidatorReserveUnlockTxVersion &&
            crypto::isProtocolSignatureAddress(tx.sender_address);
 }
 
@@ -139,6 +145,34 @@ bool validateValidatorReserveLockShape(
     if (tx.fee.amount.denominator != 1 ||
         tx.fee.amount.numerator != transfer_fee_micro_units) {
         error = "validator reserve lock fee must equal active protocol fee";
+        return false;
+    }
+    return true;
+}
+
+bool validateValidatorReserveUnlockShape(
+    const protocol::TransactionV0& tx,
+    const std::vector<Address>& active_validators,
+    std::uint64_t transfer_fee_micro_units,
+    std::string& error) {
+    if (!isValidatorReserveUnlockV1(tx)) return true;
+    if (std::find(active_validators.begin(), active_validators.end(), tx.sender_address) != active_validators.end()) {
+        error = "active validator reserve cannot be unlocked";
+        return false;
+    }
+    if (tx.inputs.size() != 1 || tx.outputs.size() != 1) {
+        error = "validator reserve unlock requires one input and one output";
+        return false;
+    }
+    const auto& input = tx.inputs.front();
+    const auto& output = tx.outputs.front();
+    if (input.prime != output.prime || tx.fee.prime != input.prime) {
+        error = "validator reserve unlock fee must use the unlocked prime asset";
+        return false;
+    }
+    if (tx.fee.amount.denominator != 1 ||
+        tx.fee.amount.numerator != transfer_fee_micro_units) {
+        error = "validator reserve unlock fee must equal active protocol fee";
         return false;
     }
     return true;
@@ -389,8 +423,10 @@ bool validateTransactionSignature(
         return true;
     }
     if (crypto::isProtocolSignatureAddress(tx.sender_address)) {
-        if (tx.version != 2 && tx.version != kValidatorReserveLockTxVersion) {
-            error = "authenticated transaction requires version 2 or validator reserve-lock version 4";
+        if (tx.version != 2 &&
+            tx.version != kValidatorReserveLockTxVersion &&
+            tx.version != kValidatorReserveUnlockTxVersion) {
+            error = "authenticated transaction requires version 2, validator reserve-lock version 4, or validator reserve-unlock version 8";
             return false;
         }
         return protocol::verifyAuthenticatedTransactionSignature(tx, error);
@@ -1387,7 +1423,8 @@ bool SequentialNode::applyTransactions(
             return false;
         }
         if (!validateAuthenticatedTransferShape(tx, transfer_fee_micro_units_, error) ||
-            !validateValidatorReserveLockShape(tx, transfer_fee_micro_units_, error)) {
+            !validateValidatorReserveLockShape(tx, transfer_fee_micro_units_, error) ||
+            !validateValidatorReserveUnlockShape(tx, validator_set_, transfer_fee_micro_units_, error)) {
             return false;
         }
         const auto expected_nonce = accountNonce(tx.sender_address) + 1;
@@ -1441,8 +1478,11 @@ bool SequentialNode::applyTransactions(
             return false;
         }
 
+        const auto debit_address = isValidatorReserveUnlockV1(tx)
+            ? protocol::validatorReserveAddress(tx.sender_address)
+            : tx.sender_address;
         for (const auto& debit_entry : debits) {
-            if (!debit(tx.sender_address, debit_entry.first, debit_entry.second, error)) {
+            if (!debit(debit_address, debit_entry.first, debit_entry.second, error)) {
                 return false;
             }
         }

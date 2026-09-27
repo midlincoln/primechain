@@ -313,6 +313,42 @@ std::optional<primechain::protocol::TransactionV0> makeValidatorReserveLockTrans
     return tx;
 }
 
+std::optional<primechain::protocol::TransactionV0> makeValidatorReserveUnlockTransaction(
+    const primechain::wallet::MinerIdentity& validator,
+    const primechain::Address& receiver_address,
+    primechain::PrimeValue prime,
+    std::uint64_t amount,
+    std::uint64_t fee,
+    std::uint64_t nonce,
+    std::string& error) {
+    if (!primechain::protocol::isProtocolAddress(receiver_address) ||
+        prime < 2 || amount == 0) {
+        error = "invalid validator reserve-unlock arguments";
+        return std::nullopt;
+    }
+    if (fee > std::numeric_limits<std::uint64_t>::max() - amount) {
+        error = "amount plus fee overflows micro-units";
+        return std::nullopt;
+    }
+
+    primechain::protocol::TransactionV0 tx;
+    tx.version = 8;
+    tx.inputs.push_back({prime, {amount + fee, 1}});
+    tx.outputs.push_back({prime, {amount, 1}, receiver_address});
+    tx.fee = {prime, {fee, 1}};
+    tx.nonce = nonce;
+    tx.sender_address = validator.address;
+    tx.sender_public_key = validator.public_key;
+    const auto signature = primechain::crypto::signProtocolMessage(
+        validator.private_key,
+        primechain::crypto::transactionSigningPayload(
+            primechain::protocol::serializeTransaction(tx, false)),
+        error);
+    if (!signature.has_value()) return std::nullopt;
+    tx.signature = *signature;
+    return tx;
+}
+
 std::optional<primechain::protocol::TransactionV0> makeValidatorPoolDistributionTransaction(
     std::uint64_t version,
     const primechain::Address& pool_address,
@@ -401,6 +437,7 @@ void printUsage(const char* argv0) {
               << "  " << argv0 << " distribute-fee-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
               << "  " << argv0 << " distribute-validator-reward-pool <host> <port> <epoch> <prime> <amount> <nonce> <validator-address>...\n"
               << "  " << argv0 << " reserve-lock <host> <port> <reserve.wallet> <validator-address> <prime> <amount> <fee> <nonce>\n"
+              << "  " << argv0 << " reserve-unlock <host> <port> <validator.wallet> <receiver-address> <prime> <amount> <fee> <nonce>\n"
               << "example:\n"
               << "  " << argv0 << " 20 ./data/tx.log ./data/tx.dat ./wallets/miner.wallet pcdev1_alice 3 250000 4\n"
               << "  " << argv0 << " submit 127.0.0.1 18889 ./wallets/sender-mldsa65.wallet pcpq1_receiver 3 250000 1 1\n";
@@ -504,6 +541,39 @@ int main(int argc, char** argv) {
             static_cast<primechain::PrimeValue>(*prime), *amount, *nonce, std::move(validators), error);
         if (!tx.has_value()) {
             std::cerr << "could not build validator reward-pool distribution transaction: " << error << "\n";
+            return 1;
+        }
+        return submitTransaction(host, *port, *tx) ? 0 : 1;
+    }
+
+    if (argc > 1 && std::string(argv[1]) == "reserve-unlock") {
+        if (argc != 10) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        const std::string host = argv[2];
+        const auto port = parsePortArg(argv[3]);
+        const std::string validator_wallet_path = argv[4];
+        const primechain::Address receiver_address = argv[5];
+        const auto prime = parseUint64Arg(argv[6], "prime");
+        const auto amount = parseUint64Arg(argv[7], "amount");
+        const auto fee = parseUint64Arg(argv[8], "fee");
+        const auto nonce = parseUint64Arg(argv[9], "nonce");
+        if (!port.has_value() || !prime.has_value() || !amount.has_value() ||
+            !fee.has_value() || !nonce.has_value()) {
+            return 1;
+        }
+
+        primechain::wallet::MinerIdentity validator;
+        std::string error;
+        if (!primechain::wallet::loadMinerIdentity(validator_wallet_path, validator, error)) {
+            std::cerr << "could not load validator wallet: " << error << "\n";
+            return 1;
+        }
+        const auto tx = makeValidatorReserveUnlockTransaction(
+            validator, receiver_address, static_cast<primechain::PrimeValue>(*prime), *amount, *fee, *nonce, error);
+        if (!tx.has_value()) {
+            std::cerr << "could not sign validator reserve-unlock transaction: " << error << "\n";
             return 1;
         }
         return submitTransaction(host, *port, *tx) ? 0 : 1;
