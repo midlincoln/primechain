@@ -8772,7 +8772,9 @@ int main(int argc, char** argv) {
             closeAcceptedSocket(client_fd);
             return;
         }
-        if (!client_loopback) {
+        const bool validator_peer_bypass_limits =
+            accept_role == ListenerRole::ValidatorPeer && client_known_peer;
+        if (!client_loopback && !validator_peer_bypass_limits) {
             std::lock_guard<std::mutex> lock(g_client_connection_mutex);
             auto* active_map = &g_active_remote_connections;
             std::size_t per_ip_limit = trusted_client
@@ -8814,14 +8816,14 @@ int main(int argc, char** argv) {
         const ListenerRole listener_role = !peer_server.has_value() && accept_role == ListenerRole::PublicClient
             ? ListenerRole::ValidatorPeer
             : accept_role;
-        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role]() mutable {
+        std::thread([&sync_server, client = std::move(client), client_ip, client_loopback, trusted_client, listener_role, validator_peer_bypass_limits]() mutable {
             const int timeout_ms = listener_role == ListenerRole::PublicClient
                 ? kPublicClientReadTimeoutMs
                 : (listener_role == ListenerRole::PublicSync ? kPublicSyncReadTimeoutMs : kPeerReadTimeoutMs);
             setSocketTimeouts(client.fd(), timeout_ms);
             sync_server.handleClient(client.fd(), client_ip, client_loopback, trusted_client, listener_role);
             shutdown(client.fd(), SHUT_RDWR);
-            if (!client_loopback) {
+            if (!client_loopback && !validator_peer_bypass_limits) {
                 std::lock_guard<std::mutex> lock(g_client_connection_mutex);
                 auto& active_map = (!trusted_client && listener_role == ListenerRole::PublicSync)
                     ? g_active_public_sync_connections
