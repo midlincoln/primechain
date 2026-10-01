@@ -1950,6 +1950,7 @@ public:
         std::string bind_address,
         int listen_port,
         std::vector<PeerEndpoint> peers,
+        std::vector<PeerEndpoint> validator_peers,
         bool advance_enabled,
         bool ack_mempool_enabled,
         bool factorization_helper_enabled,
@@ -1987,6 +1988,14 @@ public:
         for (const auto& peer : peers) {
             addPeer(peer);
         }
+        // A --validator-peer is also a normal sync peer (so existing peer
+        // sync/discovery keeps working for it), but it is additionally
+        // recorded in validator_peers_ -- see that member's comment for why
+        // this narrower list, not peers_, backs the connection-limit bypass.
+        for (const auto& peer : validator_peers) {
+            addPeer(peer);
+        }
+        validator_peers_ = std::move(validator_peers);
         if (!peers.empty()) {
             std::string persist_error;
             if (!persistPeerState(persist_error)) {
@@ -2746,6 +2755,23 @@ public:
 
     bool isKnownPeerClient(std::uint32_t client_ip) const {
         for (const auto& peer : peers_) {
+            const auto key = peerIpKey(peer.host);
+            if (key.has_value() && *key == client_ip) return true;
+        }
+        return false;
+    }
+
+    bool hasConfiguredValidatorPeers() const {
+        return !validator_peers_.empty();
+    }
+
+    // Narrower sibling of isKnownPeerClient(): only true for an IP the
+    // operator explicitly listed with --validator-peer, not any IP that ever
+    // showed up in general gossip. See validator_peers_'s declaration for why
+    // this is the set the connection-limit bypass should check once an
+    // operator has opted into it.
+    bool isConfiguredValidatorPeer(std::uint32_t client_ip) const {
+        for (const auto& peer : validator_peers_) {
             const auto key = peerIpKey(peer.host);
             if (key.has_value() && *key == client_ip) return true;
         }
@@ -8279,6 +8305,14 @@ private:
     std::string bind_address_;
     int listen_port_{0};
     std::vector<PeerEndpoint> peers_;
+    // Explicitly operator-configured validator peers (via --validator-peer),
+    // kept separate from the general gossip-grown peers_ list above. Unlike
+    // peers_ -- which any peer can get added to just by connecting or being
+    // gossiped about, and which never shrinks when a validator is replaced
+    // on-chain -- this list only ever contains what the operator put here at
+    // startup, so it is the right (narrower) source of truth for deciding
+    // which source IPs get the validator connection-limit bypass below.
+    std::vector<PeerEndpoint> validator_peers_;
     std::map<std::string, PeerRuntimeState> peer_state_;
     bool advance_enabled_{false};
     bool ack_mempool_enabled_{false};
@@ -8342,6 +8376,7 @@ struct Options {
     std::string sync_bind_address{"0.0.0.0"};
     std::string store_path{kDefaultStorePath};
     std::vector<PeerEndpoint> peers;
+    std::vector<PeerEndpoint> validator_peers;
     int sync_interval_seconds{0};
     bool enable_advance{false};
     bool enable_ack_mempool{false};
@@ -8417,6 +8452,16 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.peers.push_back(peer);
             continue;
         }
+        if (flag == "--validator-peer") {
+            if (index + 1 >= argc) {
+                return std::nullopt;
+            }
+            PeerEndpoint peer;
+            peer.host = argv[index++];
+            peer.port = std::stoi(argv[index++]);
+            options.validator_peers.push_back(peer);
+            continue;
+        }
         if (flag == "--sync-interval") {
             if (index >= argc) {
                 return std::nullopt;
@@ -8487,11 +8532,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer-port port] [--peer-bind address] [--sync-port port] [--sync-bind address] [--peer host port] [--bootstrap-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--composite-lottery-window-ms ms] [--composite-lottery-win-bps bps] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
+    std::cerr << "usage: " << argv0 << " [port] [record_store_path] [--bind address] [--peer-port port] [--peer-bind address] [--sync-port port] [--sync-bind address] [--peer host port] [--bootstrap-peer host port] [--validator-peer host port] [--sync-interval seconds] [--enable-advance] [--enable-ack-mempool] [--enable-factorization-helper] [--finalization-timeout-ms ms] [--composite-lottery-window-ms ms] [--composite-lottery-win-bps bps] [--validator-set addr1 addr2 addr3 | --genesis-validator-set addr1 addr2 addr3] [--validator-identity file] [--use-chain-endpoints] [--allow-remote-admin]\n"
               << "       " << argv0 << " --version\n"
               << "example:\n"
               << "  " << argv0 << " 18889 ./data/sequential-500.dat\n"
               << "  " << argv0 << " 18890 ./data/node-b.dat --peer 127.0.0.1 18889 --sync-interval 5\n"
+              << "  " << argv0 << " 18889 ./data/validator-a.dat --validator-set $a $b $c --validator-identity ./wallets/validator-a.wallet --validator-peer 1.2.3.4 8339 --validator-peer 5.6.7.8 8339\n"
               << "  " << argv0 << " 18889 ./data/public-node.dat --bind 0.0.0.0\n"
               << "  " << argv0 << " 18889 ./data/dev-node.dat --enable-advance --enable-ack-mempool --enable-factorization-helper\n";
 }
@@ -8577,6 +8623,7 @@ int main(int argc, char** argv) {
         options.bind_address,
         options.port,
         options.peers,
+        options.validator_peers,
         options.enable_advance,
         options.enable_ack_mempool,
         options.enable_factorization_helper,
@@ -8772,8 +8819,18 @@ int main(int argc, char** argv) {
             closeAcceptedSocket(client_fd);
             return;
         }
+        // Prefer the narrow, explicitly operator-configured validator-peer
+        // list when the operator has set one up with --validator-peer: it
+        // can't be grown by gossip the way the general known-peers cache can,
+        // and it doesn't keep trusting an IP after that validator is replaced
+        // on-chain (the operator drops the flag instead). Fall back to the
+        // old known-peer check only when no --validator-peer was configured,
+        // so existing deployments keep today's behavior unchanged.
         const bool validator_peer_bypass_limits =
-            accept_role == ListenerRole::ValidatorPeer && client_known_peer;
+            accept_role == ListenerRole::ValidatorPeer &&
+            (sync_server.hasConfiguredValidatorPeers()
+                 ? sync_server.isConfiguredValidatorPeer(client_ip)
+                 : client_known_peer);
         if (!client_loopback && !validator_peer_bypass_limits) {
             std::lock_guard<std::mutex> lock(g_client_connection_mutex);
             auto* active_map = &g_active_remote_connections;
