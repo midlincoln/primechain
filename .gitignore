@@ -1,4 +1,6 @@
 build/
+build-fuzz/
+fuzz/corpus/
 *.o
 *.a
 *.so
