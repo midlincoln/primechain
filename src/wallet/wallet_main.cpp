@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include "primechain/crypto/hash.hpp"
 #include "primechain/node/sequential_node.hpp"
 #include "primechain/wallet/miner_identity.hpp"
@@ -83,7 +85,15 @@ bool saveWallet(const std::string& path, const DevWallet& wallet) {
     out << "address=" << wallet.address << "\n";
     out << "private_key=" << bytesToHex(wallet.private_key) << "\n";
     out << "public_key=" << bytesToHex(wallet.public_key) << "\n";
-    return static_cast<bool>(out);
+    if (!out) {
+        return false;
+    }
+    // This file holds a plaintext private key (no passphrase/encryption at
+    // this wallet format's version), so restrict it to the owner the moment
+    // it's written -- otherwise it's left at the process's umask, which on
+    // most systems is group/world-readable.
+    chmod(path.c_str(), S_IRUSR | S_IWUSR);
+    return true;
 }
 
 bool loadWallet(const std::string& path, DevWallet& wallet) {
