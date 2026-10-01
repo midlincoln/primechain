@@ -345,6 +345,11 @@ bool writeCommand(int fd, std::string command) {
         writeAll(fd, command);
 }
 
+// Matches the FRAME payload cap below -- a line this long with no '\n' is
+// never a legitimate (non-framed) response, so stop reading rather than
+// growing `line` without bound against a peer that just keeps sending bytes.
+constexpr std::size_t kMaxRawLineLength = 1024 * 1024;
+
 std::optional<std::string> readRawLine(int fd) {
     std::string line;
     char ch = '\0';
@@ -360,6 +365,10 @@ std::optional<std::string> readRawLine(int fd) {
         if (ch == '\n') {
             return line;
         }
+        if (line.size() >= kMaxRawLineLength) {
+            if (g_verboseNetwork) std::cerr << "node response line exceeded max length; dropping\n";
+            return std::nullopt;
+        }
         line.push_back(ch);
     }
 }
@@ -372,7 +381,7 @@ std::optional<std::string> readLine(int fd) {
     std::string tag, extra;
     std::size_t size = 0;
     in >> tag >> size;
-    if (!in || tag != "FRAME" || size == 0 || size > 1024 * 1024 || (in >> extra)) {
+    if (!in || tag != "FRAME" || size == 0 || size > kMaxRawLineLength || (in >> extra)) {
         return std::nullopt;
     }
     std::string payload(size, '\0');
