@@ -633,6 +633,27 @@ std::optional<primechain::Hash256> parseHash(const std::string& hex) {
     return hash;
 }
 
+// Non-throwing counterpart to std::stoull for parsing an attacker-supplied
+// round number out of the network protocol: std::stoull throws on
+// non-numeric or out-of-range text, and nothing in this file catches
+// exceptions, so an uncaught throw here would terminate the whole process.
+std::optional<std::uint64_t> parseUint64Strict(const std::string& value) {
+    if (value.empty() || !std::all_of(value.begin(), value.end(),
+            [](unsigned char c) { return std::isdigit(c); })) {
+        return std::nullopt;
+    }
+    try {
+        std::size_t consumed = 0;
+        const auto parsed = std::stoull(value, &consumed);
+        if (consumed != value.size()) {
+            return std::nullopt;
+        }
+        return parsed;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 std::optional<primechain::storage::StoredRecordKind> parseKind(const std::string& value) {
     if (value == "COMPOSITE") {
         return primechain::storage::StoredRecordKind::Composite;
@@ -1437,16 +1458,19 @@ std::vector<primechain::storage::CommitPhaseVote> requestPhaseVotes(
         primechain::storage::CommitPhaseVote vote;
         in >> entry_tag >> vote.integer >> maybe_round_or_snapshot;
         auto snapshot = parseHash(maybe_round_or_snapshot);
+        bool valid_round = true;
         if (snapshot.has_value()) {
             snapshot_hex = maybe_round_or_snapshot;
             vote.commit_round = 1;
             in >> vote.validator_address >> public_key_hex >> signature_hex;
         } else {
-            vote.commit_round = std::stoull(maybe_round_or_snapshot);
+            const auto parsed_round = parseUint64Strict(maybe_round_or_snapshot);
+            valid_round = parsed_round.has_value();
+            vote.commit_round = parsed_round.value_or(0);
             in >> snapshot_hex >> vote.validator_address >> public_key_hex >> signature_hex;
             snapshot = parseHash(snapshot_hex);
         }
-        if (!in || entry_tag != "PHASE_VOTE" || vote.integer != integer ||
+        if (!in || !valid_round || entry_tag != "PHASE_VOTE" || vote.integer != integer ||
             !snapshot.has_value() || (in >> extra)) {
             error = "invalid peer phase vote entry";
             return {};
@@ -5764,11 +5788,14 @@ private:
         in >> command >> integer >> maybe_round_or_snapshot;
         auto snapshot = parseHash(maybe_round_or_snapshot);
         std::uint64_t commit_round = activeCommitPhaseRound(integer);
+        bool valid_round = true;
         if (snapshot.has_value()) {
             snapshot_hex = maybe_round_or_snapshot;
             in >> address >> public_key_hex >> signature_hex;
         } else {
-            commit_round = std::stoull(maybe_round_or_snapshot);
+            const auto parsed_round = parseUint64Strict(maybe_round_or_snapshot);
+            valid_round = parsed_round.has_value();
+            commit_round = parsed_round.value_or(0);
             in >> snapshot_hex >> address >> public_key_hex >> signature_hex;
             snapshot = parseHash(snapshot_hex);
         }
@@ -5777,7 +5804,7 @@ private:
         if (bundled_command) {
             in >> bundled_commitment_count;
         }
-        if (!in || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER" &&
+        if (!in || !valid_round || (command != "SUBMIT_PHASE_VOTE" && command != "SUBMIT_PHASE_VOTE_PEER" &&
                 !bundled_command) ||
             !snapshot.has_value() || bundled_commitment_count > kMaxCompositeCommitments ||
             (in >> extra)) {
